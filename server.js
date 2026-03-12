@@ -13,12 +13,15 @@ const SAY_OPTIONS = {
   language: "en-CA"
 };
 
-// Store state for each live call
+// Per-call session storage
 const callSessions = new Map();
 
-// Weather cache: one forecast per rounded location for 10 minutes
+// Super-cache storage
 const forecastCache = new Map();
-const FORECAST_CACHE_MS = 10 * 60 * 1000;
+const inFlightForecasts = new Map();
+
+const FORECAST_CACHE_MS = 10 * 60 * 1000; // 10 minutes fresh
+const STALE_FORECAST_MS = 60 * 60 * 1000; // up to 1 hour stale fallback
 
 const CUSTOM_POSTAL_ALIASES = {
   "428427": "H2V4B7"
@@ -539,28 +542,72 @@ async function resolveLocation(input) {
   return null;
 }
 
+function normalizePlaceName(name) {
+  return String(name || "")
+    .toUpperCase()
+    .replace(/,\s*CANADA/g, "")
+    .replace(/[^A-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
 function cacheKeyForLocation(location) {
-  return `${Number(location.latitude).toFixed(3)},${Number(location.longitude).toFixed(3)}`;
+  const place = normalizePlaceName(location.name);
+  if (place) return place;
+  return `${Number(location.latitude).toFixed(2)},${Number(location.longitude).toFixed(2)}`;
 }
 
 function pruneForecastCache() {
   const now = Date.now();
+
   for (const [key, value] of forecastCache.entries()) {
-    if (!value || (now - value.timestamp) > FORECAST_CACHE_MS) {
+    if (!value || (now - value.timestamp) > STALE_FORECAST_MS) {
       forecastCache.delete(key);
     }
   }
 }
 
-async function fetchForecast(location) {
-  pruneForecastCache();
-
+function getCachedForecast(location, { allowStale = false } = {}) {
   const key = cacheKeyForLocation(location);
   const cached = forecastCache.get(key);
 
-  if (cached && (Date.now() - cached.timestamp) < FORECAST_CACHE_MS) {
-    console.log("Using cached forecast for", key);
+  if (!cached) return null;
+
+  const age = Date.now() - cached.timestamp;
+
+  if (age <= FORECAST_CACHE_MS) {
+    return { data: cached.data, isStale: false, key, age };
+  }
+
+  if (allowStale && age <= STALE_FORECAST_MS) {
+    return { data: cached.data, isStale: true, key, age };
+  }
+
+  return null;
+}
+
+function setCachedForecast(location, data) {
+  const key = cacheKeyForLocation(location);
+  forecastCache.set(key, {
+    data,
+    timestamp: Date.now()
+  });
+  return key;
+}
+
+async function fetchForecast(location) {
+  pruneForecastCache();
+
+  const cached = getCachedForecast(location);
+  if (cached) {
+    console.log(`Using fresh cache for ${cached.key}`);
     return cached.data;
+  }
+
+  const key = cacheKeyForLocation(location);
+
+  if (inFlightForecasts.has(key)) {
+    console.log(`Joining in-flight request for ${key}`);
+    return inFlightForecasts.get(key);
   }
 
   const params = {
@@ -600,46 +647,56 @@ async function fetchForecast(location) {
     forecast_days: 7
   };
 
-  try {
-    const response = await axios.get("https://api.open-meteo.com/v1/forecast", {
-      params,
-      timeout: 15000
-    });
+  const requestPromise = (async () => {
+    try {
+      const response = await axios.get("https://api.open-meteo.com/v1/forecast", {
+        params,
+        timeout: 15000
+      });
 
-    const data = response.data;
+      const data = response.data;
 
-    if (!data || !data.current || !data.hourly || !data.daily) {
-      throw new Error("Open-Meteo returned incomplete forecast data");
+      if (!data || !data.current || !data.hourly || !data.daily) {
+        throw new Error("Open-Meteo returned incomplete forecast data");
+      }
+
+      if (!data.hourly.weather_code && data.hourly.weathercode) {
+        data.hourly.weather_code = data.hourly.weathercode;
+      }
+
+      if (!data.daily.weather_code && data.daily.weathercode) {
+        data.daily.weather_code = data.daily.weathercode;
+      }
+
+      const savedKey = setCachedForecast(location, data);
+      console.log(`Fetched fresh forecast for ${savedKey}`);
+      return data;
+    } catch (error) {
+      const stale = getCachedForecast(location, { allowStale: true });
+
+      if (stale) {
+        console.log(`Using stale cache for ${stale.key} after API failure`);
+        return stale.data;
+      }
+
+      console.error("FETCH FORECAST FAILED");
+      console.error("Location:", location);
+      console.error("Request params:", params);
+      console.error("Message:", error.message);
+
+      if (error.response) {
+        console.error("Status:", error.response.status);
+        console.error("Data:", JSON.stringify(error.response.data));
+      }
+
+      throw error;
+    } finally {
+      inFlightForecasts.delete(key);
     }
+  })();
 
-    if (!data.hourly.weather_code && data.hourly.weathercode) {
-      data.hourly.weather_code = data.hourly.weathercode;
-    }
-
-    if (!data.daily.weather_code && data.daily.weathercode) {
-      data.daily.weather_code = data.daily.weathercode;
-    }
-
-    forecastCache.set(key, {
-      data,
-      timestamp: Date.now()
-    });
-
-    console.log("Fetched fresh forecast for", key);
-    return data;
-  } catch (error) {
-    console.error("FETCH FORECAST FAILED");
-    console.error("Location:", location);
-    console.error("Request params:", params);
-    console.error("Message:", error.message);
-
-    if (error.response) {
-      console.error("Status:", error.response.status);
-      console.error("Data:", JSON.stringify(error.response.data));
-    }
-
-    throw error;
-  }
+  inFlightForecasts.set(key, requestPromise);
+  return requestPromise;
 }
 
 function speakWeatherError(twiml, error, fallbackText) {
@@ -663,11 +720,17 @@ app.get("/debug-weather", async (req, res) => {
       timezone: "America/Toronto"
     };
 
+    const before = getCachedForecast(location, { allowStale: true });
     const forecast = await fetchForecast(location);
+    const after = getCachedForecast(location, { allowStale: true });
 
     res.json({
       ok: true,
+      cache_key: cacheKeyForLocation(location),
+      cache_hit_before: !!before,
+      cache_hit_after: !!after,
       cached_locations: forecastCache.size,
+      in_flight_requests: inFlightForecasts.size,
       current: forecast.current,
       hourly_keys: Object.keys(forecast.hourly || {}),
       daily_keys: Object.keys(forecast.daily || {})
