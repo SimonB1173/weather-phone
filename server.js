@@ -8,7 +8,10 @@ app.use(express.json());
 
 const VoiceResponse = twilio.twiml.VoiceResponse;
 
-// Optional Twilio voice settings via environment variables
+// Optional voice settings via Render environment variables
+// Example:
+// TWILIO_TTS_LANG=en-CA
+// TWILIO_TTS_VOICE=alice
 const SAY_OPTIONS = {};
 if (process.env.TWILIO_TTS_LANG) SAY_OPTIONS.language = process.env.TWILIO_TTS_LANG;
 if (process.env.TWILIO_TTS_VOICE) SAY_OPTIONS.voice = process.env.TWILIO_TTS_VOICE;
@@ -16,20 +19,9 @@ if (process.env.TWILIO_TTS_VOICE) SAY_OPTIONS.voice = process.env.TWILIO_TTS_VOI
 // In-memory caller location store
 const callerLocations = new Map();
 
-// Optional keypad aliases
+// Optional custom keypad aliases
 const CUSTOM_POSTAL_ALIASES = {
   "428427": "H2V4B7"
-};
-
-const KEYMAP = {
-  "2": ["A", "B", "C"],
-  "3": ["D", "E", "F"],
-  "4": ["G", "H", "I"],
-  "5": ["J", "K", "L"],
-  "6": ["M", "N", "O"],
-  "7": ["P", "Q", "R", "S"],
-  "8": ["T", "U", "V"],
-  "9": ["W", "X", "Y", "Z"]
 };
 
 function say(twiml, text) {
@@ -54,10 +46,6 @@ function normalizeText(v) {
 
 function cleanPostalCode(v) {
   return String(v || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
-}
-
-function looksLikeCanadianPostalCode(v) {
-  return /^[A-Z]\d[A-Z]\d[A-Z]\d$/.test(v);
 }
 
 function pushIf(parts, condition, text) {
@@ -159,26 +147,6 @@ function parseForecastDayChoice(req, forecast, timezone) {
   return -1;
 }
 
-function expandPostalDigits(digits) {
-  const d = String(digits || "").replace(/\D/g, "");
-  if (d.length !== 6) return [];
-
-  const p1 = KEYMAP[d[0]] || [];
-  const p2 = KEYMAP[d[2]] || [];
-  const p3 = KEYMAP[d[4]] || [];
-  const results = [];
-
-  for (const a of p1) {
-    for (const b of p2) {
-      for (const c of p3) {
-        results.push(`${a}${d[1]}${b}${d[3]}${c}${d[5]}`);
-      }
-    }
-  }
-
-  return results;
-}
-
 function buildMenuInto(twiml, savedLocationName) {
   const gather = twiml.gather({
     input: "speech dtmf",
@@ -186,8 +154,7 @@ function buildMenuInto(twiml, savedLocationName) {
     method: "POST",
     timeout: 6,
     speechTimeout: "auto",
-    numDigits: 1,
-    language: "en-CA"
+    numDigits: 1
   });
 
   if (savedLocationName) {
@@ -218,15 +185,13 @@ function locationPromptTwiml() {
     action: "/set-location",
     method: "POST",
     timeout: 7,
-    speechTimeout: "auto",
-    language: "en-CA",
-    hints:
-      "Toronto, Montreal, Vancouver, Calgary, Edmonton, Ottawa, Winnipeg, Quebec City, Halifax, Burnaby, Brampton, Mississauga, Surrey, Richmond, Kelowna, Victoria, Saskatoon, Regina, St. John's, postal code, city, province"
+    speechTimeout: "auto"
   });
 
   say(
     gather,
-    "Say a Canadian city and province, for example Burnaby British Columbia, or type a six digit postal keypad code."
+    `Say a city, province, or postal code in Canada. ` +
+      `You can also type a 6 character postal code on the keypad.`
   );
 
   twiml.redirect("/voice");
@@ -241,8 +206,7 @@ function afterActionTwiml() {
     method: "POST",
     timeout: 6,
     speechTimeout: "auto",
-    numDigits: 1,
-    language: "en-CA"
+    numDigits: 1
   });
 
   say(
@@ -264,8 +228,7 @@ function forecastDayPromptTwiml(location, forecast) {
     method: "POST",
     timeout: 7,
     speechTimeout: "auto",
-    numDigits: 1,
-    language: "en-CA"
+    numDigits: 1
   });
 
   const choices = [];
@@ -308,7 +271,7 @@ function currentWeatherSpeech(location, forecast) {
 function nextHoursSpeech(location, forecast, hours = 6) {
   const now = Date.now();
   const h = forecast.hourly;
-  const tz = forecast.timezone || location.timezone || "UTC";
+  const tz = location.timezone || "UTC";
   const items = [];
 
   for (let i = 0; i < h.time.length; i++) {
@@ -357,8 +320,6 @@ function nextHoursSpeech(location, forecast, hours = 6) {
 
 function dailyForecastSpeech(location, forecast, index) {
   const d = forecast.daily;
-  const tz = forecast.timezone || location.timezone || "UTC";
-
   if (index < 0 || index >= d.time.length) {
     return `That forecast day is not available for ${location.name}.`;
   }
@@ -366,7 +327,7 @@ function dailyForecastSpeech(location, forecast, index) {
   const label =
     index === 0 ? "today" :
     index === 1 ? "tomorrow" :
-    dayName(d.time[index], tz);
+    dayName(d.time[index], location.timezone);
 
   const parts = [
     `Forecast for ${label} in ${location.name}.`,
@@ -388,14 +349,13 @@ function dailyForecastSpeech(location, forecast, index) {
 
 function alertsSpeech(location, forecast) {
   const d = forecast.daily;
-  const tz = forecast.timezone || location.timezone || "UTC";
   const alerts = [];
 
   for (let i = 0; i < Math.min(7, d.time.length); i++) {
     const label =
       i === 0 ? "today" :
       i === 1 ? "tomorrow" :
-      dayName(d.time[i], tz);
+      dayName(d.time[i], location.timezone);
 
     if ((d.wind_speed_10m_max[i] || 0) >= 50) alerts.push(`Strong wind possible ${label}.`);
     if ((d.snowfall_sum[i] || 0) >= 5) alerts.push(`Significant snow possible ${label}.`);
@@ -410,18 +370,35 @@ function alertsSpeech(location, forecast) {
   return `Important forecast alerts for ${location.name}. ${alerts.join(" ")}`;
 }
 
-async function searchOpenMeteoGeocode(name, count = 5) {
-  const response = await axios.get("https://geocoding-api.open-meteo.com/v1/search", {
-    params: {
-      name,
-      count,
-      language: "en",
-      format: "json"
-    },
-    timeout: 12000
-  });
+const KEYMAP = {
+  "2": ["A", "B", "C"],
+  "3": ["D", "E", "F"],
+  "4": ["G", "H", "I"],
+  "5": ["J", "K", "L"],
+  "6": ["M", "N", "O"],
+  "7": ["P", "Q", "R", "S"],
+  "8": ["T", "U", "V"],
+  "9": ["W", "X", "Y", "Z"]
+};
 
-  return response.data?.results || [];
+function expandPostalDigits(digits) {
+  const d = String(digits || "").replace(/\D/g, "");
+  if (d.length !== 6) return [];
+
+  const p1 = KEYMAP[d[0]] || [];
+  const p2 = KEYMAP[d[2]] || [];
+  const p3 = KEYMAP[d[4]] || [];
+  const results = [];
+
+  for (const a of p1) {
+    for (const b of p2) {
+      for (const c of p3) {
+        results.push(`${a}${d[1]}${b}${d[3]}${c}${d[5]}`);
+      }
+    }
+  }
+
+  return results;
 }
 
 async function searchNominatim(params) {
@@ -430,46 +407,47 @@ async function searchNominatim(params) {
       format: "jsonv2",
       limit: 5,
       addressdetails: 1,
+      countrycodes: "ca",
       ...params
     },
     timeout: 12000,
     headers: {
-      "User-Agent": "weather-phone/1.0 (Render)"
+      "User-Agent": "weather-line-canada/1.0",
+      "Accept-Language": "en-CA,en;q=0.9"
     }
   });
 
   return response.data || [];
 }
 
-function formatOpenMeteoResult(r) {
-  const parts = [r.name];
-  if (r.admin1) parts.push(r.admin1);
-  if (r.country) parts.push(r.country);
-
-  return {
-    name: parts.join(", "),
-    latitude: Number(r.latitude),
-    longitude: Number(r.longitude),
-    timezone: r.timezone || "UTC"
-  };
-}
-
 function formatNominatimResult(r) {
   const a = r.address || {};
-  const name =
+
+  const cityName =
     a.city ||
     a.town ||
     a.village ||
     a.municipality ||
+    a.hamlet ||
     a.suburb ||
     a.county ||
+    a.state_district ||
     r.display_name;
 
+  const province =
+    a.state ||
+    a.province ||
+    a.region ||
+    "";
+
+  const country =
+    a.country || "Canada";
+
   return {
-    name,
+    name: `${cityName}${province ? ", " + province : ""}, ${country}`,
     latitude: parseFloat(r.lat),
     longitude: parseFloat(r.lon),
-    timezone: "UTC"
+    timezone: "America/Toronto"
   };
 }
 
@@ -481,69 +459,79 @@ async function resolveLocation(input) {
   const aliasPostal = CUSTOM_POSTAL_ALIASES[cleaned];
   const postal = aliasPostal || cleaned;
 
-  console.log("resolveLocation raw:", raw);
-  console.log("resolveLocation cleaned:", cleaned);
-  console.log("resolveLocation postal:", postal);
+  // Helpful manual Canada fallbacks
+  const manualMap = {
+    "MONTREAL": {
+      name: "Montreal, Quebec, Canada",
+      latitude: 45.5019,
+      longitude: -73.5674,
+      timezone: "America/Toronto"
+    },
+    "MONTREALCANADA": {
+      name: "Montreal, Quebec, Canada",
+      latitude: 45.5019,
+      longitude: -73.5674,
+      timezone: "America/Toronto"
+    },
+    "H2V4B7": {
+      name: "Montreal, Quebec, Canada",
+      latitude: 45.5239,
+      longitude: -73.5997,
+      timezone: "America/Toronto"
+    }
+  };
 
-  if (looksLikeCanadianPostalCode(postal)) {
+  if (manualMap[postal]) return manualMap[postal];
+  if (manualMap[cleaned]) return manualMap[cleaned];
+
+  const collapsedRaw = raw.toUpperCase().replace(/\s+/g, "");
+  if (manualMap[collapsedRaw]) return manualMap[collapsedRaw];
+
+  // Exact Canadian postal code
+  if (/^[A-Z]\d[A-Z]\d[A-Z]\d$/.test(postal)) {
     let results = await searchNominatim({
+      postalcode: postal
+    });
+    if (results.length) return formatNominatimResult(results[0]);
+
+    results = await searchNominatim({
       q: `${postal}, Canada`
     });
-
-    if (results.length) {
-      console.log("Postal match via Nominatim:", results[0].display_name);
-      return formatNominatimResult(results[0]);
-    }
+    if (results.length) return formatNominatimResult(results[0]);
   }
 
+  // Keypad-entered 6-char postal code
   if (/^\d{6}$/.test(cleaned)) {
     const candidates = expandPostalDigits(cleaned);
-    console.log("Postal keypad candidates:", candidates.slice(0, 10));
 
     for (const c of candidates) {
-      const results = await searchNominatim({
-        q: `${c}, Canada`
-      });
+      if (manualMap[c]) return manualMap[c];
 
-      if (results.length) {
-        console.log("Keypad postal match:", c, results[0].display_name);
-        return formatNominatimResult(results[0]);
-      }
+      let results = await searchNominatim({
+        postalcode: c
+      });
+      if (results.length) return formatNominatimResult(results[0]);
     }
   }
 
-  let results = await searchOpenMeteoGeocode(raw, 5);
-  if (results.length) {
-    const canada = results.find((r) => r.country_code === "CA" || r.country === "Canada");
-    console.log("Open-Meteo raw match:", canada || results[0]);
-    return formatOpenMeteoResult(canada || results[0]);
-  }
-
-  results = await searchOpenMeteoGeocode(`${raw}, Canada`, 5);
-  if (results.length) {
-    const canada = results.find((r) => r.country_code === "CA" || r.country === "Canada");
-    console.log("Open-Meteo Canada match:", canada || results[0]);
-    return formatOpenMeteoResult(canada || results[0]);
-  }
-
-  let nominatim = await searchNominatim({
-    q: `${raw}, Canada`,
-    countrycodes: "ca"
-  });
-  if (nominatim.length) {
-    console.log("Nominatim Canada fallback:", nominatim[0].display_name);
-    return formatNominatimResult(nominatim[0]);
-  }
-
-  nominatim = await searchNominatim({
+  // Free-form city search
+  let results = await searchNominatim({
     q: raw
   });
-  if (nominatim.length) {
-    console.log("Nominatim global fallback:", nominatim[0].display_name);
-    return formatNominatimResult(nominatim[0]);
-  }
+  if (results.length) return formatNominatimResult(results[0]);
 
-  console.log("No location resolved for input:", raw);
+  // Stronger Canada hint
+  results = await searchNominatim({
+    q: `${raw}, Canada`
+  });
+  if (results.length) return formatNominatimResult(results[0]);
+
+  // Structured city search
+  results = await searchNominatim({
+    city: raw
+  });
+  if (results.length) return formatNominatimResult(results[0]);
+
   return null;
 }
 
@@ -604,8 +592,6 @@ app.get("/voice", (req, res) => {
 app.post("/voice", (req, res) => {
   const twiml = new VoiceResponse();
 
-  console.log("POST /voice body:", JSON.stringify(req.body, null, 2));
-
   say(
     twiml,
     "Welcome to Weather Line. This service is sponsored by Lipa Supermarket."
@@ -621,9 +607,6 @@ app.post("/menu", async (req, res) => {
   const choice = parseMenuChoice(req);
   const location = getSavedLocation(req);
   const twiml = new VoiceResponse();
-
-  console.log("POST /menu body:", JSON.stringify(req.body, null, 2));
-  console.log("Parsed menu choice:", choice);
 
   if (choice === "5") {
     return res.type("text/xml").send(locationPromptTwiml().toString());
@@ -664,7 +647,7 @@ app.post("/menu", async (req, res) => {
     twiml.redirect("/voice");
     return res.type("text/xml").send(twiml.toString());
   } catch (error) {
-    console.error("Forecast fetch error in /menu:", error.response?.data || error.message || error);
+    console.error("MENU error:", error.message);
     say(twiml, "Sorry, I could not retrieve the forecast right now.");
     twiml.redirect("/voice");
     return res.type("text/xml").send(twiml.toString());
@@ -676,15 +659,11 @@ app.post("/set-location-prompt", (req, res) => {
 });
 
 app.post("/set-location", async (req, res) => {
-  const speech = normalizeText(req.body.SpeechResult || "");
-  const digits = normalizeText(req.body.Digits || "");
-  const input = speech || digits;
+  const input = normalizeText(req.body.SpeechResult || req.body.Digits || "");
   const twiml = new VoiceResponse();
 
-  console.log("POST /set-location body:", JSON.stringify(req.body, null, 2));
-  console.log("SpeechResult:", speech);
-  console.log("Digits:", digits);
-  console.log("Chosen input:", input);
+  console.log("SET-LOCATION raw input:", input);
+  console.log("SpeechResult:", req.body.SpeechResult, "Digits:", req.body.Digits);
 
   if (!input) {
     say(twiml, "I did not get a location.");
@@ -697,10 +676,7 @@ app.post("/set-location", async (req, res) => {
     console.log("Resolved location:", location);
 
     if (!location) {
-      say(
-        twiml,
-        `I could not find ${input}. Please say the city and province, like Burnaby British Columbia, or enter a postal keypad code again.`
-      );
+      say(twiml, `I could not find ${input}. Please try again.`);
       twiml.redirect("/set-location-prompt");
       return res.type("text/xml").send(twiml.toString());
     }
@@ -710,7 +686,7 @@ app.post("/set-location", async (req, res) => {
     twiml.redirect("/voice");
     return res.type("text/xml").send(twiml.toString());
   } catch (error) {
-    console.error("Location lookup error:", error.response?.data || error.message || error);
+    console.error("Location lookup error:", error.message);
     say(twiml, "There was a problem finding that location.");
     twiml.redirect("/voice");
     return res.type("text/xml").send(twiml.toString());
@@ -721,8 +697,6 @@ app.post("/forecast-day", async (req, res) => {
   const location = getSavedLocation(req);
   const twiml = new VoiceResponse();
 
-  console.log("POST /forecast-day body:", JSON.stringify(req.body, null, 2));
-
   if (!location) {
     say(twiml, "You need to set your location first.");
     twiml.redirect("/set-location-prompt");
@@ -731,9 +705,7 @@ app.post("/forecast-day", async (req, res) => {
 
   try {
     const forecast = await fetchForecast(location);
-    const idx = parseForecastDayChoice(req, forecast, forecast.timezone || location.timezone);
-
-    console.log("Forecast day index:", idx);
+    const idx = parseForecastDayChoice(req, forecast, location.timezone);
 
     if (idx < 0 || idx > 6) {
       say(twiml, "I did not understand the forecast day.");
@@ -744,7 +716,7 @@ app.post("/forecast-day", async (req, res) => {
     twiml.redirect("/after-prompt");
     return res.type("text/xml").send(twiml.toString());
   } catch (error) {
-    console.error("Forecast day error:", error.response?.data || error.message || error);
+    console.error("FORECAST-DAY error:", error.message);
     say(twiml, "Sorry, I could not retrieve that forecast.");
     twiml.redirect("/voice");
     return res.type("text/xml").send(twiml.toString());
@@ -758,9 +730,6 @@ app.post("/after-prompt", (req, res) => {
 app.post("/after", async (req, res) => {
   const choice = parseAfterChoice(req);
   const twiml = new VoiceResponse();
-
-  console.log("POST /after body:", JSON.stringify(req.body, null, 2));
-  console.log("Parsed after choice:", choice);
 
   if (choice === "1") {
     twiml.redirect("/voice");
@@ -787,7 +756,7 @@ app.post("/after", async (req, res) => {
       twiml.redirect("/after-prompt");
       return res.type("text/xml").send(twiml.toString());
     } catch (error) {
-      console.error("Repeat current weather error:", error.response?.data || error.message || error);
+      console.error("AFTER repeat current error:", error.message);
       say(twiml, "Sorry, I could not retrieve the weather.");
       twiml.redirect("/voice");
       return res.type("text/xml").send(twiml.toString());
