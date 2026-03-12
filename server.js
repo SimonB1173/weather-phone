@@ -104,7 +104,12 @@ function parseMenuChoice(req) {
   if (digit) return digit;
   if (speech.includes("current") || speech.includes("now")) return "1";
   if (speech.includes("hour")) return "2";
-  if (speech.includes("forecast") || speech.includes("day") || speech.includes("today") || speech.includes("tomorrow")) return "3";
+  if (
+    speech.includes("forecast") ||
+    speech.includes("day") ||
+    speech.includes("today") ||
+    speech.includes("tomorrow")
+  ) return "3";
   if (speech.includes("alert") || speech.includes("warning")) return "4";
   if (speech.includes("change") || speech.includes("location")) return "5";
   return "";
@@ -230,6 +235,7 @@ function forecastDayPromptTwiml(location, forecast) {
       i === 0 ? "today" :
       i === 1 ? "tomorrow" :
       dayName(forecast.daily.time[i], location.timezone);
+
     choices.push(`${i + 1} for ${label}`);
   }
 
@@ -329,10 +335,16 @@ function dailyForecastSpeech(location, forecast, index) {
     `Low ${Math.round(d.temperature_2m_min[index])} degrees.`
   ];
 
-  pushIf(parts, (d.precipitation_probability_max[index] || 0) > 0,
-    `Maximum precipitation chance ${Math.round(d.precipitation_probability_max[index])} percent.`);
-  pushIf(parts, (d.wind_speed_10m_max[index] || 0) > 0,
-    `Maximum wind ${Math.round(d.wind_speed_10m_max[index])} kilometres per hour.`);
+  pushIf(
+    parts,
+    (d.precipitation_probability_max[index] || 0) > 0,
+    `Maximum precipitation chance ${Math.round(d.precipitation_probability_max[index])} percent.`
+  );
+  pushIf(
+    parts,
+    (d.wind_speed_10m_max[index] || 0) > 0,
+    `Maximum wind ${Math.round(d.wind_speed_10m_max[index])} kilometres per hour.`
+  );
   pushIf(parts, (d.rain_sum[index] || 0) > 0, `Rain ${d.rain_sum[index]} millimetres.`);
   pushIf(parts, (d.showers_sum[index] || 0) > 0, `Showers ${d.showers_sum[index]} millimetres.`);
   pushIf(parts, (d.snowfall_sum[index] || 0) > 0, `Snowfall ${d.snowfall_sum[index]} centimetres.`);
@@ -499,7 +511,7 @@ async function resolveLocation(input) {
     for (const c of candidates) {
       if (manualMap[c]) return manualMap[c];
 
-      let results = await searchNominatim({ postalcode: c });
+      const results = await searchNominatim({ postalcode: c });
       if (results.length) return formatNominatimResult(results[0]);
     }
   }
@@ -521,38 +533,16 @@ async function fetchForecast(location) {
     params: {
       latitude: location.latitude,
       longitude: location.longitude,
-      current_weather: true,
-      hourly: "temperature_2m,precipitation_probability,rain,showers,snowfall,cloud_cover,wind_speed_10m,weathercode",
-      daily: "weathercode,temperature_2m_max,temperature_2m_min,precipitation_probability_max,rain_sum,showers_sum,snowfall_sum,wind_speed_10m_max",
+      current: "temperature_2m,apparent_temperature,rain,showers,snowfall,cloud_cover,wind_speed_10m,weather_code",
+      hourly: "temperature_2m,precipitation_probability,rain,showers,snowfall,cloud_cover,wind_speed_10m,weather_code",
+      daily: "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,rain_sum,showers_sum,snowfall_sum,wind_speed_10m_max",
       timezone: "auto",
       forecast_days: 7
     },
     timeout: 15000
   });
 
-  const data = response.data;
-
-  // Normalize old-style current_weather into current-like object
-  data.current = {
-    temperature_2m: data.current_weather?.temperature ?? 0,
-    apparent_temperature: data.current_weather?.temperature ?? 0,
-    rain: 0,
-    showers: 0,
-    snowfall: 0,
-    cloud_cover: 0,
-    wind_speed_10m: data.current_weather?.windspeed ?? 0,
-    weather_code: data.current_weather?.weathercode ?? 0
-  };
-
-  // Normalize old-style weathercode naming
-  if (data.hourly && data.hourly.weathercode) {
-    data.hourly.weather_code = data.hourly.weathercode;
-  }
-  if (data.daily && data.daily.weathercode) {
-    data.daily.weather_code = data.daily.weathercode;
-  }
-
-  return data;
+  return response.data;
 }
 
 app.get("/", (req, res) => {
@@ -567,9 +557,13 @@ app.get("/debug-weather", async (req, res) => {
       longitude: -73.5674,
       timezone: "America/Toronto"
     };
+
     const forecast = await fetchForecast(location);
     res.json(forecast);
   } catch (error) {
+    console.error("DEBUG weather error:", error.message);
+    console.error("DEBUG weather details:", error.response?.data || null);
+
     res.status(500).json({
       error: error.message,
       details: error.response?.data || null
@@ -646,10 +640,7 @@ app.post("/menu", async (req, res) => {
     return res.type("text/xml").send(twiml.toString());
   } catch (error) {
     console.error("MENU weather error:", error.message);
-    if (error.response) {
-      console.error("OPEN-METEO ERROR STATUS:", error.response.status);
-      console.error("OPEN-METEO ERROR DATA:", JSON.stringify(error.response.data));
-    }
+    console.error("MENU weather details:", error.response?.data || null);
     say(twiml, "Sorry, I could not retrieve the weather right now. Please try again later.");
     twiml.redirect("/voice");
     return res.type("text/xml").send(twiml.toString());
@@ -689,6 +680,7 @@ app.post("/set-location", async (req, res) => {
     return res.type("text/xml").send(twiml.toString());
   } catch (error) {
     console.error("Location lookup error:", error.message);
+    console.error("Location lookup details:", error.response?.data || null);
     say(twiml, "There was a problem finding that location.");
     twiml.redirect("/voice");
     return res.type("text/xml").send(twiml.toString());
@@ -719,10 +711,7 @@ app.post("/forecast-day", async (req, res) => {
     return res.type("text/xml").send(twiml.toString());
   } catch (error) {
     console.error("FORECAST-DAY error:", error.message);
-    if (error.response) {
-      console.error("OPEN-METEO ERROR STATUS:", error.response.status);
-      console.error("OPEN-METEO ERROR DATA:", JSON.stringify(error.response.data));
-    }
+    console.error("FORECAST-DAY details:", error.response?.data || null);
     say(twiml, "Sorry, I could not retrieve that forecast.");
     twiml.redirect("/voice");
     return res.type("text/xml").send(twiml.toString());
@@ -763,10 +752,7 @@ app.post("/after", async (req, res) => {
       return res.type("text/xml").send(twiml.toString());
     } catch (error) {
       console.error("AFTER repeat current error:", error.message);
-      if (error.response) {
-        console.error("OPEN-METEO ERROR STATUS:", error.response.status);
-        console.error("OPEN-METEO ERROR DATA:", JSON.stringify(error.response.data));
-      }
+      console.error("AFTER repeat current details:", error.response?.data || null);
       say(twiml, "Sorry, I could not retrieve the weather.");
       twiml.redirect("/voice");
       return res.type("text/xml").send(twiml.toString());
