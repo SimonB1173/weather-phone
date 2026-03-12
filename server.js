@@ -13,12 +13,12 @@ const SAY_OPTIONS = {
   language: "en-CA"
 };
 
-// Per-call state
+// Store state for each live call
 const callSessions = new Map();
 
-// Simple in-memory weather cache
+// Weather cache: one forecast per rounded location for 10 minutes
 const forecastCache = new Map();
-const FORECAST_CACHE_MS = 10 * 60 * 1000; // 10 minutes
+const FORECAST_CACHE_MS = 10 * 60 * 1000;
 
 const CUSTOM_POSTAL_ALIASES = {
   "428427": "H2V4B7"
@@ -540,14 +540,26 @@ async function resolveLocation(input) {
 }
 
 function cacheKeyForLocation(location) {
-  return `${Number(location.latitude).toFixed(4)},${Number(location.longitude).toFixed(4)}`;
+  return `${Number(location.latitude).toFixed(3)},${Number(location.longitude).toFixed(3)}`;
+}
+
+function pruneForecastCache() {
+  const now = Date.now();
+  for (const [key, value] of forecastCache.entries()) {
+    if (!value || (now - value.timestamp) > FORECAST_CACHE_MS) {
+      forecastCache.delete(key);
+    }
+  }
 }
 
 async function fetchForecast(location) {
+  pruneForecastCache();
+
   const key = cacheKeyForLocation(location);
   const cached = forecastCache.get(key);
 
   if (cached && (Date.now() - cached.timestamp) < FORECAST_CACHE_MS) {
+    console.log("Using cached forecast for", key);
     return cached.data;
   }
 
@@ -613,6 +625,7 @@ async function fetchForecast(location) {
       timestamp: Date.now()
     });
 
+    console.log("Fetched fresh forecast for", key);
     return data;
   } catch (error) {
     console.error("FETCH FORECAST FAILED");
@@ -654,6 +667,7 @@ app.get("/debug-weather", async (req, res) => {
 
     res.json({
       ok: true,
+      cached_locations: forecastCache.size,
       current: forecast.current,
       hourly_keys: Object.keys(forecast.hourly || {}),
       daily_keys: Object.keys(forecast.daily || {})
@@ -680,7 +694,10 @@ app.post("/voice", (req, res) => {
   console.log("VOICE CallSid:", req.body.CallSid, "From:", req.body.From);
   console.log("VOICE saved location:", getSavedLocation(req));
 
-  say(twiml, "Welcome to Weather Line. This service is sponsored by Lipa Supermarket.");
+  say(
+    twiml,
+    "Welcome to Weather Line. This service is sponsored by Lipa Supermarket."
+  );
 
   const saved = getSavedLocation(req);
   buildMenuInto(twiml, saved ? saved.name : null);
@@ -709,7 +726,6 @@ app.post("/menu", async (req, res) => {
 
   try {
     const forecast = await fetchForecast(location);
-    console.log("Forecast OK");
 
     if (choice === "1") {
       say(twiml, currentWeatherSpeech(location, forecast));
@@ -739,7 +755,11 @@ app.post("/menu", async (req, res) => {
   } catch (error) {
     console.error("MENU weather error:", error.message);
     console.error("MENU weather details:", error.response?.data || null);
-    speakWeatherError(twiml, error, "Sorry, I could not retrieve the weather right now. Please try again later.");
+    speakWeatherError(
+      twiml,
+      error,
+      "Sorry, I could not retrieve the weather right now. Please try again later."
+    );
     twiml.redirect({ method: "POST" }, "/voice");
     return res.type("text/xml").send(twiml.toString());
   }
@@ -775,7 +795,6 @@ app.post("/set-location", async (req, res) => {
     saveLocation(req, location);
 
     console.log("SET-LOCATION saved:", location);
-    console.log("SET-LOCATION session now:", getSession(req));
 
     say(twiml, `Location saved as ${location.name}.`);
     buildMenuInto(twiml, location.name);
@@ -806,8 +825,6 @@ app.post("/forecast-day", async (req, res) => {
   try {
     const forecast = await fetchForecast(location);
     const idx = parseForecastDayChoice(req, forecast, location.timezone);
-
-    console.log("FORECAST-DAY idx:", idx);
 
     if (idx < 0 || idx > 6) {
       say(twiml, "I did not understand the forecast day.");
