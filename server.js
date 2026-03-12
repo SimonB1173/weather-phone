@@ -13,8 +13,12 @@ const SAY_OPTIONS = {
   language: "en-CA"
 };
 
-// Store state for each live call
+// Per-call state
 const callSessions = new Map();
+
+// Simple in-memory weather cache
+const forecastCache = new Map();
+const FORECAST_CACHE_MS = 10 * 60 * 1000; // 10 minutes
 
 const CUSTOM_POSTAL_ALIASES = {
   "428427": "H2V4B7"
@@ -45,8 +49,7 @@ function saveLocation(req, location) {
 }
 
 function clearSession(req) {
-  const key = sessionKey(req);
-  callSessions.delete(key);
+  callSessions.delete(sessionKey(req));
 }
 
 function normalizeText(v) {
@@ -453,14 +456,8 @@ function formatNominatimResult(r) {
     a.state_district ||
     r.display_name;
 
-  const province =
-    a.state ||
-    a.province ||
-    a.region ||
-    "";
-
-  const country =
-    a.country || "Canada";
+  const province = a.state || a.province || a.region || "";
+  const country = a.country || "Canada";
 
   return {
     name: `${cityName}${province ? ", " + province : ""}, ${country}`,
@@ -542,7 +539,18 @@ async function resolveLocation(input) {
   return null;
 }
 
+function cacheKeyForLocation(location) {
+  return `${Number(location.latitude).toFixed(4)},${Number(location.longitude).toFixed(4)}`;
+}
+
 async function fetchForecast(location) {
+  const key = cacheKeyForLocation(location);
+  const cached = forecastCache.get(key);
+
+  if (cached && (Date.now() - cached.timestamp) < FORECAST_CACHE_MS) {
+    return cached.data;
+  }
+
   const params = {
     latitude: Number(location.latitude),
     longitude: Number(location.longitude),
@@ -600,6 +608,11 @@ async function fetchForecast(location) {
       data.daily.weather_code = data.daily.weathercode;
     }
 
+    forecastCache.set(key, {
+      data,
+      timestamp: Date.now()
+    });
+
     return data;
   } catch (error) {
     console.error("FETCH FORECAST FAILED");
@@ -613,6 +626,14 @@ async function fetchForecast(location) {
     }
 
     throw error;
+  }
+}
+
+function speakWeatherError(twiml, error, fallbackText) {
+  if (error.response?.status === 429) {
+    say(twiml, "Weather service limit reached for today. Please try again tomorrow.");
+  } else {
+    say(twiml, fallbackText);
   }
 }
 
@@ -659,10 +680,7 @@ app.post("/voice", (req, res) => {
   console.log("VOICE CallSid:", req.body.CallSid, "From:", req.body.From);
   console.log("VOICE saved location:", getSavedLocation(req));
 
-  say(
-    twiml,
-    "Welcome to Weather Line. This service is sponsored by Lipa Supermarket."
-  );
+  say(twiml, "Welcome to Weather Line. This service is sponsored by Lipa Supermarket.");
 
   const saved = getSavedLocation(req);
   buildMenuInto(twiml, saved ? saved.name : null);
@@ -694,26 +712,22 @@ app.post("/menu", async (req, res) => {
     console.log("Forecast OK");
 
     if (choice === "1") {
-      console.log("Running current weather");
       say(twiml, currentWeatherSpeech(location, forecast));
       twiml.redirect({ method: "POST" }, "/after-prompt");
       return res.type("text/xml").send(twiml.toString());
     }
 
     if (choice === "2") {
-      console.log("Running next hours");
       say(twiml, nextHoursSpeech(location, forecast, 6));
       twiml.redirect({ method: "POST" }, "/after-prompt");
       return res.type("text/xml").send(twiml.toString());
     }
 
     if (choice === "3") {
-      console.log("Running forecast day menu");
       return res.type("text/xml").send(forecastDayPromptTwiml(location, forecast).toString());
     }
 
     if (choice === "4") {
-      console.log("Running alerts");
       say(twiml, alertsSpeech(location, forecast));
       twiml.redirect({ method: "POST" }, "/after-prompt");
       return res.type("text/xml").send(twiml.toString());
@@ -725,7 +739,7 @@ app.post("/menu", async (req, res) => {
   } catch (error) {
     console.error("MENU weather error:", error.message);
     console.error("MENU weather details:", error.response?.data || null);
-    say(twiml, "Sorry, I could not retrieve the weather right now. Please try again later.");
+    speakWeatherError(twiml, error, "Sorry, I could not retrieve the weather right now. Please try again later.");
     twiml.redirect({ method: "POST" }, "/voice");
     return res.type("text/xml").send(twiml.toString());
   }
@@ -806,7 +820,7 @@ app.post("/forecast-day", async (req, res) => {
   } catch (error) {
     console.error("FORECAST-DAY error:", error.message);
     console.error("FORECAST-DAY details:", error.response?.data || null);
-    say(twiml, "Sorry, I could not retrieve that forecast.");
+    speakWeatherError(twiml, error, "Sorry, I could not retrieve that forecast.");
     twiml.redirect({ method: "POST" }, "/voice");
     return res.type("text/xml").send(twiml.toString());
   }
@@ -849,7 +863,7 @@ app.post("/after", async (req, res) => {
     } catch (error) {
       console.error("AFTER repeat current error:", error.message);
       console.error("AFTER repeat current details:", error.response?.data || null);
-      say(twiml, "Sorry, I could not retrieve the weather.");
+      speakWeatherError(twiml, error, "Sorry, I could not retrieve the weather.");
       twiml.redirect({ method: "POST" }, "/voice");
       return res.type("text/xml").send(twiml.toString());
     }
