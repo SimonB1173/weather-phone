@@ -13,7 +13,7 @@ const SAY_OPTIONS = {
   language: "en-CA"
 };
 
-// Store by CallSid so the same phone call keeps its state across Twilio webhooks
+// Store state for each live call
 const callSessions = new Map();
 
 const CUSTOM_POSTAL_ALIASES = {
@@ -42,6 +42,11 @@ function getSavedLocation(req) {
 
 function saveLocation(req, location) {
   getSession(req).location = location;
+}
+
+function clearSession(req) {
+  const key = sessionKey(req);
+  callSessions.delete(key);
 }
 
 function normalizeText(v) {
@@ -168,17 +173,17 @@ function buildMenuInto(twiml, savedLocationName) {
     say(
       gather,
       `Your saved location is ${savedLocationName}. ` +
-      `Press or say 1 for current weather. ` +
-      `2 for the next 6 hours. ` +
-      `3 for the 7 day forecast menu. ` +
-      `4 for important alerts. ` +
-      `5 to change location.`
+        `Press or say 1 for current weather. ` +
+        `2 for the next 6 hours. ` +
+        `3 for the 7 day forecast menu. ` +
+        `4 for important alerts. ` +
+        `5 to change location.`
     );
   } else {
     say(
       gather,
       `No location is saved yet. ` +
-      `Press or say 5 to set your location.`
+        `Press or say 5 to set your location.`
     );
   }
 
@@ -198,7 +203,7 @@ function locationPromptTwiml() {
   say(
     gather,
     `Say a city, province, or postal code in Canada. ` +
-    `You can also type a 6 character postal code on the keypad.`
+      `You can also type a 6 character postal code on the keypad.`
   );
 
   twiml.redirect({ method: "POST" }, "/voice");
@@ -219,8 +224,8 @@ function afterActionTwiml() {
   say(
     gather,
     `Press or say 1 for the main menu. ` +
-    `2 to change location. ` +
-    `3 to hear current weather again.`
+      `2 to change location. ` +
+      `3 to hear current weather again.`
   );
 
   twiml.hangup();
@@ -251,7 +256,7 @@ function forecastDayPromptTwiml(location, forecast) {
   say(
     gather,
     `Choose a forecast day for ${location.name}. ` +
-    `Press or say ${choices.join(". ")}.`
+      `Press or say ${choices.join(". ")}.`
   );
 
   twiml.redirect({ method: "POST" }, "/voice");
@@ -538,20 +543,77 @@ async function resolveLocation(input) {
 }
 
 async function fetchForecast(location) {
-  const response = await axios.get("https://api.open-meteo.com/v1/forecast", {
-    params: {
-      latitude: location.latitude,
-      longitude: location.longitude,
-      current: "temperature_2m,apparent_temperature,rain,showers,snowfall,cloud_cover,wind_speed_10m,weather_code",
-      hourly: "temperature_2m,precipitation_probability,rain,showers,snowfall,cloud_cover,wind_speed_10m,weather_code",
-      daily: "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,rain_sum,showers_sum,snowfall_sum,wind_speed_10m_max",
-      timezone: "auto",
-      forecast_days: 7
-    },
-    timeout: 15000
-  });
+  const params = {
+    latitude: Number(location.latitude),
+    longitude: Number(location.longitude),
+    current: [
+      "temperature_2m",
+      "apparent_temperature",
+      "rain",
+      "showers",
+      "snowfall",
+      "cloud_cover",
+      "wind_speed_10m",
+      "weather_code"
+    ].join(","),
+    hourly: [
+      "temperature_2m",
+      "precipitation_probability",
+      "rain",
+      "showers",
+      "snowfall",
+      "cloud_cover",
+      "wind_speed_10m",
+      "weather_code"
+    ].join(","),
+    daily: [
+      "weather_code",
+      "temperature_2m_max",
+      "temperature_2m_min",
+      "precipitation_probability_max",
+      "rain_sum",
+      "showers_sum",
+      "snowfall_sum",
+      "wind_speed_10m_max"
+    ].join(","),
+    timezone: location.timezone || "America/Toronto",
+    forecast_days: 7
+  };
 
-  return response.data;
+  try {
+    const response = await axios.get("https://api.open-meteo.com/v1/forecast", {
+      params,
+      timeout: 15000
+    });
+
+    const data = response.data;
+
+    if (!data || !data.current || !data.hourly || !data.daily) {
+      throw new Error("Open-Meteo returned incomplete forecast data");
+    }
+
+    if (!data.hourly.weather_code && data.hourly.weathercode) {
+      data.hourly.weather_code = data.hourly.weathercode;
+    }
+
+    if (!data.daily.weather_code && data.daily.weathercode) {
+      data.daily.weather_code = data.daily.weathercode;
+    }
+
+    return data;
+  } catch (error) {
+    console.error("FETCH FORECAST FAILED");
+    console.error("Location:", location);
+    console.error("Request params:", params);
+    console.error("Message:", error.message);
+
+    if (error.response) {
+      console.error("Status:", error.response.status);
+      console.error("Data:", JSON.stringify(error.response.data));
+    }
+
+    throw error;
+  }
 }
 
 app.get("/", (req, res) => {
@@ -568,13 +630,18 @@ app.get("/debug-weather", async (req, res) => {
     };
 
     const forecast = await fetchForecast(location);
-    res.json(forecast);
-  } catch (error) {
-    console.error("DEBUG weather error:", error.message);
-    console.error("DEBUG weather details:", error.response?.data || null);
 
+    res.json({
+      ok: true,
+      current: forecast.current,
+      hourly_keys: Object.keys(forecast.hourly || {}),
+      daily_keys: Object.keys(forecast.daily || {})
+    });
+  } catch (error) {
     res.status(500).json({
-      error: error.message,
+      ok: false,
+      message: error.message,
+      status: error.response?.status || null,
       details: error.response?.data || null
     });
   }
@@ -624,24 +691,29 @@ app.post("/menu", async (req, res) => {
 
   try {
     const forecast = await fetchForecast(location);
+    console.log("Forecast OK");
 
     if (choice === "1") {
+      console.log("Running current weather");
       say(twiml, currentWeatherSpeech(location, forecast));
       twiml.redirect({ method: "POST" }, "/after-prompt");
       return res.type("text/xml").send(twiml.toString());
     }
 
     if (choice === "2") {
+      console.log("Running next hours");
       say(twiml, nextHoursSpeech(location, forecast, 6));
       twiml.redirect({ method: "POST" }, "/after-prompt");
       return res.type("text/xml").send(twiml.toString());
     }
 
     if (choice === "3") {
+      console.log("Running forecast day menu");
       return res.type("text/xml").send(forecastDayPromptTwiml(location, forecast).toString());
     }
 
     if (choice === "4") {
+      console.log("Running alerts");
       say(twiml, alertsSpeech(location, forecast));
       twiml.redirect({ method: "POST" }, "/after-prompt");
       return res.type("text/xml").send(twiml.toString());
@@ -692,8 +764,6 @@ app.post("/set-location", async (req, res) => {
     console.log("SET-LOCATION session now:", getSession(req));
 
     say(twiml, `Location saved as ${location.name}.`);
-
-    // Go directly to the menu, not back through a fresh "start" path
     buildMenuInto(twiml, location.name);
 
     return res.type("text/xml").send(twiml.toString());
@@ -710,6 +780,9 @@ app.post("/forecast-day", async (req, res) => {
   const location = getSavedLocation(req);
   const twiml = new VoiceResponse();
 
+  console.log("FORECAST-DAY CallSid:", req.body.CallSid, "From:", req.body.From);
+  console.log("FORECAST-DAY saved location:", location);
+
   if (!location) {
     say(twiml, "You need to set your location first.");
     twiml.redirect({ method: "POST" }, "/set-location-prompt");
@@ -719,6 +792,8 @@ app.post("/forecast-day", async (req, res) => {
   try {
     const forecast = await fetchForecast(location);
     const idx = parseForecastDayChoice(req, forecast, location.timezone);
+
+    console.log("FORECAST-DAY idx:", idx);
 
     if (idx < 0 || idx > 6) {
       say(twiml, "I did not understand the forecast day.");
@@ -744,6 +819,8 @@ app.post("/after-prompt", (req, res) => {
 app.post("/after", async (req, res) => {
   const choice = parseAfterChoice(req);
   const twiml = new VoiceResponse();
+
+  console.log("AFTER choice:", choice);
 
   if (choice === "1") {
     twiml.redirect({ method: "POST" }, "/voice");
@@ -780,6 +857,7 @@ app.post("/after", async (req, res) => {
 
   say(twiml, "Goodbye.");
   twiml.hangup();
+  clearSession(req);
   return res.type("text/xml").send(twiml.toString());
 });
 
