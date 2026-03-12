@@ -13,10 +13,8 @@ const SAY_OPTIONS = {
   language: "en-CA"
 };
 
-// In-memory caller location store
 const callerLocations = new Map();
 
-// Optional custom keypad alias
 const CUSTOM_POSTAL_ALIASES = {
   "428427": "H2V4B7"
 };
@@ -519,27 +517,64 @@ async function resolveLocation(input) {
 }
 
 async function fetchForecast(location) {
-  const url = "https://api.open-meteo.com/v1/forecast";
-  const params = {
-    latitude: location.latitude,
-    longitude: location.longitude,
-    timezone: "auto",
-    forecast_days: 7,
-    current: "temperature_2m,apparent_temperature,rain,showers,snowfall,cloud_cover,wind_speed_10m,weather_code",
-    hourly: "temperature_2m,precipitation_probability,rain,showers,snowfall,cloud_cover,wind_speed_10m,weather_code",
-    daily: "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,rain_sum,showers_sum,snowfall_sum,wind_speed_10m_max"
-  };
-
-  const response = await axios.get(url, {
-    params,
+  const response = await axios.get("https://api.open-meteo.com/v1/forecast", {
+    params: {
+      latitude: location.latitude,
+      longitude: location.longitude,
+      current_weather: true,
+      hourly: "temperature_2m,precipitation_probability,rain,showers,snowfall,cloud_cover,wind_speed_10m,weathercode",
+      daily: "weathercode,temperature_2m_max,temperature_2m_min,precipitation_probability_max,rain_sum,showers_sum,snowfall_sum,wind_speed_10m_max",
+      timezone: "auto",
+      forecast_days: 7
+    },
     timeout: 15000
   });
 
-  return response.data;
+  const data = response.data;
+
+  // Normalize old-style current_weather into current-like object
+  data.current = {
+    temperature_2m: data.current_weather?.temperature ?? 0,
+    apparent_temperature: data.current_weather?.temperature ?? 0,
+    rain: 0,
+    showers: 0,
+    snowfall: 0,
+    cloud_cover: 0,
+    wind_speed_10m: data.current_weather?.windspeed ?? 0,
+    weather_code: data.current_weather?.weathercode ?? 0
+  };
+
+  // Normalize old-style weathercode naming
+  if (data.hourly && data.hourly.weathercode) {
+    data.hourly.weather_code = data.hourly.weathercode;
+  }
+  if (data.daily && data.daily.weathercode) {
+    data.daily.weather_code = data.daily.weathercode;
+  }
+
+  return data;
 }
 
 app.get("/", (req, res) => {
   res.send("Weather phone server is running.");
+});
+
+app.get("/debug-weather", async (req, res) => {
+  try {
+    const location = {
+      name: "Montreal, Quebec, Canada",
+      latitude: 45.5019,
+      longitude: -73.5674,
+      timezone: "America/Toronto"
+    };
+    const forecast = await fetchForecast(location);
+    res.json(forecast);
+  } catch (error) {
+    res.status(500).json({
+      error: error.message,
+      details: error.response?.data || null
+    });
+  }
 });
 
 app.get("/voice", (req, res) => {
