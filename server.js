@@ -8,15 +8,20 @@ app.use(express.json());
 
 const VoiceResponse = twilio.twiml.VoiceResponse;
 
-// Optional Twilio voice settings
+// Optional Twilio voice settings via Render environment variables
+// Example:
+// TWILIO_TTS_LANG=en-CA
+// TWILIO_TTS_VOICE=alice
 const SAY_OPTIONS = {};
 if (process.env.TWILIO_TTS_LANG) SAY_OPTIONS.language = process.env.TWILIO_TTS_LANG;
 if (process.env.TWILIO_TTS_VOICE) SAY_OPTIONS.voice = process.env.TWILIO_TTS_VOICE;
 
 // In-memory caller location store
+// Good for now. Resets if Render restarts.
 const callerLocations = new Map();
 
-// Optional custom keypad aliases
+// Optional custom postal keypad aliases
+// Add your own shortcuts here if you want.
 const CUSTOM_POSTAL_ALIASES = {
   "428427": "H2V4B7"
 };
@@ -99,8 +104,52 @@ function timeLabel(iso, tz) {
   });
 }
 
-function menuTwiml(savedLocationName) {
-  const twiml = new VoiceResponse();
+function parseMenuChoice(req) {
+  const digit = String(req.body.Digits || "").trim();
+  const speech = String(req.body.SpeechResult || "").toLowerCase();
+
+  if (digit) return digit;
+  if (speech.includes("current") || speech.includes("now")) return "1";
+  if (speech.includes("hour")) return "2";
+  if (speech.includes("forecast") || speech.includes("day") || speech.includes("today") || speech.includes("tomorrow")) return "3";
+  if (speech.includes("alert") || speech.includes("warning")) return "4";
+  if (speech.includes("change") || speech.includes("location")) return "5";
+
+  return "";
+}
+
+function parseAfterChoice(req) {
+  const digit = String(req.body.Digits || "").trim();
+  const speech = String(req.body.SpeechResult || "").toLowerCase();
+
+  if (digit) return digit;
+  if (speech.includes("menu")) return "1";
+  if (speech.includes("change") || speech.includes("location")) return "2";
+  if (speech.includes("repeat") || speech.includes("again") || speech.includes("current")) return "3";
+
+  return "";
+}
+
+function parseForecastDayChoice(req, forecast, timezone) {
+  const digit = String(req.body.Digits || "").trim();
+  const speech = String(req.body.SpeechResult || "").toLowerCase();
+
+  if (/^[1-7]$/.test(digit)) return parseInt(digit, 10) - 1;
+  if (speech.includes("today")) return 0;
+  if (speech.includes("tomorrow")) return 1;
+
+  for (let i = 0; i < Math.min(7, forecast.daily.time.length); i++) {
+    const name = dayName(forecast.daily.time[i], timezone).toLowerCase();
+    if (speech.includes(name)) return i;
+  }
+
+  const match = speech.match(/\b([1-7])\b/);
+  if (match) return parseInt(match[1], 10) - 1;
+
+  return -1;
+}
+
+function buildMenuInto(twiml, savedLocationName) {
   const gather = twiml.gather({
     input: "speech dtmf",
     action: "/menu",
@@ -129,7 +178,6 @@ function menuTwiml(savedLocationName) {
   }
 
   twiml.redirect("/voice");
-  return twiml;
 }
 
 function locationPromptTwiml() {
@@ -174,49 +222,6 @@ function afterActionTwiml() {
   return twiml;
 }
 
-function parseMenuChoice(req) {
-  const digit = String(req.body.Digits || "").trim();
-  const speech = String(req.body.SpeechResult || "").toLowerCase();
-
-  if (digit) return digit;
-  if (speech.includes("current") || speech.includes("now")) return "1";
-  if (speech.includes("hour")) return "2";
-  if (speech.includes("forecast") || speech.includes("day") || speech.includes("today") || speech.includes("tomorrow")) return "3";
-  if (speech.includes("alert") || speech.includes("warning")) return "4";
-  if (speech.includes("change") || speech.includes("location")) return "5";
-  return "";
-}
-
-function parseAfterChoice(req) {
-  const digit = String(req.body.Digits || "").trim();
-  const speech = String(req.body.SpeechResult || "").toLowerCase();
-
-  if (digit) return digit;
-  if (speech.includes("menu")) return "1";
-  if (speech.includes("change") || speech.includes("location")) return "2";
-  if (speech.includes("repeat") || speech.includes("again") || speech.includes("current")) return "3";
-  return "";
-}
-
-function parseForecastDayChoice(req, forecast, timezone) {
-  const digit = String(req.body.Digits || "").trim();
-  const speech = String(req.body.SpeechResult || "").toLowerCase();
-
-  if (/^[1-7]$/.test(digit)) return parseInt(digit, 10) - 1;
-  if (speech.includes("today")) return 0;
-  if (speech.includes("tomorrow")) return 1;
-
-  for (let i = 0; i < Math.min(7, forecast.daily.time.length); i++) {
-    const name = dayName(forecast.daily.time[i], timezone).toLowerCase();
-    if (speech.includes(name)) return i;
-  }
-
-  const match = speech.match(/\b([1-7])\b/);
-  if (match) return parseInt(match[1], 10) - 1;
-
-  return -1;
-}
-
 function forecastDayPromptTwiml(location, forecast) {
   const twiml = new VoiceResponse();
   const gather = twiml.gather({
@@ -230,7 +235,10 @@ function forecastDayPromptTwiml(location, forecast) {
 
   const choices = [];
   for (let i = 0; i < Math.min(7, forecast.daily.time.length); i++) {
-    const label = i === 0 ? "today" : i === 1 ? "tomorrow" : dayName(forecast.daily.time[i], location.timezone);
+    const label =
+      i === 0 ? "today" :
+      i === 1 ? "tomorrow" :
+      dayName(forecast.daily.time[i], location.timezone);
     choices.push(`${i + 1} for ${label}`);
   }
 
@@ -318,7 +326,11 @@ function dailyForecastSpeech(location, forecast, index) {
     return `That forecast day is not available for ${location.name}.`;
   }
 
-  const label = index === 0 ? "today" : index === 1 ? "tomorrow" : dayName(d.time[index], location.timezone);
+  const label =
+    index === 0 ? "today" :
+    index === 1 ? "tomorrow" :
+    dayName(d.time[index], location.timezone);
+
   const parts = [
     `Forecast for ${label} in ${location.name}.`,
     `Conditions: ${weatherCodeToText(d.weather_code[index])}.`,
@@ -342,7 +354,10 @@ function alertsSpeech(location, forecast) {
   const alerts = [];
 
   for (let i = 0; i < Math.min(7, d.time.length); i++) {
-    const label = i === 0 ? "today" : i === 1 ? "tomorrow" : dayName(d.time[i], location.timezone);
+    const label =
+      i === 0 ? "today" :
+      i === 1 ? "tomorrow" :
+      dayName(d.time[i], location.timezone);
 
     if ((d.wind_speed_10m_max[i] || 0) >= 50) alerts.push(`Strong wind possible ${label}.`);
     if ((d.snowfall_sum[i] || 0) >= 5) alerts.push(`Significant snow possible ${label}.`);
@@ -357,6 +372,7 @@ function alertsSpeech(location, forecast) {
   return `Important forecast alerts for ${location.name}. ${alerts.join(" ")}`;
 }
 
+// Standard phone keypad mapping
 const KEYMAP = {
   "2": ["A", "B", "C"],
   "3": ["D", "E", "F"],
@@ -431,6 +447,7 @@ async function resolveLocation(input) {
   const aliasPostal = CUSTOM_POSTAL_ALIASES[cleaned];
   const postal = aliasPostal || cleaned;
 
+  // Exact Canadian postal code
   if (/^[A-Z]\d[A-Z]\d[A-Z]\d$/.test(postal)) {
     let results = await searchNominatim({
       postalcode: postal,
@@ -444,6 +461,7 @@ async function resolveLocation(input) {
     if (results.length) return formatNominatimResult(results[0]);
   }
 
+  // Keypad-entered 6 char postal code
   if (/^\d{6}$/.test(cleaned)) {
     const candidates = expandPostalDigits(cleaned);
 
@@ -456,12 +474,14 @@ async function resolveLocation(input) {
     }
   }
 
+  // Canada-first search
   let results = await searchNominatim({
     q: raw,
     countrycodes: "ca"
   });
   if (results.length) return formatNominatimResult(results[0]);
 
+  // Global fallback
   results = await searchNominatim({
     q: raw
   });
@@ -533,8 +553,7 @@ app.post("/voice", (req, res) => {
   );
 
   const saved = getSavedLocation(req);
-  const menu = menuTwiml(saved ? saved.name : null);
-  twiml.append(menu);
+  buildMenuInto(twiml, saved ? saved.name : null);
 
   res.type("text/xml").send(twiml.toString());
 });
