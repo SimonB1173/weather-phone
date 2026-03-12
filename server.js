@@ -13,7 +13,8 @@ const SAY_OPTIONS = {
   language: "en-CA"
 };
 
-const callerLocations = new Map();
+// Store by CallSid so the same phone call keeps its state across Twilio webhooks
+const callSessions = new Map();
 
 const CUSTOM_POSTAL_ALIASES = {
   "428427": "H2V4B7"
@@ -23,16 +24,24 @@ function say(twiml, text) {
   twiml.say(SAY_OPTIONS, text);
 }
 
-function callerKey(req) {
-  return req.body.From || "unknown";
+function sessionKey(req) {
+  return req.body.CallSid || req.body.From || "unknown";
+}
+
+function getSession(req) {
+  const key = sessionKey(req);
+  if (!callSessions.has(key)) {
+    callSessions.set(key, {});
+  }
+  return callSessions.get(key);
 }
 
 function getSavedLocation(req) {
-  return callerLocations.get(callerKey(req)) || null;
+  return getSession(req).location || null;
 }
 
 function saveLocation(req, location) {
-  callerLocations.set(callerKey(req), location);
+  getSession(req).location = location;
 }
 
 function normalizeText(v) {
@@ -173,7 +182,7 @@ function buildMenuInto(twiml, savedLocationName) {
     );
   }
 
-  twiml.redirect("/voice");
+  twiml.redirect({ method: "POST" }, "/voice");
 }
 
 function locationPromptTwiml() {
@@ -192,7 +201,7 @@ function locationPromptTwiml() {
     `You can also type a 6 character postal code on the keypad.`
   );
 
-  twiml.redirect("/voice");
+  twiml.redirect({ method: "POST" }, "/voice");
   return twiml;
 }
 
@@ -245,7 +254,7 @@ function forecastDayPromptTwiml(location, forecast) {
     `Press or say ${choices.join(". ")}.`
   );
 
-  twiml.redirect("/voice");
+  twiml.redirect({ method: "POST" }, "/voice");
   return twiml;
 }
 
@@ -580,6 +589,9 @@ app.get("/voice", (req, res) => {
 app.post("/voice", (req, res) => {
   const twiml = new VoiceResponse();
 
+  console.log("VOICE CallSid:", req.body.CallSid, "From:", req.body.From);
+  console.log("VOICE saved location:", getSavedLocation(req));
+
   say(
     twiml,
     "Welcome to Weather Line. This service is sponsored by Lipa Supermarket."
@@ -596,6 +608,7 @@ app.post("/menu", async (req, res) => {
   const location = getSavedLocation(req);
   const twiml = new VoiceResponse();
 
+  console.log("MENU CallSid:", req.body.CallSid, "From:", req.body.From);
   console.log("MENU choice:", choice);
   console.log("MENU saved location:", location);
 
@@ -605,23 +618,22 @@ app.post("/menu", async (req, res) => {
 
   if (!location) {
     say(twiml, "You need to set your location first.");
-    twiml.redirect("/set-location-prompt");
+    twiml.redirect({ method: "POST" }, "/set-location-prompt");
     return res.type("text/xml").send(twiml.toString());
   }
 
   try {
     const forecast = await fetchForecast(location);
-    console.log("Forecast retrieved successfully for:", location.name);
 
     if (choice === "1") {
       say(twiml, currentWeatherSpeech(location, forecast));
-      twiml.redirect("/after-prompt");
+      twiml.redirect({ method: "POST" }, "/after-prompt");
       return res.type("text/xml").send(twiml.toString());
     }
 
     if (choice === "2") {
       say(twiml, nextHoursSpeech(location, forecast, 6));
-      twiml.redirect("/after-prompt");
+      twiml.redirect({ method: "POST" }, "/after-prompt");
       return res.type("text/xml").send(twiml.toString());
     }
 
@@ -631,18 +643,18 @@ app.post("/menu", async (req, res) => {
 
     if (choice === "4") {
       say(twiml, alertsSpeech(location, forecast));
-      twiml.redirect("/after-prompt");
+      twiml.redirect({ method: "POST" }, "/after-prompt");
       return res.type("text/xml").send(twiml.toString());
     }
 
     say(twiml, "I did not understand that choice.");
-    twiml.redirect("/voice");
+    twiml.redirect({ method: "POST" }, "/voice");
     return res.type("text/xml").send(twiml.toString());
   } catch (error) {
     console.error("MENU weather error:", error.message);
     console.error("MENU weather details:", error.response?.data || null);
     say(twiml, "Sorry, I could not retrieve the weather right now. Please try again later.");
-    twiml.redirect("/voice");
+    twiml.redirect({ method: "POST" }, "/voice");
     return res.type("text/xml").send(twiml.toString());
   }
 });
@@ -655,34 +667,41 @@ app.post("/set-location", async (req, res) => {
   const input = normalizeText(req.body.SpeechResult || req.body.Digits || "");
   const twiml = new VoiceResponse();
 
+  console.log("SET-LOCATION CallSid:", req.body.CallSid, "From:", req.body.From);
   console.log("SET-LOCATION raw input:", input);
   console.log("SpeechResult:", req.body.SpeechResult, "Digits:", req.body.Digits);
 
   if (!input) {
     say(twiml, "I did not get a location.");
-    twiml.redirect("/set-location-prompt");
+    twiml.redirect({ method: "POST" }, "/set-location-prompt");
     return res.type("text/xml").send(twiml.toString());
   }
 
   try {
     const location = await resolveLocation(input);
-    console.log("Resolved location:", location);
 
     if (!location) {
       say(twiml, `I could not find ${input}. Please try again.`);
-      twiml.redirect("/set-location-prompt");
+      twiml.redirect({ method: "POST" }, "/set-location-prompt");
       return res.type("text/xml").send(twiml.toString());
     }
 
     saveLocation(req, location);
+
+    console.log("SET-LOCATION saved:", location);
+    console.log("SET-LOCATION session now:", getSession(req));
+
     say(twiml, `Location saved as ${location.name}.`);
-    twiml.redirect("/voice");
+
+    // Go directly to the menu, not back through a fresh "start" path
+    buildMenuInto(twiml, location.name);
+
     return res.type("text/xml").send(twiml.toString());
   } catch (error) {
     console.error("Location lookup error:", error.message);
     console.error("Location lookup details:", error.response?.data || null);
     say(twiml, "There was a problem finding that location.");
-    twiml.redirect("/voice");
+    twiml.redirect({ method: "POST" }, "/voice");
     return res.type("text/xml").send(twiml.toString());
   }
 });
@@ -693,7 +712,7 @@ app.post("/forecast-day", async (req, res) => {
 
   if (!location) {
     say(twiml, "You need to set your location first.");
-    twiml.redirect("/set-location-prompt");
+    twiml.redirect({ method: "POST" }, "/set-location-prompt");
     return res.type("text/xml").send(twiml.toString());
   }
 
@@ -707,13 +726,13 @@ app.post("/forecast-day", async (req, res) => {
     }
 
     say(twiml, dailyForecastSpeech(location, forecast, idx));
-    twiml.redirect("/after-prompt");
+    twiml.redirect({ method: "POST" }, "/after-prompt");
     return res.type("text/xml").send(twiml.toString());
   } catch (error) {
     console.error("FORECAST-DAY error:", error.message);
     console.error("FORECAST-DAY details:", error.response?.data || null);
     say(twiml, "Sorry, I could not retrieve that forecast.");
-    twiml.redirect("/voice");
+    twiml.redirect({ method: "POST" }, "/voice");
     return res.type("text/xml").send(twiml.toString());
   }
 });
@@ -727,12 +746,12 @@ app.post("/after", async (req, res) => {
   const twiml = new VoiceResponse();
 
   if (choice === "1") {
-    twiml.redirect("/voice");
+    twiml.redirect({ method: "POST" }, "/voice");
     return res.type("text/xml").send(twiml.toString());
   }
 
   if (choice === "2") {
-    twiml.redirect("/set-location-prompt");
+    twiml.redirect({ method: "POST" }, "/set-location-prompt");
     return res.type("text/xml").send(twiml.toString());
   }
 
@@ -741,20 +760,20 @@ app.post("/after", async (req, res) => {
 
     if (!location) {
       say(twiml, "You need to set your location first.");
-      twiml.redirect("/set-location-prompt");
+      twiml.redirect({ method: "POST" }, "/set-location-prompt");
       return res.type("text/xml").send(twiml.toString());
     }
 
     try {
       const forecast = await fetchForecast(location);
       say(twiml, currentWeatherSpeech(location, forecast));
-      twiml.redirect("/after-prompt");
+      twiml.redirect({ method: "POST" }, "/after-prompt");
       return res.type("text/xml").send(twiml.toString());
     } catch (error) {
       console.error("AFTER repeat current error:", error.message);
       console.error("AFTER repeat current details:", error.response?.data || null);
       say(twiml, "Sorry, I could not retrieve the weather.");
-      twiml.redirect("/voice");
+      twiml.redirect({ method: "POST" }, "/voice");
       return res.type("text/xml").send(twiml.toString());
     }
   }
