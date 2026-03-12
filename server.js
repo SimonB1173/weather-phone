@@ -8,22 +8,19 @@ app.use(express.json());
 
 const VoiceResponse = twilio.twiml.VoiceResponse;
 
-// Optional: set these in Render environment variables later if you want.
-// Example:
-// TWILIO_TTS_LANG = en-CA
-// TWILIO_TTS_VOICE = alice
+// Optional Twilio voice settings
 const SAY_OPTIONS = {};
 if (process.env.TWILIO_TTS_LANG) SAY_OPTIONS.language = process.env.TWILIO_TTS_LANG;
 if (process.env.TWILIO_TTS_VOICE) SAY_OPTIONS.voice = process.env.TWILIO_TTS_VOICE;
 
-// In-memory caller location store.
-// Fine for testing. Resets on app restart/redeploy.
+// Put your public MP3/WAV URL here
+const JINGLE_URL = "https://YOUR_PUBLIC_AUDIO_URL_HERE.mp3";
+
+// In-memory caller location store
 const callerLocations = new Map();
 
-// Optional custom keypad aliases.
-// Add more if you want your own shortcuts.
-// Example requested:
-// H2V4B7 => 428427
+// Optional custom keypad aliases
+// Example requested shortcut:
 const CUSTOM_POSTAL_ALIASES = {
   "428427": "H2V4B7"
 };
@@ -120,7 +117,7 @@ function menuTwiml(savedLocationName) {
   if (savedLocationName) {
     say(
       gather,
-      `Welcome to Weather Line. Your saved location is ${savedLocationName}. ` +
+      `Your saved location is ${savedLocationName}. ` +
         `Press or say 1 for current weather. ` +
         `2 for the next 6 hours. ` +
         `3 for the 7 day forecast menu. ` +
@@ -130,7 +127,7 @@ function menuTwiml(savedLocationName) {
   } else {
     say(
       gather,
-      `Welcome to Weather Line. No location is saved yet. ` +
+      `No location is saved yet. ` +
         `Press or say 5 to set your location.`
     );
   }
@@ -364,8 +361,6 @@ function alertsSpeech(location, forecast) {
   return `Important forecast alerts for ${location.name}. ${alerts.join(" ")}`;
 }
 
-// Standard phone keypad mapping for letters.
-// We also support custom aliases above.
 const KEYMAP = {
   "2": ["A", "B", "C"],
   "3": ["D", "E", "F"],
@@ -416,17 +411,19 @@ async function searchNominatim(params) {
 
 function formatNominatimResult(r) {
   const a = r.address || {};
+  const name =
+    a.city ||
+    a.town ||
+    a.village ||
+    a.municipality ||
+    a.suburb ||
+    r.display_name;
+
   return {
-    name:
-      a.city ||
-      a.town ||
-      a.village ||
-      a.municipality ||
-      a.suburb ||
-      r.display_name,
+    name,
     latitude: parseFloat(r.lat),
     longitude: parseFloat(r.lon),
-    timezone: "America/Toronto" // practical default for your Canada-first use case
+    timezone: "America/Toronto"
   };
 }
 
@@ -435,28 +432,22 @@ async function resolveLocation(input) {
   if (!raw) return null;
 
   const cleaned = cleanPostalCode(raw);
-
-  // 1) Custom shortcut aliases like 428427 => H2V4B7
   const aliasPostal = CUSTOM_POSTAL_ALIASES[cleaned];
   const postal = aliasPostal || cleaned;
 
-  // 2) Canadian postal code exact match
   if (/^[A-Z]\d[A-Z]\d[A-Z]\d$/.test(postal)) {
     let results = await searchNominatim({
       postalcode: postal,
       countrycodes: "ca"
     });
-
     if (results.length) return formatNominatimResult(results[0]);
 
     results = await searchNominatim({
       q: `${postal}, Canada`
     });
-
     if (results.length) return formatNominatimResult(results[0]);
   }
 
-  // 3) 6-digit keypad entry like H2V4B7
   if (/^\d{6}$/.test(cleaned)) {
     const candidates = expandPostalDigits(cleaned);
 
@@ -469,14 +460,12 @@ async function resolveLocation(input) {
     }
   }
 
-  // 4) Canada-first free-form city search
   let results = await searchNominatim({
     q: raw,
     countrycodes: "ca"
   });
   if (results.length) return formatNominatimResult(results[0]);
 
-  // 5) Fallback unrestricted search
   results = await searchNominatim({
     q: raw
   });
@@ -540,8 +529,22 @@ app.get("/voice", (req, res) => {
 });
 
 app.post("/voice", (req, res) => {
+  const twiml = new VoiceResponse();
+
+  if (JINGLE_URL && !JINGLE_URL.includes("YOUR_PUBLIC_AUDIO_URL_HERE")) {
+    twiml.play(JINGLE_URL);
+  }
+
+  say(
+    twiml,
+    "Welcome to Weather Line. This service is sponsored by Lipa Supermarket."
+  );
+
   const saved = getSavedLocation(req);
-  res.type("text/xml").send(menuTwiml(saved ? saved.name : null).toString());
+  const menu = menuTwiml(saved ? saved.name : null);
+  twiml.append(menu);
+
+  res.type("text/xml").send(twiml.toString());
 });
 
 app.post("/menu", async (req, res) => {
@@ -677,6 +680,7 @@ app.post("/after", async (req, res) => {
 
   if (choice === "3") {
     const location = getSavedLocation(req);
+
     if (!location) {
       say(twiml, "You need to set your location first.");
       twiml.redirect("/set-location-prompt");
