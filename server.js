@@ -8,18 +8,15 @@ app.use(express.json());
 
 const VoiceResponse = twilio.twiml.VoiceResponse;
 
-// Optional voice settings via Render environment variables
-// Example:
-// TWILIO_TTS_LANG=en-CA
-// TWILIO_TTS_VOICE=alice
-const SAY_OPTIONS = {};
-if (process.env.TWILIO_TTS_LANG) SAY_OPTIONS.language = process.env.TWILIO_TTS_LANG;
-if (process.env.TWILIO_TTS_VOICE) SAY_OPTIONS.voice = process.env.TWILIO_TTS_VOICE;
+const SAY_OPTIONS = {
+  voice: "alice",
+  language: "en-CA"
+};
 
 // In-memory caller location store
 const callerLocations = new Map();
 
-// Optional custom keypad aliases
+// Optional custom keypad alias
 const CUSTOM_POSTAL_ALIASES = {
   "428427": "H2V4B7"
 };
@@ -112,7 +109,6 @@ function parseMenuChoice(req) {
   if (speech.includes("forecast") || speech.includes("day") || speech.includes("today") || speech.includes("tomorrow")) return "3";
   if (speech.includes("alert") || speech.includes("warning")) return "4";
   if (speech.includes("change") || speech.includes("location")) return "5";
-
   return "";
 }
 
@@ -124,7 +120,6 @@ function parseAfterChoice(req) {
   if (speech.includes("menu")) return "1";
   if (speech.includes("change") || speech.includes("location")) return "2";
   if (speech.includes("repeat") || speech.includes("again") || speech.includes("current")) return "3";
-
   return "";
 }
 
@@ -161,17 +156,17 @@ function buildMenuInto(twiml, savedLocationName) {
     say(
       gather,
       `Your saved location is ${savedLocationName}. ` +
-        `Press or say 1 for current weather. ` +
-        `2 for the next 6 hours. ` +
-        `3 for the 7 day forecast menu. ` +
-        `4 for important alerts. ` +
-        `5 to change location.`
+      `Press or say 1 for current weather. ` +
+      `2 for the next 6 hours. ` +
+      `3 for the 7 day forecast menu. ` +
+      `4 for important alerts. ` +
+      `5 to change location.`
     );
   } else {
     say(
       gather,
       `No location is saved yet. ` +
-        `Press or say 5 to set your location.`
+      `Press or say 5 to set your location.`
     );
   }
 
@@ -191,7 +186,7 @@ function locationPromptTwiml() {
   say(
     gather,
     `Say a city, province, or postal code in Canada. ` +
-      `You can also type a 6 character postal code on the keypad.`
+    `You can also type a 6 character postal code on the keypad.`
   );
 
   twiml.redirect("/voice");
@@ -212,8 +207,8 @@ function afterActionTwiml() {
   say(
     gather,
     `Press or say 1 for the main menu. ` +
-      `2 to change location. ` +
-      `3 to hear current weather again.`
+    `2 to change location. ` +
+    `3 to hear current weather again.`
   );
 
   twiml.hangup();
@@ -243,7 +238,7 @@ function forecastDayPromptTwiml(location, forecast) {
   say(
     gather,
     `Choose a forecast day for ${location.name}. ` +
-      `Press or say ${choices.join(". ")}.`
+    `Press or say ${choices.join(". ")}.`
   );
 
   twiml.redirect("/voice");
@@ -459,7 +454,6 @@ async function resolveLocation(input) {
   const aliasPostal = CUSTOM_POSTAL_ALIASES[cleaned];
   const postal = aliasPostal || cleaned;
 
-  // Helpful manual Canada fallbacks
   const manualMap = {
     "MONTREAL": {
       name: "Montreal, Quebec, Canada",
@@ -468,6 +462,12 @@ async function resolveLocation(input) {
       timezone: "America/Toronto"
     },
     "MONTREALCANADA": {
+      name: "Montreal, Quebec, Canada",
+      latitude: 45.5019,
+      longitude: -73.5674,
+      timezone: "America/Toronto"
+    },
+    "MONTREALQUEBEC": {
       name: "Montreal, Quebec, Canada",
       latitude: 45.5019,
       longitude: -73.5674,
@@ -487,93 +487,52 @@ async function resolveLocation(input) {
   const collapsedRaw = raw.toUpperCase().replace(/\s+/g, "");
   if (manualMap[collapsedRaw]) return manualMap[collapsedRaw];
 
-  // Exact Canadian postal code
   if (/^[A-Z]\d[A-Z]\d[A-Z]\d$/.test(postal)) {
-    let results = await searchNominatim({
-      postalcode: postal
-    });
+    let results = await searchNominatim({ postalcode: postal });
     if (results.length) return formatNominatimResult(results[0]);
 
-    results = await searchNominatim({
-      q: `${postal}, Canada`
-    });
+    results = await searchNominatim({ q: `${postal}, Canada` });
     if (results.length) return formatNominatimResult(results[0]);
   }
 
-  // Keypad-entered 6-char postal code
   if (/^\d{6}$/.test(cleaned)) {
     const candidates = expandPostalDigits(cleaned);
 
     for (const c of candidates) {
       if (manualMap[c]) return manualMap[c];
 
-      let results = await searchNominatim({
-        postalcode: c
-      });
+      let results = await searchNominatim({ postalcode: c });
       if (results.length) return formatNominatimResult(results[0]);
     }
   }
 
-  // Free-form city search
-  let results = await searchNominatim({
-    q: raw
-  });
+  let results = await searchNominatim({ q: raw });
   if (results.length) return formatNominatimResult(results[0]);
 
-  // Stronger Canada hint
-  results = await searchNominatim({
-    q: `${raw}, Canada`
-  });
+  results = await searchNominatim({ q: `${raw}, Canada` });
   if (results.length) return formatNominatimResult(results[0]);
 
-  // Structured city search
-  results = await searchNominatim({
-    city: raw
-  });
+  results = await searchNominatim({ city: raw });
   if (results.length) return formatNominatimResult(results[0]);
 
   return null;
 }
 
 async function fetchForecast(location) {
-  const response = await axios.get("https://api.open-meteo.com/v1/forecast", {
-    params: {
-      latitude: location.latitude,
-      longitude: location.longitude,
-      timezone: "auto",
-      forecast_days: 7,
-      current: [
-        "temperature_2m",
-        "apparent_temperature",
-        "rain",
-        "showers",
-        "snowfall",
-        "cloud_cover",
-        "wind_speed_10m",
-        "weather_code"
-      ].join(","),
-      hourly: [
-        "temperature_2m",
-        "precipitation_probability",
-        "rain",
-        "showers",
-        "snowfall",
-        "cloud_cover",
-        "wind_speed_10m",
-        "weather_code"
-      ].join(","),
-      daily: [
-        "weather_code",
-        "temperature_2m_max",
-        "temperature_2m_min",
-        "precipitation_probability_max",
-        "rain_sum",
-        "showers_sum",
-        "snowfall_sum",
-        "wind_speed_10m_max"
-      ].join(",")
-    },
-    timeout: 12000
+  const url = "https://api.open-meteo.com/v1/forecast";
+  const params = {
+    latitude: location.latitude,
+    longitude: location.longitude,
+    timezone: "auto",
+    forecast_days: 7,
+    current: "temperature_2m,apparent_temperature,rain,showers,snowfall,cloud_cover,wind_speed_10m,weather_code",
+    hourly: "temperature_2m,precipitation_probability,rain,showers,snowfall,cloud_cover,wind_speed_10m,weather_code",
+    daily: "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,rain_sum,showers_sum,snowfall_sum,wind_speed_10m_max"
+  };
+
+  const response = await axios.get(url, {
+    params,
+    timeout: 15000
   });
 
   return response.data;
@@ -608,6 +567,9 @@ app.post("/menu", async (req, res) => {
   const location = getSavedLocation(req);
   const twiml = new VoiceResponse();
 
+  console.log("MENU choice:", choice);
+  console.log("MENU saved location:", location);
+
   if (choice === "5") {
     return res.type("text/xml").send(locationPromptTwiml().toString());
   }
@@ -620,6 +582,7 @@ app.post("/menu", async (req, res) => {
 
   try {
     const forecast = await fetchForecast(location);
+    console.log("Forecast retrieved successfully for:", location.name);
 
     if (choice === "1") {
       say(twiml, currentWeatherSpeech(location, forecast));
@@ -647,8 +610,12 @@ app.post("/menu", async (req, res) => {
     twiml.redirect("/voice");
     return res.type("text/xml").send(twiml.toString());
   } catch (error) {
-    console.error("MENU error:", error.message);
-    say(twiml, "Sorry, I could not retrieve the forecast right now.");
+    console.error("MENU weather error:", error.message);
+    if (error.response) {
+      console.error("OPEN-METEO ERROR STATUS:", error.response.status);
+      console.error("OPEN-METEO ERROR DATA:", JSON.stringify(error.response.data));
+    }
+    say(twiml, "Sorry, I could not retrieve the weather right now. Please try again later.");
     twiml.redirect("/voice");
     return res.type("text/xml").send(twiml.toString());
   }
@@ -717,6 +684,10 @@ app.post("/forecast-day", async (req, res) => {
     return res.type("text/xml").send(twiml.toString());
   } catch (error) {
     console.error("FORECAST-DAY error:", error.message);
+    if (error.response) {
+      console.error("OPEN-METEO ERROR STATUS:", error.response.status);
+      console.error("OPEN-METEO ERROR DATA:", JSON.stringify(error.response.data));
+    }
     say(twiml, "Sorry, I could not retrieve that forecast.");
     twiml.redirect("/voice");
     return res.type("text/xml").send(twiml.toString());
@@ -757,6 +728,10 @@ app.post("/after", async (req, res) => {
       return res.type("text/xml").send(twiml.toString());
     } catch (error) {
       console.error("AFTER repeat current error:", error.message);
+      if (error.response) {
+        console.error("OPEN-METEO ERROR STATUS:", error.response.status);
+        console.error("OPEN-METEO ERROR DATA:", JSON.stringify(error.response.data));
+      }
       say(twiml, "Sorry, I could not retrieve the weather.");
       twiml.redirect("/voice");
       return res.type("text/xml").send(twiml.toString());
