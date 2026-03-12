@@ -13,14 +13,10 @@ const SAY_OPTIONS = {};
 if (process.env.TWILIO_TTS_LANG) SAY_OPTIONS.language = process.env.TWILIO_TTS_LANG;
 if (process.env.TWILIO_TTS_VOICE) SAY_OPTIONS.voice = process.env.TWILIO_TTS_VOICE;
 
-// Put your public MP3/WAV URL here
-const JINGLE_URL = "https://YOUR_PUBLIC_AUDIO_URL_HERE.mp3";
-
 // In-memory caller location store
 const callerLocations = new Map();
 
 // Optional custom keypad aliases
-// Example requested shortcut:
 const CUSTOM_POSTAL_ALIASES = {
   "428427": "H2V4B7"
 };
@@ -530,10 +526,6 @@ app.get("/voice", (req, res) => {
 
 app.post("/voice", (req, res) => {
   const twiml = new VoiceResponse();
-
-  if (JINGLE_URL && !JINGLE_URL.includes("YOUR_PUBLIC_AUDIO_URL_HERE")) {
-    twiml.play(JINGLE_URL);
-  }
 
   say(
     twiml,
