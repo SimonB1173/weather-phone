@@ -17,11 +17,14 @@ const SAY_OPTIONS = {
 
 const forecastCache = new Map();
 const inFlightForecasts = new Map();
+const canadaAlertCache = new Map();
 
 const FORECAST_CACHE_MS = 10 * 60 * 1000; // 10 minutes fresh
 const STALE_FORECAST_MS = 60 * 60 * 1000; // 1 hour stale fallback
+const ALERT_CACHE_MS = 10 * 60 * 1000; // 10 minutes
 
 const DATA_FILE = path.join(__dirname, "saved-locations.json");
+const VOICEMAILS_FILE = path.join(__dirname, "voicemails.json");
 
 const PRESET_LOCATIONS = {
   "1": {
@@ -30,7 +33,9 @@ const PRESET_LOCATIONS = {
     latitude: 45.5239,
     longitude: -73.5997,
     timezone: "America/Toronto",
-    label: "Montreal"
+    label: "Montreal",
+    country: "CA",
+    alertFeedUrl: "https://weather.gc.ca/rss/alerts/45.5017_-73.5673_e.xml"
   },
   "2": {
     id: "tosh",
@@ -43,7 +48,8 @@ const PRESET_LOCATIONS = {
     latitude: 40.7143,
     longitude: -73.9533,
     timezone: "America/New_York",
-    label: "Brooklyn"
+    label: "Brooklyn",
+    country: "US"
   },
   "4": {
     id: "monsey",
@@ -51,7 +57,8 @@ const PRESET_LOCATIONS = {
     latitude: 41.1134,
     longitude: -74.0435,
     timezone: "America/New_York",
-    label: "Monsey"
+    label: "Monsey",
+    country: "US"
   },
   "5": {
     id: "monroe",
@@ -59,7 +66,8 @@ const PRESET_LOCATIONS = {
     latitude: 41.3326,
     longitude: -74.1860,
     timezone: "America/New_York",
-    label: "Monroe"
+    label: "Monroe",
+    country: "US"
   }
 };
 
@@ -87,30 +95,31 @@ function getCallerKey(req) {
   return normalizeCaller(req.body.From || "unknown");
 }
 
-function loadSavedLocationsFromDisk() {
+function loadJsonFile(filePath, fallback) {
   try {
-    if (!fs.existsSync(DATA_FILE)) {
-      return {};
-    }
-    const raw = fs.readFileSync(DATA_FILE, "utf8");
-    return JSON.parse(raw || "{}");
+    if (!fs.existsSync(filePath)) return fallback;
+    const raw = fs.readFileSync(filePath, "utf8");
+    return JSON.parse(raw || JSON.stringify(fallback));
   } catch (error) {
-    console.error("Failed to read saved locations file:", error.message);
-    return {};
+    console.error(`Failed to read ${filePath}:`, error.message);
+    return fallback;
+  }
+}
+
+function saveJsonFile(filePath, value) {
+  try {
+    fs.writeFileSync(filePath, JSON.stringify(value, null, 2), "utf8");
+  } catch (error) {
+    console.error(`Failed to write ${filePath}:`, error.message);
   }
 }
 
 const savedLocationsByCaller = new Map(
-  Object.entries(loadSavedLocationsFromDisk())
+  Object.entries(loadJsonFile(DATA_FILE, {}))
 );
 
 function persistSavedLocations() {
-  try {
-    const obj = Object.fromEntries(savedLocationsByCaller.entries());
-    fs.writeFileSync(DATA_FILE, JSON.stringify(obj, null, 2), "utf8");
-  } catch (error) {
-    console.error("Failed to persist saved locations:", error.message);
-  }
+  saveJsonFile(DATA_FILE, Object.fromEntries(savedLocationsByCaller.entries()));
 }
 
 function getSavedLocation(req) {
@@ -124,8 +133,88 @@ function saveLocationForCaller(req, location) {
   persistSavedLocations();
 }
 
+function appendVoicemailRecord(record) {
+  const current = loadJsonFile(VOICEMAILS_FILE, []);
+  current.push(record);
+  saveJsonFile(VOICEMAILS_FILE, current);
+}
+
+function updateVoicemailRecord(callSid, updates) {
+  const current = loadJsonFile(VOICEMAILS_FILE, []);
+  let found = false;
+
+  for (let i = current.length - 1; i >= 0; i--) {
+    if (current[i].callSid === callSid) {
+      current[i] = { ...current[i], ...updates };
+      found = true;
+      break;
+    }
+  }
+
+  if (!found) {
+    current.push({
+      callSid,
+      ...updates
+    });
+  }
+
+  saveJsonFile(VOICEMAILS_FILE, current);
+}
+
 function pushIf(parts, condition, text) {
   if (condition) parts.push(text);
+}
+
+function normalizePlaceName(name) {
+  return String(name || "")
+    .toUpperCase()
+    .replace(/,\s*CANADA/g, "")
+    .replace(/,\s*USA/g, "")
+    .replace(/[^A-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function cacheKeyForLocation(location) {
+  const place = normalizePlaceName(location.name);
+  if (place) return place;
+  return `${Number(location.latitude).toFixed(2)},${Number(location.longitude).toFixed(2)}`;
+}
+
+function pruneForecastCache() {
+  const now = Date.now();
+  for (const [key, value] of forecastCache.entries()) {
+    if (!value || (now - value.timestamp) > STALE_FORECAST_MS) {
+      forecastCache.delete(key);
+    }
+  }
+}
+
+function getCachedForecast(location, { allowStale = false } = {}) {
+  const key = cacheKeyForLocation(location);
+  const cached = forecastCache.get(key);
+
+  if (!cached) return null;
+
+  const age = Date.now() - cached.timestamp;
+
+  if (age <= FORECAST_CACHE_MS) {
+    return { data: cached.data, isStale: false, key, age };
+  }
+
+  if (allowStale && age <= STALE_FORECAST_MS) {
+    return { data: cached.data, isStale: true, key, age };
+  }
+
+  return null;
+}
+
+function setCachedForecast(location, data) {
+  const key = cacheKeyForLocation(location);
+  forecastCache.set(key, {
+    data,
+    timestamp: Date.now()
+  });
+  return key;
 }
 
 function weatherCodeToText(code) {
@@ -193,6 +282,14 @@ function parseMainMenuChoice(req) {
   ) return "3";
   if (speech.includes("alert") || speech.includes("warning")) return "4";
   if (speech.includes("change") || speech.includes("location")) return "5";
+  if (
+    speech.includes("message") ||
+    speech.includes("comment") ||
+    speech.includes("advertise") ||
+    speech.includes("advertisement") ||
+    speech.includes("voicemail") ||
+    speech.includes("voice mail")
+  ) return "6";
   return "";
 }
 
@@ -204,6 +301,13 @@ function parseAfterChoice(req) {
   if (speech.includes("menu")) return "1";
   if (speech.includes("change") || speech.includes("location")) return "2";
   if (speech.includes("repeat") || speech.includes("again") || speech.includes("current")) return "3";
+  if (
+    speech.includes("message") ||
+    speech.includes("comment") ||
+    speech.includes("advertise") ||
+    speech.includes("voicemail") ||
+    speech.includes("voice mail")
+  ) return "4";
   return "";
 }
 
@@ -245,7 +349,7 @@ function buildMainMenuInto(twiml, savedLocationName) {
     input: "speech dtmf",
     action: "/menu",
     method: "POST",
-    timeout: 6,
+    timeout: 8,
     speechTimeout: "auto",
     numDigits: 1
   });
@@ -257,7 +361,8 @@ function buildMainMenuInto(twiml, savedLocationName) {
       `Press or say 2 for the next 6 hours. ` +
       `Press or say 3 for the 7 day forecast menu. ` +
       `Press or say 4 for important alerts. ` +
-      `Press or say 5 to change location.`
+      `Press or say 5 to change location. ` +
+      `Press or say 6 to leave a voice message for advertising or comments.`
   );
 
   twiml.redirect({ method: "POST" }, "/voice");
@@ -305,7 +410,8 @@ function afterActionTwiml() {
     gather,
     `Press or say 1 for the main menu. ` +
       `Press or say 2 to change location. ` +
-      `Press or say 3 to hear current weather again.`
+      `Press or say 3 to hear current weather again. ` +
+      `Press or say 4 to leave a voice message.`
   );
 
   twiml.hangup();
@@ -341,6 +447,34 @@ function forecastDayPromptTwiml(location, forecast) {
   );
 
   twiml.redirect({ method: "POST" }, "/voice");
+  return twiml;
+}
+
+function voicemailPromptTwiml() {
+  const twiml = new VoiceResponse();
+
+  say(
+    twiml,
+    "Please leave your message after the beep. " +
+      "You can use this for advertising requests or comments. " +
+      "Press the star key when you are finished."
+  );
+
+  twiml.record({
+    action: "/handle-recording",
+    method: "POST",
+    maxLength: 180,
+    finishOnKey: "*",
+    playBeep: true,
+    trim: "trim-silence",
+    recordingStatusCallback: "/recording-status",
+    recordingStatusCallbackMethod: "POST",
+    recordingStatusCallbackEvent: ["completed"]
+  });
+
+  say(twiml, "I did not receive a recording.");
+  twiml.redirect({ method: "POST" }, "/after-prompt");
+
   return twiml;
 }
 
@@ -470,56 +604,101 @@ function alertsSpeech(location, forecast) {
   return `Important forecast alerts for ${location.name}. ${alerts.join(" ")}`;
 }
 
-function normalizePlaceName(name) {
-  return String(name || "")
-    .toUpperCase()
-    .replace(/,\s*CANADA/g, "")
-    .replace(/,\s*USA/g, "")
-    .replace(/[^A-Z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "");
+function stripXmlTags(text) {
+  return String(text || "")
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-function cacheKeyForLocation(location) {
-  const place = normalizePlaceName(location.name);
-  if (place) return place;
-  return `${Number(location.latitude).toFixed(2)},${Number(location.longitude).toFixed(2)}`;
+function firstMatch(text, regex) {
+  const match = String(text || "").match(regex);
+  return match ? stripXmlTags(match[1]) : "";
 }
 
-function pruneForecastCache() {
+function summarizeAlertText(text, maxLength = 260) {
+  const clean = stripXmlTags(text);
+  if (!clean) return "";
+  if (clean.length <= maxLength) return clean;
+
+  const shortened = clean.slice(0, maxLength);
+  const cut = shortened.lastIndexOf(". ");
+  if (cut > 80) {
+    return shortened.slice(0, cut + 1).trim();
+  }
+  return `${shortened.trim()}...`;
+}
+
+async function fetchCanadianAlert(location) {
+  if (!location || location.country !== "CA" || !location.alertFeedUrl) {
+    return null;
+  }
+
+  const cacheKey = location.alertFeedUrl;
+  const cached = canadaAlertCache.get(cacheKey);
   const now = Date.now();
-  for (const [key, value] of forecastCache.entries()) {
-    if (!value || (now - value.timestamp) > STALE_FORECAST_MS) {
-      forecastCache.delete(key);
+
+  if (cached && (now - cached.timestamp) < ALERT_CACHE_MS) {
+    return cached.value;
+  }
+
+  try {
+    const response = await axios.get(location.alertFeedUrl, {
+      timeout: 8000,
+      headers: {
+        "User-Agent": "weather-line-canada/1.0"
+      }
+    });
+
+    const xml = String(response.data || "");
+    const items = xml.match(/<item\b[\s\S]*?<\/item>/gi) || [];
+    let alertValue = null;
+
+    if (items.length > 0) {
+      const firstItem = items[0];
+      const title = firstMatch(firstItem, /<title[^>]*>([\s\S]*?)<\/title>/i);
+      const description = firstMatch(firstItem, /<description[^>]*>([\s\S]*?)<\/description>/i);
+
+      const combined = `${title} ${description}`.toLowerCase();
+      const noAlert =
+        combined.includes("no watches or warnings in effect") ||
+        combined.includes("no alerts in effect") ||
+        combined.includes("no warning or watch in effect");
+
+      if (!noAlert) {
+        alertValue = {
+          title: summarizeAlertText(title, 120),
+          description: summarizeAlertText(description, 260)
+        };
+      }
     }
+
+    canadaAlertCache.set(cacheKey, {
+      value: alertValue,
+      timestamp: now
+    });
+
+    return alertValue;
+  } catch (error) {
+    console.error("Canada alert fetch failed:", error.message);
+    return null;
   }
 }
 
-function getCachedForecast(location, { allowStale = false } = {}) {
-  const key = cacheKeyForLocation(location);
-  const cached = forecastCache.get(key);
+function buildCanadianAlertSpeech(location, alert) {
+  if (!location || !alert) return "";
+  const parts = [`Environment Canada alert for ${location.label || location.name}.`];
 
-  if (!cached) return null;
+  if (alert.title) parts.push(alert.title);
+  if (alert.description) parts.push(alert.description);
 
-  const age = Date.now() - cached.timestamp;
-
-  if (age <= FORECAST_CACHE_MS) {
-    return { data: cached.data, isStale: false, key, age };
-  }
-
-  if (allowStale && age <= STALE_FORECAST_MS) {
-    return { data: cached.data, isStale: true, key, age };
-  }
-
-  return null;
-}
-
-function setCachedForecast(location, data) {
-  const key = cacheKeyForLocation(location);
-  forecastCache.set(key, {
-    data,
-    timestamp: Date.now()
-  });
-  return key;
+  return parts.join(" ");
 }
 
 async function fetchForecast(location) {
@@ -645,6 +824,7 @@ app.get("/debug-weather", async (req, res) => {
     const before = getCachedForecast(location, { allowStale: true });
     const forecast = await fetchForecast(location);
     const after = getCachedForecast(location, { allowStale: true });
+    const canadaAlert = await fetchCanadianAlert(location);
 
     res.json({
       ok: true,
@@ -655,7 +835,8 @@ app.get("/debug-weather", async (req, res) => {
       in_flight_requests: inFlightForecasts.size,
       current: forecast.current,
       hourly_keys: Object.keys(forecast.hourly || {}),
-      daily_keys: Object.keys(forecast.daily || {})
+      daily_keys: Object.keys(forecast.daily || {}),
+      canada_alert: canadaAlert
     });
   } catch (error) {
     res.status(500).json({
@@ -673,7 +854,7 @@ app.get("/voice", (req, res) => {
   res.type("text/xml").send(twiml.toString());
 });
 
-app.post("/voice", (req, res) => {
+app.post("/voice", async (req, res) => {
   const twiml = new VoiceResponse();
   const saved = getSavedLocation(req);
 
@@ -686,6 +867,11 @@ app.post("/voice", (req, res) => {
   );
 
   if (saved) {
+    const canadaAlert = await fetchCanadianAlert(saved);
+    if (canadaAlert) {
+      say(twiml, buildCanadianAlertSpeech(saved, canadaAlert));
+    }
+
     buildMainMenuInto(twiml, saved.label || saved.name);
   } else {
     say(twiml, "No saved location was found for this number.");
@@ -736,6 +922,10 @@ app.post("/menu", async (req, res) => {
 
   if (choice === "5") {
     return res.type("text/xml").send(locationMenuTwiml().toString());
+  }
+
+  if (choice === "6") {
+    return res.type("text/xml").send(voicemailPromptTwiml().toString());
   }
 
   if (!location) {
@@ -858,9 +1048,82 @@ app.post("/after", async (req, res) => {
     }
   }
 
+  if (choice === "4") {
+    return res.type("text/xml").send(voicemailPromptTwiml().toString());
+  }
+
   say(twiml, "Goodbye.");
   twiml.hangup();
   return res.type("text/xml").send(twiml.toString());
+});
+
+app.post("/handle-recording", (req, res) => {
+  const twiml = new VoiceResponse();
+
+  const callSid = String(req.body.CallSid || "");
+  const from = String(req.body.From || "");
+  const to = String(req.body.To || "");
+  const recordingUrl = String(req.body.RecordingUrl || "");
+  const recordingDuration = String(req.body.RecordingDuration || "");
+
+  console.log("HANDLE-RECORDING", {
+    callSid,
+    from,
+    to,
+    recordingUrl,
+    recordingDuration
+  });
+
+  if (recordingUrl) {
+    appendVoicemailRecord({
+      callSid,
+      from,
+      to,
+      recordingUrl,
+      recordingDuration,
+      createdAt: new Date().toISOString(),
+      source: "action"
+    });
+
+    say(twiml, "Thank you. Your message has been saved.");
+  } else {
+    say(twiml, "I did not receive a message.");
+  }
+
+  twiml.redirect({ method: "POST" }, "/after-prompt");
+  res.type("text/xml").send(twiml.toString());
+});
+
+app.post("/recording-status", (req, res) => {
+  const callSid = String(req.body.CallSid || "");
+  const recordingSid = String(req.body.RecordingSid || "");
+  const recordingUrl = String(req.body.RecordingUrl || "");
+  const recordingStatus = String(req.body.RecordingStatus || "");
+  const recordingDuration = String(req.body.RecordingDuration || "");
+  const from = String(req.body.From || "");
+  const to = String(req.body.To || "");
+
+  console.log("RECORDING-STATUS", {
+    callSid,
+    recordingSid,
+    recordingUrl,
+    recordingStatus,
+    recordingDuration
+  });
+
+  updateVoicemailRecord(callSid, {
+    callSid,
+    recordingSid,
+    recordingUrl,
+    recordingStatus,
+    recordingDuration,
+    from,
+    to,
+    updatedAt: new Date().toISOString(),
+    source: "recordingStatusCallback"
+  });
+
+  res.status(204).send();
 });
 
 const port = process.env.PORT || 3000;
