@@ -730,7 +730,10 @@ function summarizeHourlyBlock(block, tz) {
     block.items.reduce((sum, x) => sum + Number(x.temp || 0), 0) / block.items.length;
   const maxRainChance = Math.max(...block.items.map((x) => Number(x.rainChance || 0)));
   const maxWind = Math.max(...block.items.map((x) => Number(x.wind || 0)));
-  const totalRain = block.items.reduce((sum, x) => sum + Number(x.rain || 0) + Number(x.showers || 0), 0);
+  const totalRain = block.items.reduce(
+    (sum, x) => sum + Number(x.rain || 0) + Number(x.showers || 0),
+    0
+  );
   const totalSnow = block.items.reduce((sum, x) => sum + Number(x.snow || 0), 0);
 
   const condition = [0, 1, 2, 3].includes(Number(first.code))
@@ -738,11 +741,10 @@ function summarizeHourlyBlock(block, tz) {
     : weatherCodeToText(first.code);
 
   const parts = [
-    `From ${start} until ${end}, expect ${condition}.`,
-    `Around ${Math.round(avgTemp)} degrees.`
+    `From ${start} until ${end}, ${condition}, around ${Math.round(avgTemp)} degrees.`
   ];
 
-  if (maxRainChance >= 40) {
+  if (maxRainChance >= 45) {
     parts.push(`Chance of precipitation up to ${Math.round(maxRainChance)} percent.`);
   }
 
@@ -837,7 +839,11 @@ function nextHoursSpeech(location, forecast, hours = 6) {
   const blocks = buildSmartHourlyBlocks(items);
   const topBlocks = blocks.slice(0, 4);
 
-  const opening = `Here is the next ${items.length} hours for ${placeLabel(location)}.`;
+  const firstCondition = [0, 1, 2, 3].includes(Number(items[0].code))
+    ? cloudCoverToPhrase(items[0].clouds)
+    : weatherCodeToText(items[0].code);
+
+  const opening = `Here is the next ${items.length} hours for ${placeLabel(location)}. Conditions begin with ${firstCondition}.`;
   const body = topBlocks.map((block) => summarizeHourlyBlock(block, tz)).join(" ");
 
   return `${opening} ${body}`.trim();
