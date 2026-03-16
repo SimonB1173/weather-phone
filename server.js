@@ -97,6 +97,10 @@ function getCallerKey(req) {
   return normalizeCaller(req.body.From || "unknown");
 }
 
+function placeLabel(location) {
+  return location?.label || location?.name || "your area";
+}
+
 function loadJsonFile(filePath, fallback) {
   try {
     if (!fs.existsSync(filePath)) return fallback;
@@ -338,10 +342,10 @@ function buildMainMenuInto(twiml, savedLocationName) {
   say(
     gather,
     `Your saved location is ${savedLocationName}. ` +
-      `Press or say 1 for current forecast, ` +
+      `Press or say 1 for current weather, ` +
       `2 for hourly forecast, ` +
       `3 for daily forecast, ` +
-      `5 for location, ` +
+      `5 for change location, ` +
       `6 for voicemail.`
   );
 
@@ -463,7 +467,7 @@ function weatherCodeToText(code) {
     0: "clear",
     1: "mostly clear",
     2: "partly cloudy",
-    3: "overcast",
+    3: "cloudy",
     45: "foggy",
     48: "freezing fog",
     51: "light drizzle",
@@ -498,7 +502,7 @@ function cloudCoverToPhrase(percent) {
   if (p < 40) return "mostly sunny";
   if (p < 65) return "partly cloudy";
   if (p < 85) return "mostly cloudy";
-  return "overcast";
+  return "cloudy";
 }
 
 function describeCurrentCondition(current) {
@@ -656,7 +660,7 @@ function currentWeatherSpeech(location, forecast) {
   const condition = describeCurrentCondition(c);
 
   const parts = [
-    `Current weather for ${location.label || location.name}.`,
+    `Current weather for ${placeLabel(location)}.`,
     `It is ${condition}.`,
     `The temperature is ${formatTemp(c.temperature_2m)}.`
   ];
@@ -743,25 +747,29 @@ function summarizeHourlyBlock(block, tz) {
   }
 
   if (totalRain > 0) {
-    if (totalRain >= 2) {
-      parts.push(`Rain or showers are likely.`);
+    if (totalRain >= 3) {
+      parts.push(`Rain is likely at times.`);
+    } else if (totalRain >= 1) {
+      parts.push(`A few showers are possible.`);
     } else {
-      parts.push(`A little rain or a few showers are possible.`);
+      parts.push(`A slight chance of a little rain.`);
     }
   }
 
   if (totalSnow > 0) {
-    if (totalSnow >= 1) {
-      parts.push(`Snow is likely.`);
+    if (totalSnow >= 2) {
+      parts.push(`Snow is likely at times.`);
+    } else if (totalSnow >= 0.8) {
+      parts.push(`Some snow is possible.`);
     } else {
-      parts.push(`A little snow is possible.`);
+      parts.push(`A light bit of snow is possible.`);
     }
   }
 
   if (maxWind >= 28) {
     parts.push(`It may be windy.`);
   } else if (maxWind >= 18) {
-    parts.push(`A breeze is expected.`);
+    parts.push(`A light breeze is expected.`);
   }
 
   return parts.join(" ");
@@ -823,13 +831,13 @@ function nextHoursSpeech(location, forecast, hours = 6) {
   }
 
   if (!items.length) {
-    return `I could not find future hourly forecast data for ${location.label || location.name}.`;
+    return `I could not find future hourly forecast data for ${placeLabel(location)}.`;
   }
 
   const blocks = buildSmartHourlyBlocks(items);
   const topBlocks = blocks.slice(0, 4);
 
-  const opening = `Here is the next ${items.length} hours for ${location.label || location.name}.`;
+  const opening = `Here is the next ${items.length} hours for ${placeLabel(location)}.`;
   const body = topBlocks.map((block) => summarizeHourlyBlock(block, tz)).join(" ");
 
   return `${opening} ${body}`.trim();
@@ -838,7 +846,7 @@ function nextHoursSpeech(location, forecast, hours = 6) {
 function dailyForecastSpeech(location, forecast, index) {
   const d = forecast.daily;
   if (index < 0 || index >= d.time.length) {
-    return `That forecast day is not available for ${location.label || location.name}.`;
+    return `That forecast day is not available for ${placeLabel(location)}.`;
   }
 
   const dateStr = d.time[index];
@@ -856,7 +864,7 @@ function dailyForecastSpeech(location, forecast, index) {
   const condition = describeDailyCondition(d.weather_code[index], middayCloudSample);
 
   const parts = [
-    `Forecast for ${label} in ${location.label || location.name}.`,
+    `Forecast for ${label} in ${placeLabel(location)}.`,
     `Expect ${condition}.`,
     `The high will be ${Math.round(d.temperature_2m_max[index])} degrees.`,
     `The low will be ${Math.round(d.temperature_2m_min[index])} degrees.`
@@ -983,7 +991,7 @@ async function fetchCanadianAlert(location) {
 
 function buildCanadianAlertSpeech(location, alert) {
   if (!location || !alert) return "";
-  const parts = [`Environment Canada alert for ${location.label || location.name}.`];
+  const parts = [`Environment Canada alert for ${placeLabel(location)}.`];
 
   if (alert.title) parts.push(alert.title);
   if (alert.description) parts.push(alert.description);
@@ -1168,7 +1176,7 @@ app.post("/voice", async (req, res) => {
       say(twiml, buildCanadianAlertSpeech(saved, canadaAlert));
     }
 
-    buildMainMenuInto(twiml, saved.label || saved.name);
+    buildMainMenuInto(twiml, placeLabel(saved));
   } else {
     say(twiml, "No saved location was found for this number.");
     twiml.redirect({ method: "POST" }, "/location-menu-prompt");
