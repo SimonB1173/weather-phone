@@ -233,6 +233,21 @@ function timeLabel(iso, tz) {
   });
 }
 
+function getGreetingForTime(timezone) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    hour: "numeric",
+    hour12: false,
+    timeZone: timezone || "America/Toronto"
+  }).formatToParts(new Date());
+
+  const hourPart = parts.find((p) => p.type === "hour");
+  const hour = Number(hourPart?.value || 12);
+
+  if (hour < 12) return "Good morning";
+  if (hour < 18) return "Good afternoon";
+  return "Good evening";
+}
+
 function parseMainMenuChoice(req) {
   const digit = String(req.body.Digits || "").trim();
   const speech = String(req.body.SpeechResult || "").toLowerCase();
@@ -644,8 +659,7 @@ function currentWeatherSpeech(location, forecast) {
   const parts = [
     `Current weather for ${location.label || location.name}.`,
     `It is ${condition}.`,
-    `The temperature is ${formatTemp(c.temperature_2m)}.`,
-    `It feels like ${formatTemp(c.apparent_temperature)}.`
+    `The temperature is ${formatTemp(c.temperature_2m)}.`
   ];
 
   if ((c.wind_speed_10m || 0) >= 15) {
@@ -665,6 +679,124 @@ function currentWeatherSpeech(location, forecast) {
   }
 
   return parts.join(" ");
+}
+
+function classifyHourlyBucket(item) {
+  const code = Number(item.code);
+  const rainAmount = Number(item.rain || 0) + Number(item.showers || 0);
+  const snowAmount = Number(item.snow || 0);
+  const wind = Number(item.wind || 0);
+  const precipChance = Number(item.rainChance || 0);
+  const clouds = Number(item.clouds || 0);
+
+  let condition = [0, 1, 2, 3].includes(code)
+    ? cloudCoverToPhrase(clouds)
+    : weatherCodeToText(code);
+
+  let precipTag = "dry";
+  if ([95, 96, 99].includes(code)) {
+    precipTag = "storm";
+  } else if (snowAmount > 0) {
+    precipTag = snowAmount >= 0.8 ? "snow" : "light-snow";
+  } else if (rainAmount > 0 || precipChance >= 35) {
+    precipTag = rainAmount >= 1.5 ? "rain" : "light-rain";
+  }
+
+  let windTag = "calm";
+  if (wind >= 28) windTag = "windy";
+  else if (wind >= 18) windTag = "breezy";
+
+  const tempBand = Math.round(Number(item.temp || 0) / 2);
+
+  return `${condition}|${precipTag}|${windTag}|${tempBand}`;
+}
+
+function summarizeHourlyBlock(block, tz) {
+  const first = block.items[0];
+  const start = timeLabel(block.start, tz);
+  const endDate = new Date(block.end);
+  endDate.setHours(endDate.getHours() + 1);
+  const end = endDate.toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+    timeZone: tz || "UTC"
+  });
+
+  const avgTemp =
+    block.items.reduce((sum, x) => sum + Number(x.temp || 0), 0) / block.items.length;
+  const maxRainChance = Math.max(...block.items.map((x) => Number(x.rainChance || 0)));
+  const maxWind = Math.max(...block.items.map((x) => Number(x.wind || 0)));
+  const totalRain = block.items.reduce((sum, x) => sum + Number(x.rain || 0) + Number(x.showers || 0), 0);
+  const totalSnow = block.items.reduce((sum, x) => sum + Number(x.snow || 0), 0);
+
+  const condition = [0, 1, 2, 3].includes(Number(first.code))
+    ? cloudCoverToPhrase(first.clouds)
+    : weatherCodeToText(first.code);
+
+  const parts = [
+    `From ${start} until ${end}, expect ${condition}.`,
+    `Around ${Math.round(avgTemp)} degrees.`
+  ];
+
+  if (maxRainChance >= 40) {
+    parts.push(`Chance of precipitation up to ${Math.round(maxRainChance)} percent.`);
+  }
+
+  if (totalRain > 0) {
+    if (totalRain >= 2) {
+      parts.push(`Rain or showers are likely.`);
+    } else {
+      parts.push(`A little rain or a few showers are possible.`);
+    }
+  }
+
+  if (totalSnow > 0) {
+    if (totalSnow >= 1) {
+      parts.push(`Snow is likely.`);
+    } else {
+      parts.push(`A little snow is possible.`);
+    }
+  }
+
+  if (maxWind >= 28) {
+    parts.push(`It may be windy, with gustier conditions.`);
+  } else if (maxWind >= 18) {
+    parts.push(`A breeze is expected.`);
+  }
+
+  return parts.join(" ");
+}
+
+function buildSmartHourlyBlocks(items) {
+  if (!items.length) return [];
+
+  const blocks = [];
+  let current = {
+    key: classifyHourlyBucket(items[0]),
+    start: items[0].time,
+    end: items[0].time,
+    items: [items[0]]
+  };
+
+  for (let i = 1; i < items.length; i++) {
+    const key = classifyHourlyBucket(items[i]);
+    if (key === current.key) {
+      current.end = items[i].time;
+      current.items.push(items[i]);
+    } else {
+      blocks.push(current);
+      current = {
+        key,
+        start: items[i].time,
+        end: items[i].time,
+        items: [items[i]]
+      };
+    }
+  }
+
+  blocks.push(current);
+  return blocks;
 }
 
 function nextHoursSpeech(location, forecast, hours = 6) {
@@ -695,31 +827,13 @@ function nextHoursSpeech(location, forecast, hours = 6) {
     return `I could not find future hourly forecast data for ${location.label || location.name}.`;
   }
 
-  let speech = `Here is the next ${items.length} hours for ${location.label || location.name}. `;
+  const blocks = buildSmartHourlyBlocks(items);
+  const topBlocks = blocks.slice(0, 4);
 
-  for (const item of items) {
-    const condition = [0, 1, 2, 3].includes(Number(item.code))
-      ? cloudCoverToPhrase(item.clouds)
-      : weatherCodeToText(item.code);
+  const opening = `Here is the next ${items.length} hours for ${location.label || location.name}.`;
+  const body = topBlocks.map((block) => summarizeHourlyBlock(block, tz)).join(" ");
 
-    const parts = [
-      `At ${timeLabel(item.time, tz)},`,
-      `${condition},`,
-      `${formatTemp(item.temp)}.`
-    ];
-
-    if ((item.rainChance || 0) >= 40) {
-      parts.push(`Chance of precipitation around ${Math.round(item.rainChance)} percent.`);
-    }
-
-    if ((item.wind || 0) >= 18) {
-      parts.push(`Wind near ${Math.round(item.wind)} kilometres per hour.`);
-    }
-
-    speech += parts.join(" ") + " ";
-  }
-
-  return speech.trim();
+  return `${opening} ${body}`.trim();
 }
 
 function dailyForecastSpeech(location, forecast, index) {
@@ -1057,13 +1171,15 @@ app.get("/voice", (req, res) => {
 app.post("/voice", async (req, res) => {
   const twiml = new VoiceResponse();
   const saved = getSavedLocation(req);
+  const timezone = saved?.timezone || "America/Toronto";
+  const greeting = getGreetingForTime(timezone);
 
   console.log("VOICE CallSid:", req.body.CallSid, "From:", req.body.From);
   console.log("VOICE saved location:", saved);
 
   say(
     twiml,
-    "Welcome to Weather Line. This service is sponsored by Lipa Supermarket."
+    `${greeting}. Welcome to Weather Line. This service is sponsored by Lipa Supermarket.`
   );
 
   if (saved) {
