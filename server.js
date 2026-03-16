@@ -1,6 +1,8 @@
 const express = require("express");
 const axios = require("axios");
 const twilio = require("twilio");
+const fs = require("fs");
+const path = require("path");
 
 const app = express();
 app.use(express.urlencoded({ extended: false }));
@@ -13,24 +15,58 @@ const SAY_OPTIONS = {
   language: "en-US"
 };
 
-// Per-call session storage
-const callSessions = new Map();
-
-// Super-cache storage
 const forecastCache = new Map();
 const inFlightForecasts = new Map();
 
 const FORECAST_CACHE_MS = 10 * 60 * 1000; // 10 minutes fresh
-const STALE_FORECAST_MS = 60 * 60 * 1000; // up to 1 hour stale fallback
+const STALE_FORECAST_MS = 60 * 60 * 1000; // 1 hour stale fallback
 
-const CUSTOM_POSTAL_ALIASES = {
-  "428427": "H2V4B7"
+const DATA_FILE = path.join(__dirname, "saved-locations.json");
+
+const PRESET_LOCATIONS = {
+  "1": {
+    id: "montreal",
+    name: "Montreal, Quebec, Canada",
+    latitude: 45.5239,
+    longitude: -73.5997,
+    timezone: "America/Toronto",
+    label: "Montreal"
+  },
+  "2": {
+    id: "tosh",
+    pending: true,
+    label: "Tosh"
+  },
+  "3": {
+    id: "brooklyn",
+    name: "Brooklyn, New York, USA",
+    latitude: 40.7143,
+    longitude: -73.9533,
+    timezone: "America/New_York",
+    label: "Brooklyn"
+  },
+  "4": {
+    id: "monsey",
+    name: "Spring Valley, New York, USA",
+    latitude: 41.1134,
+    longitude: -74.0435,
+    timezone: "America/New_York",
+    label: "Monsey"
+  },
+  "5": {
+    id: "monroe",
+    name: "Monroe, New York, USA",
+    latitude: 41.3326,
+    longitude: -74.1860,
+    timezone: "America/New_York",
+    label: "Monroe"
+  }
 };
 
 function say(twiml, text) {
   const parts = String(text || "")
     .split(/(?<=[.!?])\s+/)
-    .map(s => s.trim())
+    .map((s) => s.trim())
     .filter(Boolean);
 
   if (!parts.length) return;
@@ -43,36 +79,49 @@ function say(twiml, text) {
   }
 }
 
-function sessionKey(req) {
-  return req.body.CallSid || req.body.From || "unknown";
+function normalizeCaller(v) {
+  return String(v || "").trim();
 }
 
-function getSession(req) {
-  const key = sessionKey(req);
-  if (!callSessions.has(key)) {
-    callSessions.set(key, {});
+function getCallerKey(req) {
+  return normalizeCaller(req.body.From || "unknown");
+}
+
+function loadSavedLocationsFromDisk() {
+  try {
+    if (!fs.existsSync(DATA_FILE)) {
+      return {};
+    }
+    const raw = fs.readFileSync(DATA_FILE, "utf8");
+    return JSON.parse(raw || "{}");
+  } catch (error) {
+    console.error("Failed to read saved locations file:", error.message);
+    return {};
   }
-  return callSessions.get(key);
+}
+
+const savedLocationsByCaller = new Map(
+  Object.entries(loadSavedLocationsFromDisk())
+);
+
+function persistSavedLocations() {
+  try {
+    const obj = Object.fromEntries(savedLocationsByCaller.entries());
+    fs.writeFileSync(DATA_FILE, JSON.stringify(obj, null, 2), "utf8");
+  } catch (error) {
+    console.error("Failed to persist saved locations:", error.message);
+  }
 }
 
 function getSavedLocation(req) {
-  return getSession(req).location || null;
+  const caller = getCallerKey(req);
+  return savedLocationsByCaller.get(caller) || null;
 }
 
-function saveLocation(req, location) {
-  getSession(req).location = location;
-}
-
-function clearSession(req) {
-  callSessions.delete(sessionKey(req));
-}
-
-function normalizeText(v) {
-  return String(v || "").replace(/\s+/g, " ").trim();
-}
-
-function cleanPostalCode(v) {
-  return String(v || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+function saveLocationForCaller(req, location) {
+  const caller = getCallerKey(req);
+  savedLocationsByCaller.set(caller, location);
+  persistSavedLocations();
 }
 
 function pushIf(parts, condition, text) {
@@ -114,14 +163,14 @@ function weatherCodeToText(code) {
 }
 
 function dayName(iso, tz) {
-  return new Date(iso).toLocaleDateString("en-CA", {
+  return new Date(iso).toLocaleDateString("en-US", {
     weekday: "long",
     timeZone: tz || "UTC"
   });
 }
 
 function timeLabel(iso, tz) {
-  return new Date(iso).toLocaleTimeString("en-CA", {
+  return new Date(iso).toLocaleTimeString("en-US", {
     hour: "numeric",
     minute: "2-digit",
     hour12: true,
@@ -129,7 +178,7 @@ function timeLabel(iso, tz) {
   });
 }
 
-function parseMenuChoice(req) {
+function parseMainMenuChoice(req) {
   const digit = String(req.body.Digits || "").trim();
   const speech = String(req.body.SpeechResult || "").toLowerCase();
 
@@ -177,7 +226,21 @@ function parseForecastDayChoice(req, forecast, timezone) {
   return -1;
 }
 
-function buildMenuInto(twiml, savedLocationName) {
+function parseLocationChoice(req) {
+  const digit = String(req.body.Digits || "").trim();
+  const speech = String(req.body.SpeechResult || "").toLowerCase();
+
+  if (/^[1-5]$/.test(digit)) return digit;
+  if (speech.includes("montreal")) return "1";
+  if (speech.includes("tosh")) return "2";
+  if (speech.includes("brooklyn")) return "3";
+  if (speech.includes("monsey") || speech.includes("spring valley")) return "4";
+  if (speech.includes("monroe")) return "5";
+
+  return "";
+}
+
+function buildMainMenuInto(twiml, savedLocationName) {
   const gather = twiml.gather({
     input: "speech dtmf",
     action: "/menu",
@@ -187,49 +250,48 @@ function buildMenuInto(twiml, savedLocationName) {
     numDigits: 1
   });
 
-  if (savedLocationName) {
-    say(
-      gather,
-      `Your saved location is ${savedLocationName}. ` +
-        `Press or say 1 for current weather. ` +
-        `2 for the next 6 hours. ` +
-        `3 for the 7 day forecast menu. ` +
-        `4 for important alerts. ` +
-        `5 to change location.`
-    );
-  } else {
-    say(
-      gather,
-      `No location is saved yet. ` +
-        `Press or say 5 to set your location.`
-    );
-  }
+  say(
+    gather,
+    `Your saved location is ${savedLocationName}. ` +
+      `Press or say 1 for current weather. ` +
+      `Press or say 2 for the next 6 hours. ` +
+      `Press or say 3 for the 7 day forecast menu. ` +
+      `Press or say 4 for important alerts. ` +
+      `Press or say 5 to change location.`
+  );
 
   twiml.redirect({ method: "POST" }, "/voice");
 }
 
-function locationPromptTwiml() {
+function locationMenuTwiml() {
   const twiml = new VoiceResponse();
+
   const gather = twiml.gather({
     input: "speech dtmf",
-    action: "/set-location",
+    action: "/set-location-choice",
     method: "POST",
     timeout: 7,
-    speechTimeout: "auto"
+    speechTimeout: "auto",
+    numDigits: 1
   });
 
   say(
     gather,
-    `Say a city, province, or postal code in Canada. ` +
-      `You can also type a 6 character postal code on the keypad.`
+    `Choose your location. ` +
+      `Press or say 1 for Montreal. ` +
+      `Press or say 2 for Tosh. ` +
+      `Press or say 3 for Brooklyn New York. ` +
+      `Press or say 4 for Monsey. ` +
+      `Press or say 5 for Monroe.`
   );
 
-  twiml.redirect({ method: "POST" }, "/voice");
+  twiml.redirect({ method: "POST" }, "/location-menu-prompt");
   return twiml;
 }
 
 function afterActionTwiml() {
   const twiml = new VoiceResponse();
+
   const gather = twiml.gather({
     input: "speech dtmf",
     action: "/after",
@@ -242,8 +304,8 @@ function afterActionTwiml() {
   say(
     gather,
     `Press or say 1 for the main menu. ` +
-      `2 to change location. ` +
-      `3 to hear current weather again.`
+      `Press or say 2 to change location. ` +
+      `Press or say 3 to hear current weather again.`
   );
 
   twiml.hangup();
@@ -252,6 +314,7 @@ function afterActionTwiml() {
 
 function forecastDayPromptTwiml(location, forecast) {
   const twiml = new VoiceResponse();
+
   const gather = twiml.gather({
     input: "speech dtmf",
     action: "/forecast-day",
@@ -407,157 +470,11 @@ function alertsSpeech(location, forecast) {
   return `Important forecast alerts for ${location.name}. ${alerts.join(" ")}`;
 }
 
-const KEYMAP = {
-  "2": ["A", "B", "C"],
-  "3": ["D", "E", "F"],
-  "4": ["G", "H", "I"],
-  "5": ["J", "K", "L"],
-  "6": ["M", "N", "O"],
-  "7": ["P", "Q", "R", "S"],
-  "8": ["T", "U", "V"],
-  "9": ["W", "X", "Y", "Z"]
-};
-
-function expandPostalDigits(digits) {
-  const d = String(digits || "").replace(/\D/g, "");
-  if (d.length !== 6) return [];
-
-  const p1 = KEYMAP[d[0]] || [];
-  const p2 = KEYMAP[d[2]] || [];
-  const p3 = KEYMAP[d[4]] || [];
-  const results = [];
-
-  for (const a of p1) {
-    for (const b of p2) {
-      for (const c of p3) {
-        results.push(`${a}${d[1]}${b}${d[3]}${c}${d[5]}`);
-      }
-    }
-  }
-
-  return results;
-}
-
-async function searchNominatim(params) {
-  const response = await axios.get("https://nominatim.openstreetmap.org/search", {
-    params: {
-      format: "jsonv2",
-      limit: 5,
-      addressdetails: 1,
-      countrycodes: "ca",
-      ...params
-    },
-    timeout: 12000,
-    headers: {
-      "User-Agent": "weather-line-canada/1.0",
-      "Accept-Language": "en-CA,en;q=0.9"
-    }
-  });
-
-  return response.data || [];
-}
-
-function formatNominatimResult(r) {
-  const a = r.address || {};
-
-  const cityName =
-    a.city ||
-    a.town ||
-    a.village ||
-    a.municipality ||
-    a.hamlet ||
-    a.suburb ||
-    a.county ||
-    a.state_district ||
-    r.display_name;
-
-  const province = a.state || a.province || a.region || "";
-  const country = a.country || "Canada";
-
-  return {
-    name: `${cityName}${province ? ", " + province : ""}, ${country}`,
-    latitude: parseFloat(r.lat),
-    longitude: parseFloat(r.lon),
-    timezone: "America/Toronto"
-  };
-}
-
-async function resolveLocation(input) {
-  const raw = normalizeText(input);
-  if (!raw) return null;
-
-  const cleaned = cleanPostalCode(raw);
-  const aliasPostal = CUSTOM_POSTAL_ALIASES[cleaned];
-  const postal = aliasPostal || cleaned;
-
-  const manualMap = {
-    "MONTREAL": {
-      name: "Montreal, Quebec, Canada",
-      latitude: 45.5019,
-      longitude: -73.5674,
-      timezone: "America/Toronto"
-    },
-    "MONTREALCANADA": {
-      name: "Montreal, Quebec, Canada",
-      latitude: 45.5019,
-      longitude: -73.5674,
-      timezone: "America/Toronto"
-    },
-    "MONTREALQUEBEC": {
-      name: "Montreal, Quebec, Canada",
-      latitude: 45.5019,
-      longitude: -73.5674,
-      timezone: "America/Toronto"
-    },
-    "H2V4B7": {
-      name: "Montreal, Quebec, Canada",
-      latitude: 45.5239,
-      longitude: -73.5997,
-      timezone: "America/Toronto"
-    }
-  };
-
-  if (manualMap[postal]) return manualMap[postal];
-  if (manualMap[cleaned]) return manualMap[cleaned];
-
-  const collapsedRaw = raw.toUpperCase().replace(/\s+/g, "");
-  if (manualMap[collapsedRaw]) return manualMap[collapsedRaw];
-
-  if (/^[A-Z]\d[A-Z]\d[A-Z]\d$/.test(postal)) {
-    let results = await searchNominatim({ postalcode: postal });
-    if (results.length) return formatNominatimResult(results[0]);
-
-    results = await searchNominatim({ q: `${postal}, Canada` });
-    if (results.length) return formatNominatimResult(results[0]);
-  }
-
-  if (/^\d{6}$/.test(cleaned)) {
-    const candidates = expandPostalDigits(cleaned);
-
-    for (const c of candidates) {
-      if (manualMap[c]) return manualMap[c];
-
-      const results = await searchNominatim({ postalcode: c });
-      if (results.length) return formatNominatimResult(results[0]);
-    }
-  }
-
-  let results = await searchNominatim({ q: raw });
-  if (results.length) return formatNominatimResult(results[0]);
-
-  results = await searchNominatim({ q: `${raw}, Canada` });
-  if (results.length) return formatNominatimResult(results[0]);
-
-  results = await searchNominatim({ city: raw });
-  if (results.length) return formatNominatimResult(results[0]);
-
-  return null;
-}
-
 function normalizePlaceName(name) {
   return String(name || "")
     .toUpperCase()
     .replace(/,\s*CANADA/g, "")
+    .replace(/,\s*USA/g, "")
     .replace(/[^A-Z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "");
 }
@@ -570,7 +487,6 @@ function cacheKeyForLocation(location) {
 
 function pruneForecastCache() {
   const now = Date.now();
-
   for (const [key, value] of forecastCache.entries()) {
     if (!value || (now - value.timestamp) > STALE_FORECAST_MS) {
       forecastCache.delete(key);
@@ -713,7 +629,7 @@ async function fetchForecast(location) {
 
 function speakWeatherError(twiml, error, fallbackText) {
   if (error.response?.status === 429) {
-    say(twiml, "Weather service limit reached for today. Please try again tomorrow.");
+    say(twiml, "Weather service limit reached for today. Please try again later.");
   } else {
     say(twiml, fallbackText);
   }
@@ -725,13 +641,7 @@ app.get("/", (req, res) => {
 
 app.get("/debug-weather", async (req, res) => {
   try {
-    const location = {
-      name: "Montreal, Quebec, Canada",
-      latitude: 45.5019,
-      longitude: -73.5674,
-      timezone: "America/Toronto"
-    };
-
+    const location = PRESET_LOCATIONS["1"];
     const before = getCachedForecast(location, { allowStale: true });
     const forecast = await fetchForecast(location);
     const after = getCachedForecast(location, { allowStale: true });
@@ -765,23 +675,58 @@ app.get("/voice", (req, res) => {
 
 app.post("/voice", (req, res) => {
   const twiml = new VoiceResponse();
+  const saved = getSavedLocation(req);
 
   console.log("VOICE CallSid:", req.body.CallSid, "From:", req.body.From);
-  console.log("VOICE saved location:", getSavedLocation(req));
+  console.log("VOICE saved location:", saved);
 
   say(
     twiml,
     "Welcome to Weather Line. This service is sponsored by Lipa Supermarket."
   );
 
-  const saved = getSavedLocation(req);
-  buildMenuInto(twiml, saved ? saved.name : null);
+  if (saved) {
+    buildMainMenuInto(twiml, saved.label || saved.name);
+  } else {
+    say(twiml, "No saved location was found for this number.");
+    twiml.redirect({ method: "POST" }, "/location-menu-prompt");
+  }
 
   res.type("text/xml").send(twiml.toString());
 });
 
+app.post("/location-menu-prompt", (req, res) => {
+  res.type("text/xml").send(locationMenuTwiml().toString());
+});
+
+app.post("/set-location-choice", (req, res) => {
+  const choice = parseLocationChoice(req);
+  const twiml = new VoiceResponse();
+
+  console.log("SET-LOCATION-CHOICE From:", req.body.From, "choice:", choice);
+
+  if (!choice || !PRESET_LOCATIONS[choice]) {
+    say(twiml, "I did not understand that location choice.");
+    return res.type("text/xml").send(locationMenuTwiml().toString());
+  }
+
+  const preset = PRESET_LOCATIONS[choice];
+
+  if (preset.pending) {
+    say(twiml, `${preset.label} has not been set up yet.`);
+    return res.type("text/xml").send(locationMenuTwiml().toString());
+  }
+
+  saveLocationForCaller(req, preset);
+
+  say(twiml, `Your location has been saved as ${preset.label}.`);
+  buildMainMenuInto(twiml, preset.label);
+
+  return res.type("text/xml").send(twiml.toString());
+});
+
 app.post("/menu", async (req, res) => {
-  const choice = parseMenuChoice(req);
+  const choice = parseMainMenuChoice(req);
   const location = getSavedLocation(req);
   const twiml = new VoiceResponse();
 
@@ -790,13 +735,12 @@ app.post("/menu", async (req, res) => {
   console.log("MENU saved location:", location);
 
   if (choice === "5") {
-    return res.type("text/xml").send(locationPromptTwiml().toString());
+    return res.type("text/xml").send(locationMenuTwiml().toString());
   }
 
   if (!location) {
-    say(twiml, "You need to set your location first.");
-    twiml.redirect({ method: "POST" }, "/set-location-prompt");
-    return res.type("text/xml").send(twiml.toString());
+    say(twiml, "You need to choose a location first.");
+    return res.type("text/xml").send(locationMenuTwiml().toString());
   }
 
   try {
@@ -840,50 +784,6 @@ app.post("/menu", async (req, res) => {
   }
 });
 
-app.post("/set-location-prompt", (req, res) => {
-  res.type("text/xml").send(locationPromptTwiml().toString());
-});
-
-app.post("/set-location", async (req, res) => {
-  const input = normalizeText(req.body.SpeechResult || req.body.Digits || "");
-  const twiml = new VoiceResponse();
-
-  console.log("SET-LOCATION CallSid:", req.body.CallSid, "From:", req.body.From);
-  console.log("SET-LOCATION raw input:", input);
-  console.log("SpeechResult:", req.body.SpeechResult, "Digits:", req.body.Digits);
-
-  if (!input) {
-    say(twiml, "I did not get a location.");
-    twiml.redirect({ method: "POST" }, "/set-location-prompt");
-    return res.type("text/xml").send(twiml.toString());
-  }
-
-  try {
-    const location = await resolveLocation(input);
-
-    if (!location) {
-      say(twiml, `I could not find ${input}. Please try again.`);
-      twiml.redirect({ method: "POST" }, "/set-location-prompt");
-      return res.type("text/xml").send(twiml.toString());
-    }
-
-    saveLocation(req, location);
-
-    console.log("SET-LOCATION saved:", location);
-
-    say(twiml, `Location saved as ${location.name}.`);
-    buildMenuInto(twiml, location.name);
-
-    return res.type("text/xml").send(twiml.toString());
-  } catch (error) {
-    console.error("Location lookup error:", error.message);
-    console.error("Location lookup details:", error.response?.data || null);
-    say(twiml, "There was a problem finding that location.");
-    twiml.redirect({ method: "POST" }, "/voice");
-    return res.type("text/xml").send(twiml.toString());
-  }
-});
-
 app.post("/forecast-day", async (req, res) => {
   const location = getSavedLocation(req);
   const twiml = new VoiceResponse();
@@ -892,9 +792,8 @@ app.post("/forecast-day", async (req, res) => {
   console.log("FORECAST-DAY saved location:", location);
 
   if (!location) {
-    say(twiml, "You need to set your location first.");
-    twiml.redirect({ method: "POST" }, "/set-location-prompt");
-    return res.type("text/xml").send(twiml.toString());
+    say(twiml, "You need to choose a location first.");
+    return res.type("text/xml").send(locationMenuTwiml().toString());
   }
 
   try {
@@ -934,17 +833,15 @@ app.post("/after", async (req, res) => {
   }
 
   if (choice === "2") {
-    twiml.redirect({ method: "POST" }, "/set-location-prompt");
-    return res.type("text/xml").send(twiml.toString());
+    return res.type("text/xml").send(locationMenuTwiml().toString());
   }
 
   if (choice === "3") {
     const location = getSavedLocation(req);
 
     if (!location) {
-      say(twiml, "You need to set your location first.");
-      twiml.redirect({ method: "POST" }, "/set-location-prompt");
-      return res.type("text/xml").send(twiml.toString());
+      say(twiml, "You need to choose a location first.");
+      return res.type("text/xml").send(locationMenuTwiml().toString());
     }
 
     try {
@@ -963,7 +860,6 @@ app.post("/after", async (req, res) => {
 
   say(twiml, "Goodbye.");
   twiml.hangup();
-  clearSession(req);
   return res.type("text/xml").send(twiml.toString());
 });
 
