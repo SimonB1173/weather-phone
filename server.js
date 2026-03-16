@@ -15,6 +15,8 @@ const SAY_OPTIONS = {
   language: "en-US"
 };
 
+const INTRO_AUDIO_URL = process.env.INTRO_AUDIO_URL || "";
+
 const forecastCache = new Map();
 const inFlightForecasts = new Map();
 const canadaAlertCache = new Map();
@@ -261,7 +263,6 @@ function parseMainMenuChoice(req) {
     speech.includes("today") ||
     speech.includes("tomorrow")
   ) return "3";
-  if (speech.includes("alert") || speech.includes("warning")) return "4";
   if (speech.includes("change") || speech.includes("location")) return "5";
   if (
     speech.includes("message") ||
@@ -336,13 +337,12 @@ function buildMainMenuInto(twiml, savedLocationName) {
 
   say(
     gather,
-    `${savedLocationName}. ` +
-      `Press 1 current weather. ` +
-      `2 hourly forecast. ` +
-      `3 daily forecast. ` +
-      `4 alerts. ` +
-      `5 location. ` +
-      `6 voicemail.`
+    `Your saved location is ${savedLocationName}. ` +
+      `Press or say 1 for current forecast, ` +
+      `2 for hourly forecast, ` +
+      `3 for daily forecast, ` +
+      `5 for location, ` +
+      `6 for voicemail.`
   );
 
   twiml.redirect({ method: "POST" }, "/voice");
@@ -362,13 +362,12 @@ function locationMenuTwiml() {
 
   say(
     gather,
-    `Choose location. ` +
-      `Press 1 Montreal. ` +
-      `2 Tosh. ` +
-      `3 Brooklyn. ` +
-      `4 Monsey. ` +
-      `5 Monroe. ` +
-      `Star for main menu.`
+    `Press or say 1 for Montreal, ` +
+      `2 for Tosh, ` +
+      `3 for Brooklyn, ` +
+      `4 for Monsey, ` +
+      `5 for Monroe. ` +
+      `Press star for main menu.`
   );
 
   twiml.redirect({ method: "POST" }, "/location-menu-prompt");
@@ -389,10 +388,10 @@ function afterActionTwiml() {
 
   say(
     gather,
-    `Press star for main menu. ` +
-      `Press 5 to change location. ` +
-      `Press 6 for voicemail. ` +
-      `Press 9 to hear current weather again.`
+    `Press star for main menu, ` +
+      `5 for change location, ` +
+      `6 for voicemail, ` +
+      `or 9 to hear current weather again.`
   );
 
   twiml.hangup();
@@ -423,9 +422,8 @@ function forecastDayPromptTwiml(location, forecast) {
 
   say(
     gather,
-    `Choose a day for ${location.label || location.name}. ` +
-      `${choices.join(". ")}. ` +
-      `Star for main menu.`
+    `Press or say ${choices.join(", ")}. ` +
+      `Press star for main menu.`
   );
 
   twiml.redirect({ method: "POST" }, "/voice");
@@ -896,29 +894,6 @@ function dailyForecastSpeech(location, forecast, index) {
   return parts.join(" ");
 }
 
-function alertsSpeech(location, forecast) {
-  const d = forecast.daily;
-  const alerts = [];
-
-  for (let i = 0; i < Math.min(7, d.time.length); i++) {
-    const label =
-      i === 0 ? "today" :
-      i === 1 ? "tomorrow" :
-      dayName(d.time[i], location.timezone);
-
-    if ((d.wind_speed_10m_max[i] || 0) >= 50) alerts.push(`Strong wind is possible ${label}.`);
-    if ((d.snowfall_sum[i] || 0) >= 5) alerts.push(`Significant snow is possible ${label}.`);
-    if ((d.rain_sum[i] || 0) >= 10) alerts.push(`Heavy rain is possible ${label}.`);
-    if ([95, 96, 99].includes(d.weather_code[i])) alerts.push(`Thunderstorms are possible ${label}.`);
-  }
-
-  if (!alerts.length) {
-    return `No major forecast alerts were found for ${location.label || location.name} in the next seven days.`;
-  }
-
-  return `Important forecast alerts for ${location.label || location.name}. ${alerts.join(" ")}`;
-}
-
 function stripXmlTags(text) {
   return String(text || "")
     .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
@@ -1178,9 +1153,13 @@ app.post("/voice", async (req, res) => {
   console.log("VOICE CallSid:", req.body.CallSid, "From:", req.body.From);
   console.log("VOICE saved location:", saved);
 
-  say(
-    twiml,
-    `${greeting}. Welcome to Weather Line. This service is sponsored by Lipa Supermarket.`
+  if (INTRO_AUDIO_URL) {
+    twiml.play(INTRO_AUDIO_URL);
+  }
+
+  twiml.say(
+    SAY_OPTIONS,
+    `${greeting}, welcome to Weather Line. This service is sponsored by Lipa Supermarket.`
   );
 
   if (saved) {
@@ -1273,12 +1252,6 @@ app.post("/menu", async (req, res) => {
 
     if (choice === "3") {
       return res.type("text/xml").send(forecastDayPromptTwiml(location, forecast).toString());
-    }
-
-    if (choice === "4") {
-      say(twiml, alertsSpeech(location, forecast));
-      twiml.redirect({ method: "POST" }, "/after-prompt");
-      return res.type("text/xml").send(twiml.toString());
     }
 
     say(twiml, "I did not understand that choice.");
