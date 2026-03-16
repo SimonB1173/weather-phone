@@ -15,6 +15,8 @@ const SAY_OPTIONS = {
   language: "en-US"
 };
 
+const INTRO_AUDIO_URL = process.env.INTRO_AUDIO_URL || "";
+
 const forecastCache = new Map();
 const inFlightForecasts = new Map();
 const canadaAlertCache = new Map();
@@ -1158,35 +1160,43 @@ app.get("/voice", (req, res) => {
 
 app.post("/voice", async (req, res) => {
   const twiml = new VoiceResponse();
-  const saved = getSavedLocation(req);
-  const timezone = saved?.timezone || "America/Toronto";
-  const greeting = getGreetingForTime(timezone);
 
-  console.log("VOICE CallSid:", req.body.CallSid, "From:", req.body.From);
-  console.log("VOICE saved location:", saved);
+  try {
+    const saved = getSavedLocation(req);
+    const timezone = saved?.timezone || "America/Toronto";
+    const greeting = getGreetingForTime(timezone);
 
-  if (INTRO_AUDIO_URL) {
-    twiml.play(INTRO_AUDIO_URL);
-  }
+    console.log("VOICE CallSid:", req.body.CallSid, "From:", req.body.From);
+    console.log("VOICE saved location:", saved);
 
-  twiml.say(
-    SAY_OPTIONS,
-    `${greeting}, welcome to Weather Line. This service is sponsored by Lipa Supermarket.`
-  );
-
-  if (saved) {
-    const canadaAlert = await fetchCanadianAlert(saved);
-    if (canadaAlert) {
-      say(twiml, buildCanadianAlertSpeech(saved, canadaAlert));
+    if (INTRO_AUDIO_URL) {
+      twiml.play(INTRO_AUDIO_URL);
     }
 
-    buildMainMenuInto(twiml, placeLabel(saved));
-  } else {
-    say(twiml, "No saved location was found for this number.");
-    twiml.redirect({ method: "POST" }, "/location-menu-prompt");
-  }
+    twiml.say(
+      SAY_OPTIONS,
+      `${greeting}, welcome to Weather Line. This service is sponsored by Lipa Supermarket.`
+    );
 
-  res.type("text/xml").send(twiml.toString());
+    if (saved) {
+      const canadaAlert = await fetchCanadianAlert(saved);
+      if (canadaAlert) {
+        say(twiml, buildCanadianAlertSpeech(saved, canadaAlert));
+      }
+
+      buildMainMenuInto(twiml, placeLabel(saved));
+    } else {
+      say(twiml, "No saved location was found for this number.");
+      twiml.redirect({ method: "POST" }, "/location-menu-prompt");
+    }
+
+    return res.type("text/xml").send(twiml.toString());
+  } catch (error) {
+    console.error("VOICE route error:", error.message);
+    console.error("VOICE route details:", error.response?.data || null);
+    say(twiml, "Sorry, an application error occurred. Please try again.");
+    return res.type("text/xml").send(twiml.toString());
+  }
 });
 
 app.post("/location-menu-prompt", (req, res) => {
