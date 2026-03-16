@@ -161,10 +161,6 @@ function updateVoicemailRecord(callSid, updates) {
   saveJsonFile(VOICEMAILS_FILE, current);
 }
 
-function pushIf(parts, condition, text) {
-  if (condition) parts.push(text);
-}
-
 function normalizePlaceName(name) {
   return String(name || "")
     .toUpperCase()
@@ -248,6 +244,10 @@ function getGreetingForTime(timezone) {
   return "Good evening";
 }
 
+function isBackKey(req) {
+  return String(req.body.Digits || "").trim() === "*";
+}
+
 function parseMainMenuChoice(req) {
   const digit = String(req.body.Digits || "").trim();
   const speech = String(req.body.SpeechResult || "").toLowerCase();
@@ -278,17 +278,16 @@ function parseAfterChoice(req) {
   const digit = String(req.body.Digits || "").trim();
   const speech = String(req.body.SpeechResult || "").toLowerCase();
 
-  if (digit) return digit;
-  if (speech.includes("menu")) return "1";
-  if (speech.includes("change") || speech.includes("location")) return "2";
-  if (speech.includes("repeat") || speech.includes("again") || speech.includes("current")) return "3";
+  if (digit === "5" || digit === "6" || digit === "9") return digit;
+  if (speech.includes("change") || speech.includes("location")) return "5";
   if (
     speech.includes("message") ||
     speech.includes("comment") ||
     speech.includes("advertise") ||
     speech.includes("voicemail") ||
     speech.includes("voice mail")
-  ) return "4";
+  ) return "6";
+  if (speech.includes("repeat") || speech.includes("again") || speech.includes("current")) return "9";
   return "";
 }
 
@@ -337,13 +336,13 @@ function buildMainMenuInto(twiml, savedLocationName) {
 
   say(
     gather,
-    `Your saved location is ${savedLocationName}. ` +
-      `Press or say 1 for current weather. ` +
-      `Press or say 2 for the next 6 hours. ` +
-      `Press or say 3 for the 7 day forecast menu. ` +
-      `Press or say 4 for important alerts. ` +
-      `Press or say 5 to change location. ` +
-      `Press or say 6 to leave a voice message for advertising or comments.`
+    `${savedLocationName}. ` +
+      `Press 1 current weather. ` +
+      `2 hourly forecast. ` +
+      `3 daily forecast. ` +
+      `4 alerts. ` +
+      `5 location. ` +
+      `6 voicemail.`
   );
 
   twiml.redirect({ method: "POST" }, "/voice");
@@ -363,12 +362,13 @@ function locationMenuTwiml() {
 
   say(
     gather,
-    `Choose your location. ` +
-      `Press or say 1 for Montreal. ` +
-      `Press or say 2 for Tosh. ` +
-      `Press or say 3 for Brooklyn New York. ` +
-      `Press or say 4 for Monsey. ` +
-      `Press or say 5 for Monroe.`
+    `Choose location. ` +
+      `Press 1 Montreal. ` +
+      `2 Tosh. ` +
+      `3 Brooklyn. ` +
+      `4 Monsey. ` +
+      `5 Monroe. ` +
+      `Star for main menu.`
   );
 
   twiml.redirect({ method: "POST" }, "/location-menu-prompt");
@@ -389,10 +389,10 @@ function afterActionTwiml() {
 
   say(
     gather,
-    `Press or say 1 for the main menu. ` +
-      `Press or say 2 to change location. ` +
-      `Press or say 3 to hear current weather again. ` +
-      `Press or say 4 to leave a voice message.`
+    `Press star for main menu. ` +
+      `Press 5 to change location. ` +
+      `Press 6 for voicemail. ` +
+      `Press 9 to hear current weather again.`
   );
 
   twiml.hangup();
@@ -423,8 +423,9 @@ function forecastDayPromptTwiml(location, forecast) {
 
   say(
     gather,
-    `Choose a forecast day for ${location.label || location.name}. ` +
-      `Press or say ${choices.join(". ")}.`
+    `Choose a day for ${location.label || location.name}. ` +
+      `${choices.join(". ")}. ` +
+      `Star for main menu.`
   );
 
   twiml.redirect({ method: "POST" }, "/voice");
@@ -689,7 +690,7 @@ function classifyHourlyBucket(item) {
   const precipChance = Number(item.rainChance || 0);
   const clouds = Number(item.clouds || 0);
 
-  let condition = [0, 1, 2, 3].includes(code)
+  const condition = [0, 1, 2, 3].includes(code)
     ? cloudCoverToPhrase(clouds)
     : weatherCodeToText(code);
 
@@ -760,7 +761,7 @@ function summarizeHourlyBlock(block, tz) {
   }
 
   if (maxWind >= 28) {
-    parts.push(`It may be windy, with gustier conditions.`);
+    parts.push(`It may be windy.`);
   } else if (maxWind >= 18) {
     parts.push(`A breeze is expected.`);
   }
@@ -1202,8 +1203,14 @@ app.post("/location-menu-prompt", (req, res) => {
 });
 
 app.post("/set-location-choice", (req, res) => {
-  const choice = parseLocationChoice(req);
   const twiml = new VoiceResponse();
+
+  if (isBackKey(req)) {
+    twiml.redirect({ method: "POST" }, "/voice");
+    return res.type("text/xml").send(twiml.toString());
+  }
+
+  const choice = parseLocationChoice(req);
 
   console.log("SET-LOCATION-CHOICE From:", req.body.From, "choice:", choice);
 
@@ -1297,6 +1304,11 @@ app.post("/forecast-day", async (req, res) => {
   console.log("FORECAST-DAY CallSid:", req.body.CallSid, "From:", req.body.From);
   console.log("FORECAST-DAY saved location:", location);
 
+  if (isBackKey(req)) {
+    twiml.redirect({ method: "POST" }, "/voice");
+    return res.type("text/xml").send(twiml.toString());
+  }
+
   if (!location) {
     say(twiml, "You need to choose a location first.");
     return res.type("text/xml").send(locationMenuTwiml().toString());
@@ -1328,21 +1340,26 @@ app.post("/after-prompt", (req, res) => {
 });
 
 app.post("/after", async (req, res) => {
-  const choice = parseAfterChoice(req);
   const twiml = new VoiceResponse();
 
-  console.log("AFTER choice:", choice);
+  console.log("AFTER Digits:", req.body.Digits, "SpeechResult:", req.body.SpeechResult);
 
-  if (choice === "1") {
+  if (isBackKey(req)) {
     twiml.redirect({ method: "POST" }, "/voice");
     return res.type("text/xml").send(twiml.toString());
   }
 
-  if (choice === "2") {
+  const choice = parseAfterChoice(req);
+
+  if (choice === "5") {
     return res.type("text/xml").send(locationMenuTwiml().toString());
   }
 
-  if (choice === "3") {
+  if (choice === "6") {
+    return res.type("text/xml").send(voicemailPromptTwiml().toString());
+  }
+
+  if (choice === "9") {
     const location = getSavedLocation(req);
 
     if (!location) {
@@ -1362,10 +1379,6 @@ app.post("/after", async (req, res) => {
       twiml.redirect({ method: "POST" }, "/voice");
       return res.type("text/xml").send(twiml.toString());
     }
-  }
-
-  if (choice === "4") {
-    return res.type("text/xml").send(voicemailPromptTwiml().toString());
   }
 
   say(twiml, "Goodbye.");
