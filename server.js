@@ -15,8 +15,6 @@ const SAY_OPTIONS = {
   language: "en-US"
 };
 
-const INTRO_AUDIO_URL = process.env.INTRO_AUDIO_URL || "";
-
 const forecastCache = new Map();
 const inFlightForecasts = new Map();
 const canadaAlertCache = new Map();
