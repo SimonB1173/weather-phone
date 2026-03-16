@@ -1024,6 +1024,9 @@ async function fetchForecast(location) {
   const params = {
     latitude: Number(location.latitude),
     longitude: Number(location.longitude),
+
+    apikey: "kyeOk4fK6mvDsd0U",
+
     current: [
       "temperature_2m",
       "apparent_temperature",
@@ -1060,7 +1063,7 @@ async function fetchForecast(location) {
 
   const requestPromise = (async () => {
     try {
-      const response = await axios.get("https://api.open-meteo.com/v1/forecast", {
+      const response = await axios.get("https://customer-api.open-meteo.com/v1/forecast", {
         params,
         timeout: 15000
       });
