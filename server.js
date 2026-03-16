@@ -9,8 +9,8 @@ app.use(express.json());
 const VoiceResponse = twilio.twiml.VoiceResponse;
 
 const SAY_OPTIONS = {
-  voice: "alice",
-  language: "en-CA"
+  voice: "Polly.Matthew",
+  language: "en-US"
 };
 
 // Per-call session storage
@@ -28,7 +28,19 @@ const CUSTOM_POSTAL_ALIASES = {
 };
 
 function say(twiml, text) {
-  twiml.say(SAY_OPTIONS, text);
+  const parts = String(text || "")
+    .split(/(?<=[.!?])\s+/)
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  if (!parts.length) return;
+
+  for (let i = 0; i < parts.length; i++) {
+    twiml.say(SAY_OPTIONS, parts[i]);
+    if (i < parts.length - 1) {
+      twiml.pause({ length: 1 });
+    }
+  }
 }
 
 function sessionKey(req) {
