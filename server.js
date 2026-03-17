@@ -29,7 +29,6 @@ const FORECAST_CACHE_MS = 10 * 60 * 1000;
 const STALE_FORECAST_MS = 60 * 60 * 1000;
 const ALERT_CACHE_MS = 10 * 60 * 1000;
 
-const DATA_FILE = path.join(__dirname, "saved-locations.json");
 const VOICEMAILS_FILE = path.join(__dirname, "voicemails.json");
 
 const PRESET_LOCATIONS = {
@@ -45,10 +44,23 @@ const PRESET_LOCATIONS = {
   },
   "2": {
     id: "tosh",
-    pending: true,
-    label: "Tosh"
+    name: "Boisbriand, Quebec, Canada",
+    latitude: 45.6192,
+    longitude: -73.8396,
+    timezone: "America/Toronto",
+    label: "Tosh",
+    country: "CA"
   },
   "3": {
+    id: "laurentians",
+    name: "Laurentians, Quebec, Canada",
+    latitude: 46.0168,
+    longitude: -74.2239,
+    timezone: "America/Toronto",
+    label: "Laurentians",
+    country: "CA"
+  },
+  "4": {
     id: "brooklyn",
     name: "Brooklyn, New York, USA",
     latitude: 40.7143,
@@ -57,7 +69,7 @@ const PRESET_LOCATIONS = {
     label: "Brooklyn",
     country: "US"
   },
-  "4": {
+  "5": {
     id: "monsey",
     name: "Spring Valley, New York, USA",
     latitude: 41.1134,
@@ -66,7 +78,7 @@ const PRESET_LOCATIONS = {
     label: "Monsey",
     country: "US"
   },
-  "5": {
+  "6": {
     id: "monroe",
     name: "Monroe, New York, USA",
     latitude: 41.3326,
@@ -91,14 +103,6 @@ function say(twiml, text) {
       twiml.pause({ length: 1 });
     }
   }
-}
-
-function normalizeCaller(v) {
-  return String(v || "").trim();
-}
-
-function getCallerKey(req) {
-  return normalizeCaller(req.body.From || "unknown");
 }
 
 function getCallKey(req) {
@@ -126,25 +130,6 @@ function saveJsonFile(filePath, value) {
   } catch (error) {
     console.error(`Failed to write ${filePath}:`, error.message);
   }
-}
-
-const savedLocationsByCaller = new Map(
-  Object.entries(loadJsonFile(DATA_FILE, {}))
-);
-
-function persistSavedLocations() {
-  saveJsonFile(DATA_FILE, Object.fromEntries(savedLocationsByCaller.entries()));
-}
-
-function getSavedLocation(req) {
-  const caller = getCallerKey(req);
-  return savedLocationsByCaller.get(caller) || null;
-}
-
-function saveLocationForCaller(req, location) {
-  const caller = getCallerKey(req);
-  savedLocationsByCaller.set(caller, location);
-  persistSavedLocations();
 }
 
 function getTemporaryLocation(req) {
@@ -178,7 +163,7 @@ function clearPendingLocationChoice(req) {
 }
 
 function getActiveLocation(req) {
-  return getTemporaryLocation(req) || getSavedLocation(req);
+  return getTemporaryLocation(req);
 }
 
 function setLastPlayback(req, payload) {
@@ -296,23 +281,6 @@ function dayName(iso, tz) {
   });
 }
 
-function shortDayDateLabel(iso, tz) {
-  return parsePlainDate(iso).toLocaleDateString("en-US", {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-    timeZone: tz || "UTC"
-  });
-}
-
-function monthDayLabel(iso, tz) {
-  return parsePlainDate(iso).toLocaleDateString("en-US", {
-    month: "long",
-    day: "numeric",
-    timeZone: tz || "UTC"
-  });
-}
-
 function timeLabel(iso, tz) {
   return new Date(iso).toLocaleTimeString("en-US", {
     hour: "numeric",
@@ -353,140 +321,39 @@ function isBackKey(req) {
 }
 
 function parseMainMenuChoice(req) {
-  const digit = String(req.body.Digits || "").trim();
-  const speech = String(req.body.SpeechResult || "").toLowerCase();
-
-  if (digit) return digit;
-
-  if (
-    speech.includes("seven") ||
-    speech.includes("7 day") ||
-    speech.includes("7-day") ||
-    speech.includes("weekly") ||
-    speech.includes("week") ||
-    speech.includes("forecast") ||
-    speech.includes("today") ||
-    speech.includes("tomorrow")
-  ) return "1";
-
-  if (speech.includes("hour")) return "2";
-  if (speech.includes("current") || speech.includes("now")) return "3";
-  if (speech.includes("change") || speech.includes("location")) return "5";
-
-  if (
-    speech.includes("message") ||
-    speech.includes("comment") ||
-    speech.includes("advertise") ||
-    speech.includes("advertisement") ||
-    speech.includes("voicemail") ||
-    speech.includes("voice mail")
-  ) return "6";
-
-  return "";
+  return String(req.body.Digits || "").trim();
 }
 
 function parseAfterChoice(req) {
-  const digit = String(req.body.Digits || "").trim();
-  const speech = String(req.body.SpeechResult || "").toLowerCase();
-
-  if (digit === "5" || digit === "6" || digit === "#") return digit;
-  if (speech.includes("change") || speech.includes("location")) return "5";
-
-  if (
-    speech.includes("message") ||
-    speech.includes("comment") ||
-    speech.includes("advertise") ||
-    speech.includes("voicemail") ||
-    speech.includes("voice mail")
-  ) return "6";
-
-  if (speech.includes("repeat") || speech.includes("again")) return "#";
-  return "";
+  return String(req.body.Digits || "").trim();
 }
 
-function parseForecastDayChoice(req, forecast, timezone) {
+function parseForecastDayChoice(req) {
   const digit = String(req.body.Digits || "").trim();
-  const speech = String(req.body.SpeechResult || "").toLowerCase();
-
   if (digit === "0") return "all";
   if (/^[1-7]$/.test(digit)) return parseInt(digit, 10) - 1;
-
-  if (speech.includes("all")) return "all";
-  if (speech.includes("today")) return 0;
-  if (speech.includes("tomorrow")) return 1;
-
-  for (let i = 2; i < Math.min(7, forecast.daily.time.length); i++) {
-    const weekday = dayName(forecast.daily.time[i], timezone).toLowerCase();
-    const shortDate = shortDayDateLabel(forecast.daily.time[i], timezone).toLowerCase();
-    const monthDay = monthDayLabel(forecast.daily.time[i], timezone).toLowerCase();
-
-    if (
-      speech.includes(weekday) ||
-      speech.includes(shortDate) ||
-      speech.includes(monthDay)
-    ) {
-      return i;
-    }
-  }
-
-  const match = speech.match(/\b([0-7])\b/);
-  if (match) {
-    if (match[1] === "0") return "all";
-    return parseInt(match[1], 10) - 1;
-  }
-
   return -1;
 }
 
 function parseLocationChoice(req) {
   const digit = String(req.body.Digits || "").trim();
-  const speech = String(req.body.SpeechResult || "").toLowerCase();
-
-  if (/^[1-5]$/.test(digit)) return digit;
-  if (speech.includes("montreal")) return "1";
-  if (speech.includes("tosh")) return "2";
-  if (speech.includes("brooklyn")) return "3";
-  if (speech.includes("monsey") || speech.includes("spring valley")) return "4";
-  if (speech.includes("monroe")) return "5";
-
-  return "";
-}
-
-function parseLocationModeChoice(req) {
-  const digit = String(req.body.Digits || "").trim();
-  const speech = String(req.body.SpeechResult || "").toLowerCase();
-
-  if (digit === "1" || digit === "2") return digit;
-  if (
-    speech.includes("this call") ||
-    speech.includes("temporary") ||
-    speech.includes("temp") ||
-    speech.includes("not save") ||
-    speech.includes("without saving")
-  ) return "1";
-  if (
-    speech.includes("save") ||
-    speech.includes("future") ||
-    speech.includes("default")
-  ) return "2";
-
+  if (/^[1-6]$/.test(digit)) return digit;
   return "";
 }
 
 function buildMainMenuInto(twiml, activeLocationName) {
   const gather = twiml.gather({
-    input: "speech dtmf",
+    input: "dtmf",
     action: "/menu",
     method: "POST",
     timeout: 8,
-    speechTimeout: "auto",
     numDigits: 1
   });
 
   say(
     gather,
     `Your current location is ${activeLocationName}. ` +
-      `Press or say 1 for the 7 day forecast, ` +
+      `Press 1 for the 7 day forecast, ` +
       `2 for hourly forecast, ` +
       `3 for current weather, ` +
       `5 to change location, ` +
@@ -500,46 +367,21 @@ function locationMenuTwiml() {
   const twiml = new VoiceResponse();
 
   const gather = twiml.gather({
-    input: "speech dtmf",
+    input: "dtmf",
     action: "/set-location-choice",
     method: "POST",
     timeout: 7,
-    speechTimeout: "auto",
     numDigits: 1
   });
 
   say(
     gather,
-    `Press or say 1 for Montreal, ` +
+    `Press 1 for Montreal, ` +
       `2 for Tosh, ` +
-      `3 for Brooklyn, ` +
-      `4 for Monsey, ` +
-      `5 for Monroe. ` +
-      `After you choose a location, you can use it for this call only or save it for future calls. ` +
-      `Press star for main menu.`
-  );
-
-  twiml.redirect({ method: "POST" }, "/location-menu-prompt");
-  return twiml;
-}
-
-function locationModeTwiml(location) {
-  const twiml = new VoiceResponse();
-
-  const gather = twiml.gather({
-    input: "speech dtmf",
-    action: "/set-location-mode",
-    method: "POST",
-    timeout: 7,
-    speechTimeout: "auto",
-    numDigits: 1
-  });
-
-  say(
-    gather,
-    `You chose ${placeLabel(location)}. ` +
-      `Press or say 1 to use this location for this call only. ` +
-      `Press or say 2 to save this location for future calls. ` +
+      `3 for Laurentians, ` +
+      `4 for Brooklyn, ` +
+      `5 for Monsey, ` +
+      `6 for Monroe. ` +
       `Press star for main menu.`
   );
 
@@ -551,11 +393,10 @@ function afterActionTwiml() {
   const twiml = new VoiceResponse();
 
   const gather = twiml.gather({
-    input: "speech dtmf",
+    input: "dtmf",
     action: "/after",
     method: "POST",
     timeout: 6,
-    speechTimeout: "auto",
     numDigits: 1
   });
 
@@ -575,31 +416,23 @@ function forecastDayPromptTwiml(location, forecast) {
   const twiml = new VoiceResponse();
 
   const gather = twiml.gather({
-    input: "speech dtmf",
+    input: "dtmf",
     action: "/forecast-day",
     method: "POST",
     timeout: 8,
-    speechTimeout: "auto",
     numDigits: 1
   });
 
   const dailyTimes = forecast.daily?.time || [];
   const parts = [
-    `For the 7 day forecast in ${placeLabel(location)}, press or say 0 to hear all 7 days.`
+    `For the 7 day forecast in ${placeLabel(location)}, press 0 to hear all 7 days.`
   ];
 
-  if (dailyTimes[0]) {
-    parts.push(`Press or say 1 for today.`);
-  }
-
-  if (dailyTimes[1]) {
-    parts.push(`Press or say 2 for tomorrow.`);
-  }
+  if (dailyTimes[0]) parts.push(`Press 1 for today.`);
+  if (dailyTimes[1]) parts.push(`Press 2 for tomorrow.`);
 
   for (let i = 2; i < Math.min(7, dailyTimes.length); i++) {
-    parts.push(
-      `Press or say ${i + 1} for ${dayName(dailyTimes[i], location.timezone)}.`
-    );
+    parts.push(`Press ${i + 1} for ${dayName(dailyTimes[i], location.timezone)}.`);
   }
 
   parts.push(`Press star for main menu.`);
@@ -726,8 +559,7 @@ function weatherCodeToOfficialPhrase(code, cloudCoverLike = 60, isNight = false)
 }
 
 function describeCurrentCondition(current) {
-  const codeText = weatherCodeToOfficialPhrase(current.weather_code, current.cloud_cover, false);
-  return codeText;
+  return weatherCodeToOfficialPhrase(current.weather_code, current.cloud_cover, false);
 }
 
 function describeCurrentWeatherSentence(current) {
@@ -911,7 +743,7 @@ function getPeriodTimingWord(entries, timezone, type = "day") {
     return "near morning";
   }
 
-  if (hour < 12) return "this morning";
+  if (hour < 12) return "in the morning";
   if (hour < 18) return "in the afternoon";
   return "later";
 }
@@ -956,15 +788,12 @@ function describeTransitionSentence(entries, timezone, isNight = false) {
 
   if (firstPrecip && !secondPrecip) {
     const endSky = secondSky === "clear" ? "clearing" : secondSky;
-    if (isNight) {
-      return `A few ${firstPrecip} ending ${timing} then ${endSky}.`;
-    }
     return `A few ${firstPrecip} ending ${timing} then ${endSky}.`;
   }
 
   if (!firstPrecip && secondPrecip) {
     if (firstSky === "sunny" && !isNight) {
-      return `Sunny. Increasing cloudiness and ${secondPrecip} ${timing}.`;
+      return `Sunny. Becoming a mix of sun and cloud and a chance of ${secondPrecip} ${timing}.`;
     }
     return `${capitalizeSentence(firstSky)}. A chance of ${secondPrecip} ${timing}.`;
   }
@@ -980,19 +809,15 @@ function describeTransitionSentence(entries, timezone, isNight = false) {
   if (!firstPrecip && !secondPrecip) {
     if (firstSky !== secondSky) {
       if (!isNight && firstSky === "sunny" && secondSky === "a mix of sun and cloud") {
-        return `Sunny. Becoming a mix of sun and cloud ${timing}.`;
-      }
-
-      if (!isNight && firstSky === "a mix of sun and cloud" && secondSky === "sunny") {
-        return `A mix of sun and cloud. Clearing ${timing}.`;
+        return `Sunny. Becoming a mix of sun and cloud in the afternoon.`;
       }
 
       if (isNight && firstSky === "partly cloudy" && secondSky === "cloudy") {
-        return `Partly cloudy. Becoming cloudy ${timing}.`;
+        return `Partly cloudy. Becoming cloudy near midnight.`;
       }
 
       if (isNight && firstSky === "cloudy" && secondSky === "partly cloudy") {
-        return `Cloudy. Clearing ${timing}.`;
+        return `Cloudy. Clearing near morning.`;
       }
 
       return `${capitalizeSentence(firstSky)}. Becoming ${secondSky} ${timing}.`;
@@ -1196,17 +1021,15 @@ function nextHoursSpeech(location, forecast, hours = 6) {
 
 function getDayLabel(index, dateStr, timezone) {
   if (index === 0) return "Today";
-  if (index === 1) return dayName(dateStr, timezone);
   return dayName(dateStr, timezone);
 }
 
 function getNightLabel(index, dateStr, timezone) {
   if (index === 0) return "Tonight";
-  if (index === 1) return `${dayName(dateStr, timezone)} night`;
   return `${dayName(dateStr, timezone)} night`;
 }
 
-function buildChanceSentence(entries, isNight = false) {
+function buildChanceSentence(entries) {
   const chance = Math.round(maxValue(entries.map((e) => e.precipitationProbability)));
   const precip = precipitationTypeFromEntries(entries);
 
@@ -1220,12 +1043,12 @@ function buildChanceSentence(entries, isNight = false) {
 }
 
 function describeDetailedPeriodIntro(entries, timezone, isNight = false) {
-  if (!entries.length) return isNight ? "Cloudy." : "Cloudy.";
+  if (!entries.length) return "Cloudy.";
 
   const transition = describeTransitionSentence(entries, timezone, isNight);
   if (transition) return transition;
 
-  const chanceSentence = buildChanceSentence(entries, isNight);
+  const chanceSentence = buildChanceSentence(entries);
   if (chanceSentence) return chanceSentence;
 
   return `${capitalizeSentence(skyPhraseForEntries(entries, isNight))}.`;
@@ -1234,7 +1057,7 @@ function describeDetailedPeriodIntro(entries, timezone, isNight = false) {
 function describeSimplePeriodIntro(entries, isNight = false) {
   if (!entries.length) return "Cloudy.";
 
-  const chanceSentence = buildChanceSentence(entries, isNight);
+  const chanceSentence = buildChanceSentence(entries);
   if (chanceSentence) return chanceSentence;
 
   return `${capitalizeSentence(skyPhraseForEntries(entries, isNight))}.`;
@@ -1257,38 +1080,23 @@ function describeWindLine(entries, timezone, type = "day") {
 
   if (!firstActive && !secondActive) return "";
 
-  const sameDir = firstDir === secondDir;
-  const speedDrop = firstWind - secondWind >= 10 || firstGust - secondGust >= 15;
-  const speedRise = secondWind - firstWind >= 10 || secondGust - firstGust >= 15;
-  const dirChange = !sameDir;
-
-  function formatSegment(dir, speed, gust, lightOk = false) {
-    if (speed <= 15 && gust < 25 && lightOk) {
-      return `Wind up to 15 kilometres per hour`;
-    }
-
-    let line = `Wind ${dir} ${speed} kilometres per hour`;
-    if (gust >= speed + 10) line += `, gusting to ${gust}`;
-    return line;
+  function formatWindSegment(dir, speed, gust) {
+    let text = `${dir} ${speed}`;
+    if (gust >= speed + 10) text += ` gusting to ${gust}`;
+    return text;
   }
 
-  if (firstActive && secondActive && (speedDrop || speedRise || dirChange)) {
-    const start = formatSegment(firstDir, firstWind, firstGust, false);
-    const end = secondWind <= 15 && secondGust < 25
-      ? "15 kilometres per hour or less"
-      : `${secondDir} ${secondWind}${secondGust >= secondWind + 10 ? ` gusting to ${secondGust}` : ""}`;
+  if (firstActive && secondActive) {
+    if (secondWind <= 15 && secondGust < 25 && firstWind >= 20) {
+      return `Wind ${firstDir} ${firstWind}${firstGust >= firstWind + 10 ? ` kilometres per hour gusting to ${firstGust}` : " kilometres per hour"} diminishing to 15 kilometres per hour or less ${timing}.`;
+    }
 
-    if (dirChange && speedDrop) {
-      return `${start}, diminishing to ${end} ${timing}.`;
-    }
-    if (dirChange) {
-      return `${start}, becoming ${end} ${timing}.`;
-    }
-    if (speedDrop) {
-      return `${start}, diminishing to ${end} ${timing}.`;
-    }
-    if (speedRise) {
-      return `${start}, increasing to ${end} ${timing}.`;
+    if (firstDir !== secondDir || Math.abs(firstWind - secondWind) >= 10 || Math.abs(firstGust - secondGust) >= 15) {
+      if (firstWind > secondWind || firstGust > secondGust) {
+        return `Wind ${firstDir} ${firstWind}${firstGust >= firstWind + 10 ? ` kilometres per hour gusting to ${firstGust}` : " kilometres per hour"} diminishing to ${formatWindSegment(secondDir, secondWind, secondGust)} ${timing}.`;
+      }
+
+      return `Wind ${firstDir} ${firstWind}${firstGust >= firstWind + 10 ? ` kilometres per hour gusting to ${firstGust}` : " kilometres per hour"} becoming ${formatWindSegment(secondDir, secondWind, secondGust)} ${timing}.`;
     }
   }
 
@@ -1300,12 +1108,10 @@ function describeWindLine(entries, timezone, type = "day") {
     return `Wind up to 15 kilometres per hour.`;
   }
 
-  let text = `Wind ${dir} ${maxWind} kilometres per hour`;
-  if (maxGust >= maxWind + 10) text += `, gusting to ${maxGust}`;
-  return `${text}.`;
+  return `Wind ${dir} ${maxWind}${maxGust >= maxWind + 10 ? ` kilometres per hour gusting to ${maxGust}` : " kilometres per hour"}.`;
 }
 
-function describeDayTemperatureLine(forecast, index, entries) {
+function describeDayTemperatureLine(forecast, index) {
   const high = forecast.daily?.temperature_2m_max?.[index];
   if (!Number.isFinite(Number(high))) return "";
   return `High ${formatForecastTempValue(high)}.`;
@@ -1347,7 +1153,8 @@ function describeDayWindChill(entries) {
 
   if (firstHas || secondHas) {
     const value = firstHas ? firstApp : secondApp;
-    return `Wind chill ${formatSignedTemp(value)}.`;
+    const part = firstHas ? "in the morning" : "in the afternoon";
+    return `Wind chill ${formatSignedTemp(value)} ${part}.`;
   }
 
   return "";
@@ -1378,7 +1185,7 @@ function buildDetailedDaySection(location, forecast, index) {
   ];
 
   const wind = describeWindLine(entries, location.timezone, "day");
-  const high = describeDayTemperatureLine(forecast, index, entries);
+  const high = describeDayTemperatureLine(forecast, index);
   const windChill = describeDayWindChill(entries);
   const uv = uvIndexPhrase(d.uv_index_max?.[index]);
 
@@ -1418,13 +1225,7 @@ function buildShortDaySection(location, forecast, index) {
   const entries = getHourlyEntriesForDay(forecast, dateStr);
   const label = dayName(dateStr, location.timezone);
 
-  const parts = [
-    `${label}.`,
-    describeSimplePeriodIntro(entries, false),
-    `High ${formatForecastTempValue(d.temperature_2m_max?.[index])}.`
-  ];
-
-  return parts.join(" ");
+  return `${label}. ${describeSimplePeriodIntro(entries, false)} High ${formatForecastTempValue(d.temperature_2m_max?.[index])}.`;
 }
 
 function buildShortNightSection(location, forecast, index) {
@@ -1437,13 +1238,7 @@ function buildShortNightSection(location, forecast, index) {
   const sameDayMin = d.temperature_2m_min?.[index];
   const lowValue = Number.isFinite(Number(nextDayMin)) ? nextDayMin : sameDayMin;
 
-  const parts = [
-    `${label}.`,
-    describeSimplePeriodIntro(entries, true),
-    `Low ${formatForecastTempValue(lowValue)}.`
-  ];
-
-  return parts.join(" ");
+  return `${label}. ${describeSimplePeriodIntro(entries, true)} Low ${formatForecastTempValue(lowValue)}.`;
 }
 
 function dailyForecastSpeech(location, forecast, index) {
@@ -1739,7 +1534,6 @@ async function buildMainMenuResponse(req, twiml) {
 
     buildMainMenuInto(twiml, placeLabel(activeLocation));
   } else {
-    say(twiml, "No saved location was found for this number.");
     twiml.redirect({ method: "POST" }, "/location-menu-prompt");
   }
 }
@@ -1758,12 +1552,11 @@ app.post("/voice", async (req, res) => {
   const twiml = new VoiceResponse();
 
   try {
-    const activeLocation = getActiveLocation(req);
-    const timezone = activeLocation?.timezone || "America/Toronto";
-    const greeting = getGreetingForTime(timezone);
+    clearCallState(req);
+
+    const greeting = getGreetingForTime("America/Toronto");
 
     console.log("VOICE CallSid:", req.body.CallSid, "From:", req.body.From);
-    console.log("VOICE active location:", activeLocation);
 
     if (INTRO_AUDIO_URL) {
       twiml.play(INTRO_AUDIO_URL);
@@ -1774,7 +1567,7 @@ app.post("/voice", async (req, res) => {
       `${greeting}, welcome to Weather Line.`
     );
 
-    await buildMainMenuResponse(req, twiml);
+    twiml.redirect({ method: "POST" }, "/location-menu-prompt");
     return res.type("text/xml").send(twiml.toString());
   } catch (error) {
     console.error("VOICE route error:", error.message);
@@ -1806,14 +1599,13 @@ app.post("/set-location-choice", (req, res) => {
   const twiml = new VoiceResponse();
 
   if (isBackKey(req)) {
-    clearPendingLocationChoice(req);
     twiml.redirect({ method: "POST" }, "/main-menu");
     return res.type("text/xml").send(twiml.toString());
   }
 
   const choice = parseLocationChoice(req);
 
-  console.log("SET-LOCATION-CHOICE From:", req.body.From, "choice:", choice);
+  console.log("SET-LOCATION-CHOICE choice:", choice);
 
   if (!choice || !PRESET_LOCATIONS[choice]) {
     say(twiml, "I did not understand that location choice.");
@@ -1821,57 +1613,11 @@ app.post("/set-location-choice", (req, res) => {
   }
 
   const preset = PRESET_LOCATIONS[choice];
-
-  if (preset.pending) {
-    say(twiml, `${preset.label} has not been set up yet.`);
-    return res.type("text/xml").send(locationMenuTwiml().toString());
-  }
-
-  setPendingLocationChoice(req, preset);
-  return res.type("text/xml").send(locationModeTwiml(preset).toString());
-});
-
-app.post("/set-location-mode", async (req, res) => {
-  const twiml = new VoiceResponse();
-
-  if (isBackKey(req)) {
-    clearPendingLocationChoice(req);
-    twiml.redirect({ method: "POST" }, "/main-menu");
-    return res.type("text/xml").send(twiml.toString());
-  }
-
-  const choice = parseLocationModeChoice(req);
-  const pendingLocation = getPendingLocationChoice(req);
-
-  console.log("SET-LOCATION-MODE From:", req.body.From, "choice:", choice, "pendingLocation:", pendingLocation);
-
-  if (!pendingLocation) {
-    say(twiml, "Please choose a location first.");
-    return res.type("text/xml").send(locationMenuTwiml().toString());
-  }
-
-  if (!choice) {
-    say(twiml, "I did not understand that choice.");
-    return res.type("text/xml").send(locationModeTwiml(pendingLocation).toString());
-  }
-
+  saveTemporaryLocationForCall(req, preset);
   clearPendingLocationChoice(req);
 
-  if (choice === "1") {
-    saveTemporaryLocationForCall(req, pendingLocation);
-    say(twiml, `${pendingLocation.label} will be used for the rest of this call only.`);
-  } else {
-    clearTemporaryLocationForCall(req);
-    saveLocationForCaller(req, pendingLocation);
-    say(twiml, `Your location has been saved as ${pendingLocation.label}.`);
-  }
-
-  const canadaAlert = await fetchCanadianAlert(pendingLocation);
-  if (canadaAlert) {
-    say(twiml, buildCanadianAlertSpeech(pendingLocation, canadaAlert));
-  }
-
-  buildMainMenuInto(twiml, pendingLocation.label);
+  say(twiml, `${preset.label}.`);
+  buildMainMenuInto(twiml, preset.label);
   return res.type("text/xml").send(twiml.toString());
 });
 
@@ -1893,7 +1639,6 @@ app.post("/menu", async (req, res) => {
   }
 
   if (!location) {
-    say(twiml, "You need to choose a location first.");
     return res.type("text/xml").send(locationMenuTwiml().toString());
   }
 
@@ -1947,13 +1692,12 @@ app.post("/forecast-day", async (req, res) => {
   }
 
   if (!location) {
-    say(twiml, "You need to choose a location first.");
     return res.type("text/xml").send(locationMenuTwiml().toString());
   }
 
   try {
     const forecast = await fetchForecast(location);
-    const selected = parseForecastDayChoice(req, forecast, location.timezone);
+    const selected = parseForecastDayChoice(req);
 
     if (selected === "all") {
       setLastPlayback(req, { type: "all7" });
@@ -1987,7 +1731,7 @@ app.post("/after-prompt", (req, res) => {
 app.post("/after", async (req, res) => {
   const twiml = new VoiceResponse();
 
-  console.log("AFTER Digits:", req.body.Digits, "SpeechResult:", req.body.SpeechResult);
+  console.log("AFTER Digits:", req.body.Digits);
 
   if (isBackKey(req)) {
     twiml.redirect({ method: "POST" }, "/main-menu");
