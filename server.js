@@ -260,15 +260,26 @@ function setCachedForecast(location, data) {
   return key;
 }
 
+function parsePlainDate(isoDate) {
+  const text = String(isoDate || "").slice(0, 10);
+  const [year, month, day] = text.split("-").map(Number);
+
+  if (!year || !month || !day) {
+    return new Date(isoDate);
+  }
+
+  return new Date(year, month - 1, day, 12, 0, 0);
+}
+
 function dayName(iso, tz) {
-  return new Date(iso).toLocaleDateString("en-US", {
+  return parsePlainDate(iso).toLocaleDateString("en-US", {
     weekday: "long",
     timeZone: tz || "UTC"
   });
 }
 
 function monthDayLabel(iso, tz) {
-  return new Date(iso).toLocaleDateString("en-US", {
+  return parsePlainDate(iso).toLocaleDateString("en-US", {
     month: "long",
     day: "numeric",
     timeZone: tz || "UTC"
@@ -276,7 +287,7 @@ function monthDayLabel(iso, tz) {
 }
 
 function longDayWithDateLabel(iso, tz) {
-  return new Date(iso).toLocaleDateString("en-US", {
+  return parsePlainDate(iso).toLocaleDateString("en-US", {
     weekday: "long",
     month: "long",
     day: "numeric",
