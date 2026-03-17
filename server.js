@@ -31,6 +31,7 @@ const ALERT_CACHE_MS = 10 * 60 * 1000;
 
 const DATA_FILE = path.join(__dirname, "saved-locations.json");
 const VOICEMAILS_FILE = path.join(__dirname, "voicemails.json");
+const QA_LOG_FILE = path.join(__dirname, "weather-qa-log.jsonl");
 
 const PRESET_LOCATIONS = {
   "1": {
@@ -125,6 +126,14 @@ function saveJsonFile(filePath, value) {
     fs.writeFileSync(filePath, JSON.stringify(value, null, 2), "utf8");
   } catch (error) {
     console.error(`Failed to write ${filePath}:`, error.message);
+  }
+}
+
+function appendJsonLine(filePath, payload) {
+  try {
+    fs.appendFileSync(filePath, JSON.stringify(payload) + "\n", "utf8");
+  } catch (error) {
+    console.error(`Failed to append ${filePath}:`, error.message);
   }
 }
 
@@ -500,6 +509,32 @@ function parseLocationModeChoice(req) {
   return "";
 }
 
+function pickLocationByQuery(queryValue) {
+  const raw = String(queryValue || "").trim().toLowerCase();
+
+  if (!raw) return PRESET_LOCATIONS["1"];
+  if (PRESET_LOCATIONS[raw]) return PRESET_LOCATIONS[raw];
+
+  for (const location of Object.values(PRESET_LOCATIONS)) {
+    if (!location || location.pending) continue;
+    const label = String(location.label || "").toLowerCase();
+    const name = String(location.name || "").toLowerCase();
+    if (raw === label || raw === name || name.includes(raw) || label.includes(raw)) {
+      return location;
+    }
+  }
+
+  return PRESET_LOCATIONS["1"];
+}
+
+function getServerTimeDebug() {
+  return {
+    now_iso: new Date().toISOString(),
+    server_timezone_offset_minutes: new Date().getTimezoneOffset(),
+    locale_string: new Date().toString()
+  };
+}
+
 function buildMainMenuInto(twiml, activeLocationName) {
   const gather = twiml.gather({
     input: "speech dtmf",
@@ -756,8 +791,8 @@ function describeCurrentCondition(current) {
 }
 
 function describeCurrentWeatherSentence(current) {
-  if ((current.snowfall || 0) > 0) return "It's snowing";
-  if ((current.rain || 0) > 0 || (current.showers || 0) > 0) return "It's raining";
+  if ((current.snowfall || 0) > 0) return "Current conditions show snow";
+  if ((current.rain || 0) > 0 || (current.showers || 0) > 0) return "Current conditions show rain";
 
   const condition = describeCurrentCondition(current);
 
@@ -863,18 +898,19 @@ function getHourlyEntriesForDay(forecast, dateStr) {
   return entries;
 }
 
-function getNightEntriesForDayIndex(forecast, index) {
+function getNightEntriesForDayIndex(forecast, index, timezone) {
   const dailyTimes = forecast.daily?.time || [];
   const currentDate = dailyTimes[index];
   const nextDate = dailyTimes[index + 1];
   const h = forecast.hourly || {};
   const entries = [];
   const times = h.time || [];
+  const tz = timezone || forecast.timezone || "UTC";
 
   for (let i = 0; i < times.length; i++) {
     const timeText = String(times[i]);
     const datePart = timeText.slice(0, 10);
-    const hour = new Date(times[i]).getHours();
+    const hour = getHourInTz(times[i], tz);
 
     const isLateCurrent = datePart === currentDate && hour >= 18;
     const isEarlyNext = nextDate && datePart === nextDate && hour < 6;
@@ -1450,7 +1486,7 @@ function buildDaySection(location, forecast, index) {
 function buildNightSection(location, forecast, index) {
   const d = forecast.daily || {};
   const dateStr = d.time?.[index];
-  const entries = getNightEntriesForDayIndex(forecast, index);
+  const entries = getNightEntriesForDayIndex(forecast, index, location.timezone);
   const label = getNightLabel(index, dateStr, location.timezone);
   const intro = describeNightIntro(entries, d.weather_code?.[index], location.timezone);
   const windTrend = describeWindTrend(entries, location.timezone, "night");
@@ -1506,7 +1542,7 @@ function shortDaySection(location, forecast, index) {
 function shortNightSection(location, forecast, index) {
   const d = forecast.daily || {};
   const dateStr = d.time?.[index];
-  const entries = getNightEntriesForDayIndex(forecast, index);
+  const entries = getNightEntriesForDayIndex(forecast, index, location.timezone);
 
   const label =
     index === 0 ? "Tonight" :
@@ -1654,6 +1690,108 @@ function buildCanadianAlertSpeech(location, alert) {
   return parts.join(" ");
 }
 
+function getHourlyAuditRows(forecast, count = 12) {
+  const h = forecast.hourly || {};
+  const rows = [];
+  const limit = Math.min(count, (h.time || []).length);
+
+  for (let i = 0; i < limit; i++) {
+    rows.push({
+      index: i,
+      time: h.time?.[i],
+      temperature_2m: h.temperature_2m?.[i],
+      apparent_temperature: h.apparent_temperature?.[i],
+      precipitation_probability: h.precipitation_probability?.[i],
+      rain: h.rain?.[i],
+      showers: h.showers?.[i],
+      snowfall: h.snowfall?.[i],
+      cloud_cover: h.cloud_cover?.[i],
+      wind_speed_10m: h.wind_speed_10m?.[i],
+      wind_gusts_10m: h.wind_gusts_10m?.[i],
+      wind_direction_10m: h.wind_direction_10m?.[i],
+      weather_code: h.weather_code?.[i],
+      local_hour_from_helper: getHourInTz(h.time?.[i], forecast.timezone || "UTC"),
+      local_clock_label: timeLabel(h.time?.[i], forecast.timezone || "UTC")
+    });
+  }
+
+  return rows;
+}
+
+function getDailyAuditRows(forecast) {
+  const d = forecast.daily || {};
+  const rows = [];
+  const count = Math.min(7, (d.time || []).length);
+
+  for (let i = 0; i < count; i++) {
+    rows.push({
+      index: i,
+      date: d.time?.[i],
+      weekday: dayName(d.time?.[i], forecast.timezone || "UTC"),
+      weather_code: d.weather_code?.[i],
+      temperature_2m_max: d.temperature_2m_max?.[i],
+      temperature_2m_min: d.temperature_2m_min?.[i],
+      precipitation_probability_max: d.precipitation_probability_max?.[i],
+      rain_sum: d.rain_sum?.[i],
+      showers_sum: d.showers_sum?.[i],
+      snowfall_sum: d.snowfall_sum?.[i],
+      wind_speed_10m_max: d.wind_speed_10m_max?.[i],
+      wind_gusts_10m_max: d.wind_gusts_10m_max?.[i],
+      uv_index_max: d.uv_index_max?.[i]
+    });
+  }
+
+  return rows;
+}
+
+function buildForecastAuditPayload(location, forecast) {
+  return {
+    generatedAt: new Date().toISOString(),
+    location: {
+      id: location.id,
+      label: location.label,
+      name: location.name,
+      latitude: location.latitude,
+      longitude: location.longitude,
+      timezone: location.timezone,
+      country: location.country
+    },
+    server_time: getServerTimeDebug(),
+    request_debug: forecast._debug || null,
+    forecast_meta: {
+      timezone: forecast.timezone,
+      timezone_abbreviation: forecast.timezone_abbreviation,
+      utc_offset_seconds: forecast.utc_offset_seconds,
+      latitude: forecast.latitude,
+      longitude: forecast.longitude,
+      elevation: forecast.elevation
+    },
+    current_raw: forecast.current || null,
+    current_units: forecast.current_units || null,
+    hourly_units: forecast.hourly_units || null,
+    daily_units: forecast.daily_units || null,
+    first_12_hourly_rows: getHourlyAuditRows(forecast, 12),
+    daily_rows: getDailyAuditRows(forecast),
+    spoken_output: {
+      current: currentWeatherSpeech(location, forecast),
+      next6: nextHoursSpeech(location, forecast, 6),
+      day0: dailyForecastSpeech(location, forecast, 0),
+      day1: dailyForecastSpeech(location, forecast, 1),
+      all7: sevenDayForecastSpeech(location, forecast)
+    }
+  };
+}
+
+function writeForecastAudit(location, forecast, tag = "manual") {
+  const payload = {
+    tag,
+    ...buildForecastAuditPayload(location, forecast)
+  };
+
+  appendJsonLine(QA_LOG_FILE, payload);
+  return payload;
+}
+
 async function fetchForecast(location) {
   pruneForecastCache();
 
@@ -1713,7 +1851,10 @@ async function fetchForecast(location) {
       "uv_index_max"
     ].join(","),
     timezone: location.timezone || "America/Toronto",
-    forecast_days: 7
+    forecast_days: 7,
+    temperature_unit: "celsius",
+    wind_speed_unit: "kmh",
+    precipitation_unit: "mm"
   };
 
   const requestPromise = (async () => {
@@ -1736,6 +1877,27 @@ async function fetchForecast(location) {
       if (!data.daily.weather_code && data.daily.weathercode) {
         data.daily.weather_code = data.daily.weathercode;
       }
+
+      data._debug = {
+        fetchedAt: new Date().toISOString(),
+        requestParams: params,
+        requestedLocation: {
+          label: location.label,
+          name: location.name,
+          latitude: location.latitude,
+          longitude: location.longitude,
+          timezone: location.timezone,
+          country: location.country
+        },
+        responseMeta: {
+          latitude: data.latitude,
+          longitude: data.longitude,
+          timezone: data.timezone,
+          timezone_abbreviation: data.timezone_abbreviation,
+          utc_offset_seconds: data.utc_offset_seconds,
+          elevation: data.elevation
+        }
+      };
 
       const savedKey = setCachedForecast(location, data);
       console.log(`Fetched fresh forecast for ${savedKey}`);
@@ -1798,11 +1960,13 @@ app.get("/", (req, res) => {
 
 app.get("/debug-weather", async (req, res) => {
   try {
-    const location = PRESET_LOCATIONS["1"];
+    const location = pickLocationByQuery(req.query.location);
     const before = getCachedForecast(location, { allowStale: true });
     const forecast = await fetchForecast(location);
     const after = getCachedForecast(location, { allowStale: true });
     const canadaAlert = await fetchCanadianAlert(location);
+
+    const audit = buildForecastAuditPayload(location, forecast);
 
     res.json({
       ok: true,
@@ -1811,10 +1975,84 @@ app.get("/debug-weather", async (req, res) => {
       cache_hit_after: !!after,
       cached_locations: forecastCache.size,
       in_flight_requests: inFlightForecasts.size,
-      current: forecast.current,
-      hourly_keys: Object.keys(forecast.hourly || {}),
-      daily_keys: Object.keys(forecast.daily || {}),
-      canada_alert: canadaAlert
+      location,
+      canada_alert: canadaAlert,
+      audit
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      message: error.message,
+      status: error.response?.status || null,
+      details: error.response?.data || null
+    });
+  }
+});
+
+app.get("/qa-speech", async (req, res) => {
+  try {
+    const location = pickLocationByQuery(req.query.location);
+    const forecast = await fetchForecast(location);
+
+    res.json({
+      ok: true,
+      location,
+      spoken_output: {
+        current: currentWeatherSpeech(location, forecast),
+        next6: nextHoursSpeech(location, forecast, 6),
+        today: dailyForecastSpeech(location, forecast, 0),
+        tomorrow: dailyForecastSpeech(location, forecast, 1),
+        all7: sevenDayForecastSpeech(location, forecast)
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      message: error.message,
+      status: error.response?.status || null,
+      details: error.response?.data || null
+    });
+  }
+});
+
+app.get("/qa-timezone", async (req, res) => {
+  try {
+    const location = pickLocationByQuery(req.query.location);
+    const forecast = await fetchForecast(location);
+    const rows = getHourlyAuditRows(forecast, 16);
+
+    res.json({
+      ok: true,
+      location,
+      server_time: getServerTimeDebug(),
+      forecast_timezone: forecast.timezone,
+      forecast_timezone_abbreviation: forecast.timezone_abbreviation,
+      first_16_hour_rows: rows
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      message: error.message,
+      status: error.response?.status || null,
+      details: error.response?.data || null
+    });
+  }
+});
+
+app.get("/qa-write", async (req, res) => {
+  try {
+    const location = pickLocationByQuery(req.query.location);
+    const tag = String(req.query.tag || "manual");
+    const forecast = await fetchForecast(location);
+    const payload = writeForecastAudit(location, forecast, tag);
+
+    res.json({
+      ok: true,
+      message: "QA audit written",
+      file: QA_LOG_FILE,
+      tag,
+      location: location.label,
+      spoken_output: payload.spoken_output
     });
   } catch (error) {
     res.status(500).json({
