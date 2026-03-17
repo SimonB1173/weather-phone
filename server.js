@@ -296,17 +296,17 @@ function dayName(iso, tz) {
   });
 }
 
-function monthDayLabel(iso, tz) {
+function shortDayDateLabel(iso, tz) {
   return parsePlainDate(iso).toLocaleDateString("en-US", {
-    month: "long",
+    weekday: "short",
+    month: "short",
     day: "numeric",
     timeZone: tz || "UTC"
   });
 }
 
-function longDayWithDateLabel(iso, tz) {
+function monthDayLabel(iso, tz) {
   return parsePlainDate(iso).toLocaleDateString("en-US", {
-    weekday: "long",
     month: "long",
     day: "numeric",
     timeZone: tz || "UTC"
@@ -331,33 +331,6 @@ function getHourInTz(iso, tz) {
 
   const hourPart = parts.find((p) => p.type === "hour");
   return Number(hourPart?.value || 0);
-}
-
-function timeOfDayPhrase(hour) {
-  if (hour < 6) return "overnight";
-  if (hour < 12) return "this morning";
-  if (hour < 18) return "this afternoon";
-  if (hour < 24) return "this evening";
-  return "later";
-}
-
-function nightTransitionPhrase(hour) {
-  if (hour < 3) return "after midnight";
-  if (hour < 6) return "overnight";
-  if (hour < 12) return "toward morning";
-  return "later";
-}
-
-function findTransitionPhrase(entries, tz, type = "day") {
-  if (!entries || entries.length < 2) return "later";
-
-  const splitIndex = Math.max(1, Math.floor(entries.length / 2));
-  const pivot = entries[splitIndex]?.time || entries[entries.length - 1]?.time;
-
-  if (!pivot) return "later";
-
-  const hour = getHourInTz(pivot, tz);
-  return type === "night" ? nightTransitionPhrase(hour) : timeOfDayPhrase(hour);
 }
 
 function getGreetingForTime(timezone) {
@@ -444,12 +417,12 @@ function parseForecastDayChoice(req, forecast, timezone) {
 
   for (let i = 2; i < Math.min(7, forecast.daily.time.length); i++) {
     const weekday = dayName(forecast.daily.time[i], timezone).toLowerCase();
-    const fullDate = longDayWithDateLabel(forecast.daily.time[i], timezone).toLowerCase();
+    const shortDate = shortDayDateLabel(forecast.daily.time[i], timezone).toLowerCase();
     const monthDay = monthDayLabel(forecast.daily.time[i], timezone).toLowerCase();
 
     if (
       speech.includes(weekday) ||
-      speech.includes(fullDate) ||
+      speech.includes(shortDate) ||
       speech.includes(monthDay)
     ) {
       return i;
@@ -625,7 +598,7 @@ function forecastDayPromptTwiml(location, forecast) {
 
   for (let i = 2; i < Math.min(7, dailyTimes.length); i++) {
     parts.push(
-      `Press or say ${i + 1} for ${longDayWithDateLabel(dailyTimes[i], location.timezone)}.`
+      `Press or say ${i + 1} for ${dayName(dailyTimes[i], location.timezone)}.`
     );
   }
 
@@ -707,11 +680,19 @@ function cloudCoverToPhrase(percent) {
   return "cloudy";
 }
 
-function weatherCodeToOfficialPhrase(code, cloudCoverLike = 60) {
+function cloudCoverNightPhrase(percent) {
+  const p = Number(percent || 0);
+  if (p < 20) return "clear";
+  if (p < 45) return "partly cloudy";
+  if (p < 75) return "mainly cloudy";
+  return "cloudy";
+}
+
+function weatherCodeToOfficialPhrase(code, cloudCoverLike = 60, isNight = false) {
   const n = Number(code);
 
   if ([0, 1, 2, 3].includes(n)) {
-    return cloudCoverToPhrase(cloudCoverLike);
+    return isNight ? cloudCoverNightPhrase(cloudCoverLike) : cloudCoverToPhrase(cloudCoverLike);
   }
 
   const map = {
@@ -745,20 +726,11 @@ function weatherCodeToOfficialPhrase(code, cloudCoverLike = 60) {
 }
 
 function describeCurrentCondition(current) {
-  const codeText = weatherCodeToText(current.weather_code);
-  const cloudText = cloudCoverToPhrase(current.cloud_cover);
-
-  if ([0, 1, 2, 3].includes(Number(current.weather_code))) {
-    return cloudText;
-  }
-
+  const codeText = weatherCodeToOfficialPhrase(current.weather_code, current.cloud_cover, false);
   return codeText;
 }
 
 function describeCurrentWeatherSentence(current) {
-  if ((current.snowfall || 0) > 0) return "It's snowing";
-  if ((current.rain || 0) > 0 || (current.showers || 0) > 0) return "It's raining";
-
   const condition = describeCurrentCondition(current);
 
   if (condition === "sunny") return "It is sunny";
@@ -766,6 +738,8 @@ function describeCurrentWeatherSentence(current) {
   if (condition === "a mix of sun and cloud") return "There is a mix of sun and cloud";
   if (condition === "mainly cloudy") return "It is mainly cloudy";
   if (condition === "cloudy") return "It is cloudy";
+  if (condition === "clear") return "It is clear";
+  if (condition === "partly cloudy") return "It is partly cloudy";
   if (condition === "foggy") return "It is foggy";
   if (condition === "freezing fog") return "There is freezing fog";
   if (condition === "thunderstorms") return "There are thunderstorms";
@@ -775,14 +749,17 @@ function describeCurrentWeatherSentence(current) {
   return `It is ${condition}`;
 }
 
-function formatTemp(value) {
-  return `${Math.round(value)} degrees`;
-}
-
 function formatSignedTemp(value) {
   const n = Math.round(Number(value || 0));
   if (n < 0) return `minus ${Math.abs(n)}`;
   if (n > 0) return `${n}`;
+  return "zero";
+}
+
+function formatForecastTempValue(value) {
+  const n = Math.round(Number(value || 0));
+  if (n < 0) return `minus ${Math.abs(n)}`;
+  if (n > 0) return `plus ${n}`;
   return "zero";
 }
 
@@ -791,11 +768,11 @@ function uvIndexPhrase(value) {
   if (!Number.isFinite(n) || n <= 0) return "";
   const rounded = Math.round(n);
 
-  if (rounded <= 2) return `UV index ${rounded}, low`;
-  if (rounded <= 5) return `UV index ${rounded}, moderate`;
-  if (rounded <= 7) return `UV index ${rounded}, high`;
-  if (rounded <= 10) return `UV index ${rounded}, very high`;
-  return `UV index ${rounded}, extreme`;
+  if (rounded <= 2) return `UV index ${rounded} or low.`;
+  if (rounded <= 5) return `UV index ${rounded} or moderate.`;
+  if (rounded <= 7) return `UV index ${rounded} or high.`;
+  if (rounded <= 10) return `UV index ${rounded} or very high.`;
+  return `UV index ${rounded} or extreme.`;
 }
 
 function degreesToCompass(deg) {
@@ -826,6 +803,12 @@ function maxValue(values) {
   return Math.max(...nums);
 }
 
+function minValue(values) {
+  const nums = values.map(Number).filter((v) => Number.isFinite(v));
+  if (!nums.length) return 0;
+  return Math.min(...nums);
+}
+
 function firstNonNull(values) {
   for (const value of values) {
     if (value !== undefined && value !== null && Number.isFinite(Number(value))) {
@@ -833,6 +816,12 @@ function firstNonNull(values) {
     }
   }
   return null;
+}
+
+function capitalizeSentence(text) {
+  const s = String(text || "").trim();
+  if (!s) return "";
+  return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
 function getHourlyEntriesForDay(forecast, dateStr) {
@@ -863,18 +852,19 @@ function getHourlyEntriesForDay(forecast, dateStr) {
   return entries;
 }
 
-function getNightEntriesForDayIndex(forecast, index) {
+function getNightEntriesForDayIndex(forecast, index, timezone) {
   const dailyTimes = forecast.daily?.time || [];
   const currentDate = dailyTimes[index];
   const nextDate = dailyTimes[index + 1];
   const h = forecast.hourly || {};
   const entries = [];
   const times = h.time || [];
+  const tz = timezone || forecast.timezone || "UTC";
 
   for (let i = 0; i < times.length; i++) {
     const timeText = String(times[i]);
     const datePart = timeText.slice(0, 10);
-    const hour = new Date(times[i]).getHours();
+    const hour = getHourInTz(times[i], tz);
 
     const isLateCurrent = datePart === currentDate && hour >= 18;
     const isEarlyNext = nextDate && datePart === nextDate && hour < 6;
@@ -901,90 +891,117 @@ function getNightEntriesForDayIndex(forecast, index) {
   return entries;
 }
 
-function groupConsecutiveHours(entries, predicate) {
-  const groups = [];
-  let current = null;
+function splitEntries(entries) {
+  const split = Math.max(1, Math.floor(entries.length / 2));
+  return {
+    first: entries.slice(0, split),
+    second: entries.slice(split)
+  };
+}
 
-  for (const entry of entries) {
-    if (predicate(entry)) {
-      if (!current) {
-        current = {
-          start: entry.time,
-          end: entry.time,
-          items: [entry]
-        };
-      } else {
-        current.end = entry.time;
-        current.items.push(entry);
-      }
-    } else if (current) {
-      groups.push(current);
-      current = null;
-    }
+function getPeriodTimingWord(entries, timezone, type = "day") {
+  if (!entries.length) return "later";
+  const pivot = entries[Math.max(0, Math.floor(entries.length / 2))]?.time || entries[entries.length - 1]?.time;
+  const hour = getHourInTz(pivot, timezone);
+
+  if (type === "night") {
+    if (hour < 22) return "early this evening";
+    if (hour < 24) return "this evening";
+    if (hour < 3) return "after midnight";
+    return "near morning";
   }
 
-  if (current) groups.push(current);
-  return groups;
+  if (hour < 12) return "this morning";
+  if (hour < 18) return "in the afternoon";
+  return "later";
 }
 
-function pickMainWindow(groups) {
-  if (!groups.length) return null;
+function precipitationTypeFromEntries(entries) {
+  const totalSnow = entries.reduce((sum, e) => sum + Number(e.snowfall || 0), 0);
+  const totalRain = entries.reduce((sum, e) => sum + Number(e.rain || 0) + Number(e.showers || 0), 0);
+  const maxChance = maxValue(entries.map((e) => e.precipitationProbability));
+  const hasStorm = entries.some((e) => [95, 96, 99].includes(Number(e.weatherCode)));
 
-  return groups
-    .map((g) => {
-      const avgProbability =
-        g.items.reduce((sum, item) => sum + Number(item.precipitationProbability || 0), 0) /
-        g.items.length;
+  if (hasStorm) return "thunderstorms";
+  if (totalSnow > 0.2 && totalRain > 0.15) return "flurries or rain showers";
+  if (totalSnow > 0.2) return "flurries";
+  if (totalRain > 0.2) return "rain showers";
+  if (maxChance >= 50) {
+    const snowCodes = entries.some((e) => [71, 73, 75, 77, 85, 86].includes(Number(e.weatherCode)));
+    const rainCodes = entries.some((e) => [51, 53, 55, 61, 63, 65, 80, 81, 82].includes(Number(e.weatherCode)));
+    if (snowCodes && rainCodes) return "flurries or rain showers";
+    if (snowCodes) return "flurries";
+    if (rainCodes) return "rain showers";
+  }
 
-      const totalRain = g.items.reduce(
-        (sum, item) => sum + Number(item.rain || 0) + Number(item.showers || 0),
-        0
-      );
-      const totalSnow = g.items.reduce((sum, item) => sum + Number(item.snowfall || 0), 0);
-      const score = avgProbability + totalRain * 20 + totalSnow * 20 + g.items.length * 5;
-
-      return { ...g, score };
-    })
-    .sort((a, b) => b.score - a.score)[0];
+  return "";
 }
 
-function formatTimeRange(startIso, endIso, tz) {
-  const start = timeLabel(startIso, tz);
-  const endDate = new Date(endIso);
-  endDate.setHours(endDate.getHours() + 1);
-  const end = endDate.toLocaleTimeString("en-US", {
-    hour: "numeric",
-    minute: "2-digit",
-    hour12: true,
-    timeZone: tz || "UTC"
-  });
-
-  return `${start} until ${end}`;
+function skyPhraseForEntries(entries, isNight = false) {
+  if (!entries.length) return isNight ? "cloudy" : "cloudy";
+  const avgCloud = average(entries.map((e) => e.cloudCover));
+  const mainCode = entries[Math.floor(entries.length / 2)]?.weatherCode ?? entries[0]?.weatherCode ?? 3;
+  return weatherCodeToOfficialPhrase(mainCode, avgCloud, isNight);
 }
 
-function getDailyTimingDetails(entries, tz) {
-  const rainGroups = groupConsecutiveHours(
-    entries,
-    (e) => Number(e.rain || 0) + Number(e.showers || 0) >= 0.15 || Number(e.precipitationProbability || 0) >= 45
-  );
-  const snowGroups = groupConsecutiveHours(
-    entries,
-    (e) => Number(e.snowfall || 0) >= 0.1
-  );
-  const stormGroups = groupConsecutiveHours(
-    entries,
-    (e) => [95, 96, 99].includes(Number(e.weatherCode))
-  );
+function describeTransitionSentence(entries, timezone, isNight = false) {
+  if (!entries.length) return "";
 
-  const rainWindow = pickMainWindow(rainGroups);
-  const snowWindow = pickMainWindow(snowGroups);
-  const stormWindow = pickMainWindow(stormGroups);
+  const { first, second } = splitEntries(entries);
+  const firstPrecip = precipitationTypeFromEntries(first);
+  const secondPrecip = precipitationTypeFromEntries(second);
+  const firstSky = skyPhraseForEntries(first, isNight);
+  const secondSky = skyPhraseForEntries(second, isNight);
+  const timing = getPeriodTimingWord(second.length ? second : entries, timezone, isNight ? "night" : "day");
 
-  return {
-    rain: rainWindow ? formatTimeRange(rainWindow.start, rainWindow.end, tz) : "",
-    snow: snowWindow ? formatTimeRange(snowWindow.start, snowWindow.end, tz) : "",
-    storm: stormWindow ? formatTimeRange(stormWindow.start, stormWindow.end, tz) : ""
-  };
+  if (firstPrecip && !secondPrecip) {
+    const endSky = secondSky === "clear" ? "clearing" : secondSky;
+    if (isNight) {
+      return `A few ${firstPrecip} ending ${timing} then ${endSky}.`;
+    }
+    return `A few ${firstPrecip} ending ${timing} then ${endSky}.`;
+  }
+
+  if (!firstPrecip && secondPrecip) {
+    if (firstSky === "sunny" && !isNight) {
+      return `Sunny. Increasing cloudiness and ${secondPrecip} ${timing}.`;
+    }
+    return `${capitalizeSentence(firstSky)}. A chance of ${secondPrecip} ${timing}.`;
+  }
+
+  if (firstPrecip && secondPrecip) {
+    const chance = Math.round(maxValue(entries.map((e) => e.precipitationProbability)));
+    if (chance >= 30 && chance < 70) {
+      return `Cloudy with ${chance} percent chance of ${firstPrecip}.`;
+    }
+    return `${capitalizeSentence(firstPrecip)} at times.`;
+  }
+
+  if (!firstPrecip && !secondPrecip) {
+    if (firstSky !== secondSky) {
+      if (!isNight && firstSky === "sunny" && secondSky === "a mix of sun and cloud") {
+        return `Sunny. Becoming a mix of sun and cloud ${timing}.`;
+      }
+
+      if (!isNight && firstSky === "a mix of sun and cloud" && secondSky === "sunny") {
+        return `A mix of sun and cloud. Clearing ${timing}.`;
+      }
+
+      if (isNight && firstSky === "partly cloudy" && secondSky === "cloudy") {
+        return `Partly cloudy. Becoming cloudy ${timing}.`;
+      }
+
+      if (isNight && firstSky === "cloudy" && secondSky === "partly cloudy") {
+        return `Cloudy. Clearing ${timing}.`;
+      }
+
+      return `${capitalizeSentence(firstSky)}. Becoming ${secondSky} ${timing}.`;
+    }
+
+    return `${capitalizeSentence(firstSky)}.`;
+  }
+
+  return "";
 }
 
 function describeWindForCurrent(current) {
@@ -992,15 +1009,8 @@ function describeWindForCurrent(current) {
   const gusts = Math.round(Number(current.wind_gusts_10m || 0));
   const direction = degreesToCompass(current.wind_direction_10m);
 
-  if (speed >= 40 || gusts >= 65) {
-    if (gusts > speed + 10) {
-      return `Extremely windy. Wind ${direction} ${speed} kilometres per hour, gusting to ${gusts}.`;
-    }
-    return `Extremely windy. Wind ${direction} ${speed} kilometres per hour.`;
-  }
-
   if (speed >= 15) {
-    if (gusts > speed + 10) {
+    if (gusts >= speed + 10) {
       return `Wind ${direction} ${speed} kilometres per hour, gusting to ${gusts}.`;
     }
     return `Wind ${direction} ${speed} kilometres per hour.`;
@@ -1010,30 +1020,24 @@ function describeWindForCurrent(current) {
 }
 
 function currentWeatherSpeech(location, forecast) {
-  const c = forecast.current;
+  const c = forecast.current || {};
   const parts = [
     `Current weather for ${placeLabel(location)}.`,
     `${describeCurrentWeatherSentence(c)}.`,
-    `Temperature ${formatTemp(c.temperature_2m)}.`
+    `Temperature ${formatSignedTemp(c.temperature_2m)} degrees.`
   ];
 
   const apparent = firstNonNull([c.apparent_temperature]);
   if (
     apparent !== null &&
     Math.round(apparent) !== Math.round(Number(c.temperature_2m || 0)) &&
-    apparent <= c.temperature_2m - 3
+    apparent <= Number(c.temperature_2m || 0) - 3
   ) {
-    parts.push(`Feels like ${formatSignedTemp(apparent)}.`);
+    parts.push(`Wind chill ${formatSignedTemp(apparent)}.`);
   }
 
   const windLine = describeWindForCurrent(c);
-  if (windLine) {
-    parts.push(windLine);
-  }
-
-  if ((c.showers || 0) > 0 && (c.rain || 0) <= 0) {
-    parts.push(`There are showers right now.`);
-  }
+  if (windLine) parts.push(windLine);
 
   return parts.join(" ");
 }
@@ -1100,34 +1104,23 @@ function summarizeHourlyBlock(block, tz) {
   ];
 
   if (maxRainChance >= 45) {
-    parts.push(`Chance around ${Math.round(maxRainChance)} percent.`);
+    parts.push(`${Math.round(maxRainChance)} percent chance of precipitation.`);
   }
 
   if (totalRain > 0) {
-    if (totalRain >= 3) {
-      parts.push(`Rain at times.`);
-    } else if (totalRain >= 1) {
-      parts.push(`A few showers.`);
-    } else {
-      parts.push(`A slight chance of a little rain.`);
-    }
+    if (totalRain >= 3) parts.push(`Rain at times.`);
+    else if (totalRain >= 1) parts.push(`A few showers.`);
+    else parts.push(`A slight chance of rain.`);
   }
 
   if (totalSnow > 0) {
-    if (totalSnow >= 2) {
-      parts.push(`Snow at times.`);
-    } else if (totalSnow >= 0.8) {
-      parts.push(`Some snow.`);
-    } else {
-      parts.push(`A light bit of snow.`);
-    }
+    if (totalSnow >= 2) parts.push(`Snow at times.`);
+    else if (totalSnow >= 0.8) parts.push(`Some flurries.`);
+    else parts.push(`A slight chance of flurries.`);
   }
 
-  if (maxWind >= 35 || maxGust >= 55) {
-    parts.push(`Windy.`);
-  } else if (maxWind >= 18) {
-    parts.push(`A light breeze.`);
-  }
+  if (maxWind >= 35 || maxGust >= 55) parts.push(`Windy.`);
+  else if (maxWind >= 18) parts.push(`A light breeze.`);
 
   return parts.join(" ");
 }
@@ -1196,267 +1189,249 @@ function nextHoursSpeech(location, forecast, hours = 6) {
 
   const blocks = buildSmartHourlyBlocks(items);
   const topBlocks = blocks.slice(0, 4);
-
-  const firstCondition = [0, 1, 2, 3].includes(Number(items[0].code))
-    ? cloudCoverToPhrase(items[0].clouds)
-    : weatherCodeToText(items[0].code);
-
-  const maxWind = maxValue(items.map((x) => x.wind));
-  const maxGust = maxValue(items.map((x) => x.gusts));
-  const openingParts = [
-    `Here is the next ${items.length} hours for ${placeLabel(location)}.`,
-    `Conditions begin with ${firstCondition}.`
-  ];
-
-  if (maxWind >= 35 || maxGust >= 55) {
-    openingParts.push(`Windy at times.`);
-  }
-
   const body = topBlocks.map((block) => summarizeHourlyBlock(block, tz)).join(" ");
-  return `${openingParts.join(" ")} ${body}`.trim();
+
+  return `Here is the next ${items.length} hours for ${placeLabel(location)}. ${body}`.trim();
 }
 
 function getDayLabel(index, dateStr, timezone) {
-  if (index === 0) return `Today, ${monthDayLabel(dateStr, timezone)}`;
-  if (index === 1) return `Tomorrow, ${monthDayLabel(dateStr, timezone)}`;
-  return longDayWithDateLabel(dateStr, timezone);
+  if (index === 0) return "Today";
+  if (index === 1) return dayName(dateStr, timezone);
+  return dayName(dateStr, timezone);
 }
 
 function getNightLabel(index, dateStr, timezone) {
   if (index === 0) return "Tonight";
-  if (index === 1) return "Tomorrow night";
+  if (index === 1) return `${dayName(dateStr, timezone)} night`;
   return `${dayName(dateStr, timezone)} night`;
 }
 
-function describeDayIntro(entries, dailyCode) {
-  if (!entries.length) {
-    return weatherCodeToOfficialPhrase(dailyCode, 60);
+function buildChanceSentence(entries, isNight = false) {
+  const chance = Math.round(maxValue(entries.map((e) => e.precipitationProbability)));
+  const precip = precipitationTypeFromEntries(entries);
+
+  if (!precip || chance < 25) return "";
+
+  if (chance < 70) {
+    return `Cloudy with ${chance} percent chance of ${precip}.`;
   }
 
-  const midday = entries[Math.floor(entries.length / 2)];
-  const avgCloud = average(entries.map((e) => e.cloudCover));
-  const totalSnow = entries.reduce((sum, e) => sum + Number(e.snowfall || 0), 0);
-  const totalRain = entries.reduce((sum, e) => sum + Number(e.rain || 0) + Number(e.showers || 0), 0);
-  const maxChance = maxValue(entries.map((e) => e.precipitationProbability));
-  const hasStorm = entries.some((e) => [95, 96, 99].includes(Number(e.weatherCode)));
-
-  if (hasStorm) return "Thunderstorms expected";
-
-  if (totalSnow > 0.2) {
-    if (maxChance >= 60) return "Snow";
-    return "A chance of flurries";
-  }
-
-  if (totalRain > 0.2) {
-    if (maxChance >= 60) return "Rain";
-    return "A chance of showers";
-  }
-
-  return weatherCodeToOfficialPhrase(midday?.weatherCode ?? dailyCode, avgCloud);
+  return `${capitalizeSentence(precip)}.`;
 }
 
-function describeNightIntro(entries, fallbackCode, timezone) {
-  if (!entries.length) {
-    return weatherCodeToOfficialPhrase(fallbackCode, 70);
-  }
+function describeDetailedPeriodIntro(entries, timezone, isNight = false) {
+  if (!entries.length) return isNight ? "Cloudy." : "Cloudy.";
 
-  const avgCloud = average(entries.map((e) => e.cloudCover));
-  const totalSnow = entries.reduce((sum, e) => sum + Number(e.snowfall || 0), 0);
-  const totalRain = entries.reduce((sum, e) => sum + Number(e.rain || 0) + Number(e.showers || 0), 0);
-  const maxChance = maxValue(entries.map((e) => e.precipitationProbability));
-  const firstCode = firstNonNull(entries.map((e) => e.weatherCode));
-  const lastCode = firstNonNull([...entries].reverse().map((e) => e.weatherCode));
+  const transition = describeTransitionSentence(entries, timezone, isNight);
+  if (transition) return transition;
 
-  if (totalSnow > 0.2) {
-    if (maxChance >= 60) return "Snow";
-    return "Cloudy with a chance of flurries";
-  }
+  const chanceSentence = buildChanceSentence(entries, isNight);
+  if (chanceSentence) return chanceSentence;
 
-  if (totalRain > 0.2) {
-    if (maxChance >= 60) return "Rain";
-    return "Cloudy with a chance of showers";
-  }
-
-  const startPhrase = weatherCodeToOfficialPhrase(firstCode ?? fallbackCode, avgCloud);
-  const endPhrase = weatherCodeToOfficialPhrase(lastCode ?? fallbackCode, avgCloud);
-
-  if (startPhrase !== endPhrase) {
-    const phrase = findTransitionPhrase(entries, timezone, "night");
-    return `${startPhrase}, becoming ${endPhrase} ${phrase}`;
-  }
-
-  return startPhrase;
+  return `${capitalizeSentence(skyPhraseForEntries(entries, isNight))}.`;
 }
 
-function describeWindForPeriod(entries) {
+function describeSimplePeriodIntro(entries, isNight = false) {
+  if (!entries.length) return "Cloudy.";
+
+  const chanceSentence = buildChanceSentence(entries, isNight);
+  if (chanceSentence) return chanceSentence;
+
+  return `${capitalizeSentence(skyPhraseForEntries(entries, isNight))}.`;
+}
+
+function describeWindLine(entries, timezone, type = "day") {
   if (!entries.length) return "";
 
-  const avgDirection = degreesToCompass(average(entries.map((e) => e.windDirection)));
+  const { first, second } = splitEntries(entries);
+  const firstWind = Math.round(maxValue(first.map((e) => e.wind)));
+  const secondWind = Math.round(maxValue(second.map((e) => e.wind)));
+  const firstGust = Math.round(maxValue(first.map((e) => e.windGusts)));
+  const secondGust = Math.round(maxValue(second.map((e) => e.windGusts)));
+  const firstDir = degreesToCompass(average(first.map((e) => e.windDirection)));
+  const secondDir = degreesToCompass(average(second.map((e) => e.windDirection)));
+  const timing = getPeriodTimingWord(second.length ? second : entries, timezone, type);
+
+  const firstActive = firstWind >= 15 || firstGust >= 25;
+  const secondActive = secondWind >= 15 || secondGust >= 25;
+
+  if (!firstActive && !secondActive) return "";
+
+  const sameDir = firstDir === secondDir;
+  const speedDrop = firstWind - secondWind >= 10 || firstGust - secondGust >= 15;
+  const speedRise = secondWind - firstWind >= 10 || secondGust - firstGust >= 15;
+  const dirChange = !sameDir;
+
+  function formatSegment(dir, speed, gust, lightOk = false) {
+    if (speed <= 15 && gust < 25 && lightOk) {
+      return `Wind up to 15 kilometres per hour`;
+    }
+
+    let line = `Wind ${dir} ${speed} kilometres per hour`;
+    if (gust >= speed + 10) line += `, gusting to ${gust}`;
+    return line;
+  }
+
+  if (firstActive && secondActive && (speedDrop || speedRise || dirChange)) {
+    const start = formatSegment(firstDir, firstWind, firstGust, false);
+    const end = secondWind <= 15 && secondGust < 25
+      ? "15 kilometres per hour or less"
+      : `${secondDir} ${secondWind}${secondGust >= secondWind + 10 ? ` gusting to ${secondGust}` : ""}`;
+
+    if (dirChange && speedDrop) {
+      return `${start}, diminishing to ${end} ${timing}.`;
+    }
+    if (dirChange) {
+      return `${start}, becoming ${end} ${timing}.`;
+    }
+    if (speedDrop) {
+      return `${start}, diminishing to ${end} ${timing}.`;
+    }
+    if (speedRise) {
+      return `${start}, increasing to ${end} ${timing}.`;
+    }
+  }
+
   const maxWind = Math.round(maxValue(entries.map((e) => e.wind)));
   const maxGust = Math.round(maxValue(entries.map((e) => e.windGusts)));
+  const dir = degreesToCompass(average(entries.map((e) => e.windDirection)));
 
-  if (maxWind < 15 && maxGust < 25) return "";
-
-  if (maxGust >= maxWind + 10) {
-    return `Wind ${avgDirection} ${maxWind} kilometres per hour, gusting to ${maxGust}.`;
+  if (maxWind <= 15 && maxGust < 25) {
+    return `Wind up to 15 kilometres per hour.`;
   }
 
-  return `Wind ${avgDirection} ${maxWind} kilometres per hour.`;
+  let text = `Wind ${dir} ${maxWind} kilometres per hour`;
+  if (maxGust >= maxWind + 10) text += `, gusting to ${maxGust}`;
+  return `${text}.`;
 }
 
-function describeWindTrend(entries, tz, type = "day") {
+function describeDayTemperatureLine(forecast, index, entries) {
+  const high = forecast.daily?.temperature_2m_max?.[index];
+  if (!Number.isFinite(Number(high))) return "";
+  return `High ${formatForecastTempValue(high)}.`;
+}
+
+function describeNightTemperatureLine(forecast, index, entries) {
+  const d = forecast.daily || {};
+  const nextDayMin = d.temperature_2m_min?.[index + 1];
+  const sameDayMin = d.temperature_2m_min?.[index];
+  const lowValue = Number.isFinite(Number(nextDayMin)) ? nextDayMin : sameDayMin;
+
+  if (!Number.isFinite(Number(lowValue))) return "";
+
+  const minTemp = minValue(entries.map((e) => e.temperature));
+  const maxTemp = maxValue(entries.map((e) => e.temperature));
+
+  if (entries.length && Math.abs(maxTemp - minTemp) <= 2) {
+    return `Temperature steady near ${formatSignedTemp(average(entries.map((e) => e.temperature)))}.`;
+  }
+
+  return `Low ${formatForecastTempValue(lowValue)}.`;
+}
+
+function describeDayWindChill(entries) {
   if (!entries.length) return "";
 
-  const firstHalf = entries.slice(0, Math.ceil(entries.length / 2));
-  const secondHalf = entries.slice(Math.floor(entries.length / 2));
+  const { first, second } = splitEntries(entries);
+  const firstApp = Math.round(minValue(first.map((e) => Number(e.apparentTemperature ?? e.temperature ?? 0))));
+  const secondApp = Math.round(minValue(second.map((e) => Number(e.apparentTemperature ?? e.temperature ?? 0))));
+  const firstTemp = Math.round(minValue(first.map((e) => Number(e.temperature ?? 0))));
+  const secondTemp = Math.round(minValue(second.map((e) => Number(e.temperature ?? 0))));
 
-  if (!firstHalf.length || !secondHalf.length) return "";
+  const firstHas = firstApp <= firstTemp - 3;
+  const secondHas = secondApp <= secondTemp - 3;
 
-  const firstWind = Math.round(maxValue(firstHalf.map((e) => e.wind)));
-  const secondWind = Math.round(maxValue(secondHalf.map((e) => e.wind)));
-  const firstGust = Math.round(maxValue(firstHalf.map((e) => e.windGusts)));
-  const secondGust = Math.round(maxValue(secondHalf.map((e) => e.windGusts)));
-  const firstDir = degreesToCompass(average(firstHalf.map((e) => e.windDirection)));
-  const secondDir = degreesToCompass(average(secondHalf.map((e) => e.windDirection)));
-
-  const directionChanged = firstDir !== secondDir;
-  const speedDropped = firstWind - secondWind >= 12 || firstGust - secondGust >= 15;
-  const speedIncreased = secondWind - firstWind >= 12 || secondGust - firstGust >= 15;
-
-  if (!directionChanged && !speedDropped && !speedIncreased) {
-    return "";
+  if (firstHas && secondHas && firstApp !== secondApp) {
+    return `Wind chill ${formatSignedTemp(firstApp)} in the morning and ${formatSignedTemp(secondApp)} in the afternoon.`;
   }
 
-  const phrase = findTransitionPhrase(entries, tz, type);
-
-  let start = `Wind ${firstDir} ${firstWind}`;
-  if (firstGust >= firstWind + 10) start += ` gusting to ${firstGust}`;
-
-  let end = `${secondDir} ${secondWind}`;
-  if (secondGust >= secondWind + 10) end += ` gusting to ${secondGust}`;
-
-  if (directionChanged) {
-    return `${start}, becoming ${end} ${phrase}.`;
-  }
-
-  if (speedDropped) {
-    return `${start}, easing to ${end} ${phrase}.`;
-  }
-
-  return `${start}, increasing to ${end} ${phrase}.`;
-}
-
-function describeWindChill(entries, overnight = false) {
-  if (!entries.length) return "";
-
-  const minApparent = Math.round(Math.min(...entries.map((e) => Number(e.apparentTemperature ?? e.temperature ?? 0))));
-  const minTemp = Math.round(Math.min(...entries.map((e) => Number(e.temperature ?? 0))));
-
-  if (!Number.isFinite(minApparent)) return "";
-  if (minApparent >= minTemp - 3) return "";
-
-  if (overnight) {
-    return `Wind chill ${formatSignedTemp(minApparent)} overnight.`;
-  }
-
-  return `Wind chill ${formatSignedTemp(minApparent)}.`;
-}
-
-function describeDayTemperatureTrend(forecast, index, dayEntries) {
-  const maxTemp = forecast.daily?.temperature_2m_max?.[index];
-  if (!Number.isFinite(Number(maxTemp))) return "";
-
-  if (index === 0 && forecast.current && Number.isFinite(Number(forecast.current.temperature_2m))) {
-    const currentTemp = Number(forecast.current.temperature_2m);
-    const highTemp = Number(maxTemp);
-
-    if (highTemp <= currentTemp - 2) {
-      return `Temperature falling to ${formatSignedTemp(highTemp)} this afternoon.`;
-    }
-  }
-
-  if (dayEntries.length >= 4) {
-    const firstHalf = average(dayEntries.slice(0, Math.ceil(dayEntries.length / 2)).map((e) => e.temperature));
-    const secondHalf = average(dayEntries.slice(Math.floor(dayEntries.length / 2)).map((e) => e.temperature));
-
-    if (Number.isFinite(firstHalf) && Number.isFinite(secondHalf) && firstHalf - secondHalf >= 3) {
-      return `Temperature falling through the afternoon.`;
-    }
-  }
-
-  return `High ${formatSignedTemp(maxTemp)}.`;
-}
-
-function describePrecipTiming(entries, tz, mode = "day") {
-  const timing = getDailyTimingDetails(entries, tz);
-  const totalSnow = entries.reduce((sum, e) => sum + Number(e.snowfall || 0), 0);
-  const totalRain = entries.reduce((sum, e) => sum + Number(e.rain || 0) + Number(e.showers || 0), 0);
-
-  if (timing.storm) {
-    return `Thunderstorms most likely from ${timing.storm}.`;
-  }
-
-  if (totalSnow > 0.2 && timing.snow) {
-    return `Snow most likely from ${timing.snow}.`;
-  }
-
-  if (totalRain > 0.2 && timing.rain) {
-    return `Rain most likely from ${timing.rain}.`;
-  }
-
-  if (totalRain <= 0.2 && timing.rain) {
-    return mode === "night"
-      ? `A chance of showers later tonight, most likely from ${timing.rain}.`
-      : `A chance of showers, most likely from ${timing.rain}.`;
-  }
-
-  if (totalSnow <= 0.2 && timing.snow) {
-    return mode === "night"
-      ? `A chance of flurries later tonight, most likely from ${timing.snow}.`
-      : `A chance of flurries, most likely from ${timing.snow}.`;
+  if (firstHas || secondHas) {
+    const value = firstHas ? firstApp : secondApp;
+    return `Wind chill ${formatSignedTemp(value)}.`;
   }
 
   return "";
 }
 
-function buildDaySection(location, forecast, index) {
+function describeNightWindChill(entries) {
+  if (!entries.length) return "";
+
+  const minApp = Math.round(minValue(entries.map((e) => Number(e.apparentTemperature ?? e.temperature ?? 0))));
+  const minTemp = Math.round(minValue(entries.map((e) => Number(e.temperature ?? 0))));
+
+  if (minApp <= minTemp - 3) {
+    return `Wind chill near ${formatSignedTemp(minApp)}.`;
+  }
+
+  return "";
+}
+
+function buildDetailedDaySection(location, forecast, index) {
   const d = forecast.daily || {};
   const dateStr = d.time?.[index];
   const entries = getHourlyEntriesForDay(forecast, dateStr);
   const label = getDayLabel(index, dateStr, location.timezone);
 
-  const intro = describeDayIntro(entries, d.weather_code?.[index]);
-  const windTrend = describeWindTrend(entries, location.timezone, "day");
-  const windLine = windTrend || describeWindForPeriod(entries);
-  const tempLine = describeDayTemperatureTrend(forecast, index, entries);
-  const windChillLine = describeWindChill(entries, false);
-  const precipTiming = describePrecipTiming(entries, location.timezone, "day");
-  const uvLine = uvIndexPhrase(d.uv_index_max?.[index]);
-
   const parts = [
     `${label}.`,
-    `${intro}.`
+    describeDetailedPeriodIntro(entries, location.timezone, false)
   ];
 
-  if (windLine) parts.push(windLine);
-  if (tempLine) parts.push(tempLine);
-  if (windChillLine) parts.push(windChillLine);
-  if (precipTiming) parts.push(precipTiming);
-  if (uvLine) parts.push(`${uvLine}.`);
+  const wind = describeWindLine(entries, location.timezone, "day");
+  const high = describeDayTemperatureLine(forecast, index, entries);
+  const windChill = describeDayWindChill(entries);
+  const uv = uvIndexPhrase(d.uv_index_max?.[index]);
+
+  if (wind) parts.push(wind);
+  if (high) parts.push(high);
+  if (windChill) parts.push(windChill);
+  if (uv) parts.push(uv);
 
   return parts.join(" ");
 }
 
-function buildNightSection(location, forecast, index) {
+function buildDetailedNightSection(location, forecast, index) {
   const d = forecast.daily || {};
   const dateStr = d.time?.[index];
-  const entries = getNightEntriesForDayIndex(forecast, index);
+  const entries = getNightEntriesForDayIndex(forecast, index, location.timezone);
   const label = getNightLabel(index, dateStr, location.timezone);
-  const intro = describeNightIntro(entries, d.weather_code?.[index], location.timezone);
-  const windTrend = describeWindTrend(entries, location.timezone, "night");
-  const windLine = windTrend || describeWindForPeriod(entries);
-  const windChillLine = describeWindChill(entries, true);
-  const precipTiming = describePrecipTiming(entries, location.timezone, "night");
+
+  const parts = [
+    `${label}.`,
+    describeDetailedPeriodIntro(entries, location.timezone, true)
+  ];
+
+  const wind = describeWindLine(entries, location.timezone, "night");
+  const temp = describeNightTemperatureLine(forecast, index, entries);
+  const windChill = describeNightWindChill(entries);
+
+  if (wind) parts.push(wind);
+  if (temp) parts.push(temp);
+  if (windChill) parts.push(windChill);
+
+  return parts.join(" ");
+}
+
+function buildShortDaySection(location, forecast, index) {
+  const d = forecast.daily || {};
+  const dateStr = d.time?.[index];
+  const entries = getHourlyEntriesForDay(forecast, dateStr);
+  const label = dayName(dateStr, location.timezone);
+
+  const parts = [
+    `${label}.`,
+    describeSimplePeriodIntro(entries, false),
+    `High ${formatForecastTempValue(d.temperature_2m_max?.[index])}.`
+  ];
+
+  return parts.join(" ");
+}
+
+function buildShortNightSection(location, forecast, index) {
+  const d = forecast.daily || {};
+  const dateStr = d.time?.[index];
+  const entries = getNightEntriesForDayIndex(forecast, index, location.timezone);
+  const label = `${dayName(dateStr, location.timezone)} night`;
 
   const nextDayMin = d.temperature_2m_min?.[index + 1];
   const sameDayMin = d.temperature_2m_min?.[index];
@@ -1464,15 +1439,9 @@ function buildNightSection(location, forecast, index) {
 
   const parts = [
     `${label}.`,
-    `${intro}.`
+    describeSimplePeriodIntro(entries, true),
+    `Low ${formatForecastTempValue(lowValue)}.`
   ];
-
-  if (windLine) parts.push(windLine);
-  if (Number.isFinite(Number(lowValue))) {
-    parts.push(`Low ${formatSignedTemp(lowValue)}.`);
-  }
-  if (windChillLine) parts.push(windChillLine);
-  if (precipTiming) parts.push(precipTiming);
 
   return parts.join(" ");
 }
@@ -1483,43 +1452,14 @@ function dailyForecastSpeech(location, forecast, index) {
     return `That forecast day is not available for ${placeLabel(location)}.`;
   }
 
-  const daySection = buildDaySection(location, forecast, index);
-  const nightSection = buildNightSection(location, forecast, index);
+  if (index === 0) {
+    return buildDetailedDaySection(location, forecast, index);
+  }
+
+  const daySection = buildDetailedDaySection(location, forecast, index);
+  const nightSection = buildDetailedNightSection(location, forecast, index);
 
   return `${daySection} ${nightSection}`.trim();
-}
-
-function shortDaySection(location, forecast, index) {
-  const d = forecast.daily || {};
-  const dateStr = d.time?.[index];
-  const entries = getHourlyEntriesForDay(forecast, dateStr);
-
-  const label =
-    index === 0 ? "Today" :
-    index === 1 ? "Tomorrow" :
-    dayName(dateStr, location.timezone);
-
-  const intro = describeDayIntro(entries, d.weather_code?.[index]);
-  return `${label}. ${intro}. High ${formatSignedTemp(d.temperature_2m_max?.[index])}.`;
-}
-
-function shortNightSection(location, forecast, index) {
-  const d = forecast.daily || {};
-  const dateStr = d.time?.[index];
-  const entries = getNightEntriesForDayIndex(forecast, index);
-
-  const label =
-    index === 0 ? "Tonight" :
-    index === 1 ? "Tomorrow night" :
-    `${dayName(dateStr, location.timezone)} night`;
-
-  const intro = describeNightIntro(entries, d.weather_code?.[index], location.timezone);
-
-  const nextDayMin = d.temperature_2m_min?.[index + 1];
-  const sameDayMin = d.temperature_2m_min?.[index];
-  const lowValue = Number.isFinite(Number(nextDayMin)) ? nextDayMin : sameDayMin;
-
-  return `${label}. ${intro}. Low ${formatSignedTemp(lowValue)}.`;
 }
 
 function sevenDayForecastSpeech(location, forecast) {
@@ -1527,9 +1467,18 @@ function sevenDayForecastSpeech(location, forecast) {
   const count = Math.min(7, (d.time || []).length);
   const parts = [`Here is the 7 day forecast for ${placeLabel(location)}.`];
 
-  for (let i = 0; i < count; i++) {
-    parts.push(shortDaySection(location, forecast, i));
-    parts.push(shortNightSection(location, forecast, i));
+  if (count > 0) {
+    parts.push(buildDetailedNightSection(location, forecast, 0));
+  }
+
+  if (count > 1) {
+    parts.push(buildDetailedDaySection(location, forecast, 1));
+    parts.push(buildDetailedNightSection(location, forecast, 1));
+  }
+
+  for (let i = 2; i < count; i++) {
+    parts.push(buildShortDaySection(location, forecast, i));
+    parts.push(buildShortNightSection(location, forecast, i));
   }
 
   return parts.join(" ");
@@ -1713,7 +1662,10 @@ async function fetchForecast(location) {
       "uv_index_max"
     ].join(","),
     timezone: location.timezone || "America/Toronto",
-    forecast_days: 7
+    forecast_days: 7,
+    temperature_unit: "celsius",
+    wind_speed_unit: "kmh",
+    precipitation_unit: "mm"
   };
 
   const requestPromise = (async () => {
@@ -1796,36 +1748,6 @@ app.get("/", (req, res) => {
   res.send("Weather phone server is running.");
 });
 
-app.get("/debug-weather", async (req, res) => {
-  try {
-    const location = PRESET_LOCATIONS["1"];
-    const before = getCachedForecast(location, { allowStale: true });
-    const forecast = await fetchForecast(location);
-    const after = getCachedForecast(location, { allowStale: true });
-    const canadaAlert = await fetchCanadianAlert(location);
-
-    res.json({
-      ok: true,
-      cache_key: cacheKeyForLocation(location),
-      cache_hit_before: !!before,
-      cache_hit_after: !!after,
-      cached_locations: forecastCache.size,
-      in_flight_requests: inFlightForecasts.size,
-      current: forecast.current,
-      hourly_keys: Object.keys(forecast.hourly || {}),
-      daily_keys: Object.keys(forecast.daily || {}),
-      canada_alert: canadaAlert
-    });
-  } catch (error) {
-    res.status(500).json({
-      ok: false,
-      message: error.message,
-      status: error.response?.status || null,
-      details: error.response?.data || null
-    });
-  }
-});
-
 app.get("/voice", (req, res) => {
   const twiml = new VoiceResponse();
   say(twiml, "Weather Line is running. Please call the phone number to use the interactive weather menu.");
@@ -1849,9 +1771,7 @@ app.post("/voice", async (req, res) => {
 
     twiml.say(
       SAY_OPTIONS,
-      `${greeting}, welcome to Weather Line. ` +
-        `Please note this line is still in progress and should be fully running on Thursday, March 19. ` +
-        `You are welcome to leave comments or ideas for improvement by pressing 6 from the main menu.`
+      `${greeting}, welcome to Weather Line.`
     );
 
     await buildMainMenuResponse(req, twiml);
