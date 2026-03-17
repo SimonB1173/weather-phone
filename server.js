@@ -23,6 +23,7 @@ const canadaAlertCache = new Map();
 
 const temporaryLocationsByCall = new Map();
 const pendingLocationChoiceByCall = new Map();
+const lastPlaybackByCall = new Map();
 
 const FORECAST_CACHE_MS = 10 * 60 * 1000;
 const STALE_FORECAST_MS = 60 * 60 * 1000;
@@ -178,6 +179,23 @@ function clearPendingLocationChoice(req) {
 
 function getActiveLocation(req) {
   return getTemporaryLocation(req) || getSavedLocation(req);
+}
+
+function setLastPlayback(req, payload) {
+  const callKey = getCallKey(req);
+  lastPlaybackByCall.set(callKey, payload);
+}
+
+function getLastPlayback(req) {
+  const callKey = getCallKey(req);
+  return lastPlaybackByCall.get(callKey) || null;
+}
+
+function clearCallState(req) {
+  const callKey = getCallKey(req);
+  temporaryLocationsByCall.delete(callKey);
+  pendingLocationChoiceByCall.delete(callKey);
+  lastPlaybackByCall.delete(callKey);
 }
 
 function appendVoicemailRecord(record) {
@@ -360,7 +378,7 @@ function parseAfterChoice(req) {
   const digit = String(req.body.Digits || "").trim();
   const speech = String(req.body.SpeechResult || "").toLowerCase();
 
-  if (digit === "5" || digit === "6" || digit === "9") return digit;
+  if (digit === "5" || digit === "6" || digit === "#") return digit;
   if (speech.includes("change") || speech.includes("location")) return "5";
 
   if (
@@ -371,7 +389,7 @@ function parseAfterChoice(req) {
     speech.includes("voice mail")
   ) return "6";
 
-  if (speech.includes("repeat") || speech.includes("again") || speech.includes("current")) return "9";
+  if (speech.includes("repeat") || speech.includes("again")) return "#";
   return "";
 }
 
@@ -461,10 +479,10 @@ function buildMainMenuInto(twiml, activeLocationName) {
       `2 for hourly forecast, ` +
       `3 for current weather, ` +
       `5 to change location, ` +
-      `or 6 to advertise or leave a comment by voicemail.`
+      `or 6 to leave a comment or suggestion.`
   );
 
-  twiml.redirect({ method: "POST" }, "/voice");
+  twiml.redirect({ method: "POST" }, "/main-menu");
 }
 
 function locationMenuTwiml() {
@@ -535,7 +553,7 @@ function afterActionTwiml() {
     `Press star for main menu, ` +
       `5 for change location, ` +
       `6 for voicemail, ` +
-      `or 9 to hear current weather again.`
+      `or press pound to repeat.`
   );
 
   twiml.hangup();
@@ -576,7 +594,7 @@ function forecastDayPromptTwiml(location, forecast) {
   parts.push(`Press star for main menu.`);
 
   say(gather, parts.join(" "));
-  twiml.redirect({ method: "POST" }, "/voice");
+  twiml.redirect({ method: "POST" }, "/main-menu");
   return twiml;
 }
 
@@ -586,7 +604,7 @@ function voicemailPromptTwiml() {
   say(
     twiml,
     "Please leave your message after the beep. " +
-      "You can use this for advertising requests or comments. " +
+      "You can use this for comments or suggestions. " +
       "Press the star key when you are finished."
   );
 
@@ -660,6 +678,25 @@ function describeCurrentCondition(current) {
   }
 
   return codeText;
+}
+
+function describeCurrentWeatherSentence(current) {
+  if ((current.snowfall || 0) > 0) return "It's snowing";
+  if ((current.rain || 0) > 0 || (current.showers || 0) > 0) return "It's raining";
+
+  const condition = describeCurrentCondition(current);
+
+  if (condition === "clear") return "It is clear";
+  if (condition === "mostly clear") return "It is mostly clear";
+  if (condition === "partly cloudy") return "It is partly cloudy";
+  if (condition === "cloudy") return "It is cloudy";
+  if (condition === "foggy") return "It is foggy";
+  if (condition === "freezing fog") return "There is freezing fog";
+  if (condition === "thunderstorms") return "There are thunderstorms";
+  if (condition === "thunderstorms with hail") return "There are thunderstorms with hail";
+  if (condition === "severe thunderstorms with hail") return "There are severe thunderstorms with hail";
+
+  return `It is ${condition}`;
 }
 
 function describeDailyCondition(code, maxCloudCoverLike) {
@@ -785,28 +822,22 @@ function getDailyTimingDetails(entries, tz) {
 
 function currentWeatherSpeech(location, forecast) {
   const c = forecast.current;
-  const condition = describeCurrentCondition(c);
 
   const parts = [
     `Current weather for ${placeLabel(location)}.`,
-    `It is ${condition}.`,
+    `${describeCurrentWeatherSentence(c)}.`,
     `Temperature ${formatTemp(c.temperature_2m)}.`
   ];
 
-  if ((c.wind_speed_10m || 0) >= 15) {
-    parts.push(`Wind around ${Math.round(c.wind_speed_10m)} kilometres per hour.`);
+  const wind = Number(c.wind_speed_10m || 0);
+  if (wind >= 40) {
+    parts.push(`Extremely windy.`);
+  } else if (wind >= 15) {
+    parts.push(`Wind around ${Math.round(wind)} kilometres per hour.`);
   }
 
-  if ((c.rain || 0) > 0) {
-    parts.push(`Rain right now.`);
-  }
-
-  if ((c.showers || 0) > 0) {
-    parts.push(`Showers right now.`);
-  }
-
-  if ((c.snowfall || 0) > 0) {
-    parts.push(`Snow right now.`);
+  if ((c.showers || 0) > 0 && (c.rain || 0) <= 0) {
+    parts.push(`There are showers right now.`);
   }
 
   return parts.join(" ");
@@ -1049,6 +1080,30 @@ function sevenDayForecastSpeech(location, forecast) {
   return parts.join(" ");
 }
 
+async function buildPlaybackSpeech(location, forecast, playback) {
+  if (!playback || !playback.type) {
+    return "";
+  }
+
+  if (playback.type === "current") {
+    return currentWeatherSpeech(location, forecast);
+  }
+
+  if (playback.type === "hourly") {
+    return nextHoursSpeech(location, forecast, playback.hours || 6);
+  }
+
+  if (playback.type === "daily") {
+    return dailyForecastSpeech(location, forecast, playback.index);
+  }
+
+  if (playback.type === "all7") {
+    return sevenDayForecastSpeech(location, forecast);
+  }
+
+  return "";
+}
+
 function stripXmlTags(text) {
   return String(text || "")
     .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
@@ -1260,6 +1315,22 @@ function speakWeatherError(twiml, error, fallbackText) {
   }
 }
 
+async function buildMainMenuResponse(req, twiml) {
+  const activeLocation = getActiveLocation(req);
+
+  if (activeLocation) {
+    const canadaAlert = await fetchCanadianAlert(activeLocation);
+    if (canadaAlert) {
+      say(twiml, buildCanadianAlertSpeech(activeLocation, canadaAlert));
+    }
+
+    buildMainMenuInto(twiml, placeLabel(activeLocation));
+  } else {
+    say(twiml, "No saved location was found for this number.");
+    twiml.redirect({ method: "POST" }, "/location-menu-prompt");
+  }
+}
+
 app.get("/", (req, res) => {
   res.send("Weather phone server is running.");
 });
@@ -1317,25 +1388,30 @@ app.post("/voice", async (req, res) => {
 
     twiml.say(
       SAY_OPTIONS,
-      `${greeting}, welcome to Weather Line. This service is sponsored by Lipa Supermarket.`
+      `${greeting}, welcome to Weather Line. ` +
+        `Please note this line is still in progress and should be fully running on Thursday, March 19. ` +
+        `You are welcome to leave comments or ideas for improvement by pressing 6 from the main menu.`
     );
 
-    if (activeLocation) {
-      const canadaAlert = await fetchCanadianAlert(activeLocation);
-      if (canadaAlert) {
-        say(twiml, buildCanadianAlertSpeech(activeLocation, canadaAlert));
-      }
-
-      buildMainMenuInto(twiml, placeLabel(activeLocation));
-    } else {
-      say(twiml, "No saved location was found for this number.");
-      twiml.redirect({ method: "POST" }, "/location-menu-prompt");
-    }
-
+    await buildMainMenuResponse(req, twiml);
     return res.type("text/xml").send(twiml.toString());
   } catch (error) {
     console.error("VOICE route error:", error.message);
     console.error("VOICE route details:", error.response?.data || null);
+    say(twiml, "Sorry, an application error occurred. Please try again.");
+    return res.type("text/xml").send(twiml.toString());
+  }
+});
+
+app.post("/main-menu", async (req, res) => {
+  const twiml = new VoiceResponse();
+
+  try {
+    await buildMainMenuResponse(req, twiml);
+    return res.type("text/xml").send(twiml.toString());
+  } catch (error) {
+    console.error("MAIN-MENU route error:", error.message);
+    console.error("MAIN-MENU route details:", error.response?.data || null);
     say(twiml, "Sorry, an application error occurred. Please try again.");
     return res.type("text/xml").send(twiml.toString());
   }
@@ -1350,7 +1426,7 @@ app.post("/set-location-choice", (req, res) => {
 
   if (isBackKey(req)) {
     clearPendingLocationChoice(req);
-    twiml.redirect({ method: "POST" }, "/voice");
+    twiml.redirect({ method: "POST" }, "/main-menu");
     return res.type("text/xml").send(twiml.toString());
   }
 
@@ -1379,7 +1455,7 @@ app.post("/set-location-mode", async (req, res) => {
 
   if (isBackKey(req)) {
     clearPendingLocationChoice(req);
-    twiml.redirect({ method: "POST" }, "/voice");
+    twiml.redirect({ method: "POST" }, "/main-menu");
     return res.type("text/xml").send(twiml.toString());
   }
 
@@ -1448,19 +1524,21 @@ app.post("/menu", async (req, res) => {
     }
 
     if (choice === "2") {
+      setLastPlayback(req, { type: "hourly", hours: 6 });
       say(twiml, nextHoursSpeech(location, forecast, 6));
       twiml.redirect({ method: "POST" }, "/after-prompt");
       return res.type("text/xml").send(twiml.toString());
     }
 
     if (choice === "3") {
+      setLastPlayback(req, { type: "current" });
       say(twiml, currentWeatherSpeech(location, forecast));
       twiml.redirect({ method: "POST" }, "/after-prompt");
       return res.type("text/xml").send(twiml.toString());
     }
 
     say(twiml, "I did not understand that choice.");
-    twiml.redirect({ method: "POST" }, "/voice");
+    twiml.redirect({ method: "POST" }, "/main-menu");
     return res.type("text/xml").send(twiml.toString());
   } catch (error) {
     console.error("MENU weather error:", error.message);
@@ -1470,7 +1548,7 @@ app.post("/menu", async (req, res) => {
       error,
       "Sorry, I could not retrieve the weather right now. Please try again later."
     );
-    twiml.redirect({ method: "POST" }, "/voice");
+    twiml.redirect({ method: "POST" }, "/main-menu");
     return res.type("text/xml").send(twiml.toString());
   }
 });
@@ -1483,7 +1561,7 @@ app.post("/forecast-day", async (req, res) => {
   console.log("FORECAST-DAY active location:", location);
 
   if (isBackKey(req)) {
-    twiml.redirect({ method: "POST" }, "/voice");
+    twiml.redirect({ method: "POST" }, "/main-menu");
     return res.type("text/xml").send(twiml.toString());
   }
 
@@ -1497,6 +1575,7 @@ app.post("/forecast-day", async (req, res) => {
     const selected = parseForecastDayChoice(req, forecast, location.timezone);
 
     if (selected === "all") {
+      setLastPlayback(req, { type: "all7" });
       say(twiml, sevenDayForecastSpeech(location, forecast));
       twiml.redirect({ method: "POST" }, "/after-prompt");
       return res.type("text/xml").send(twiml.toString());
@@ -1507,6 +1586,7 @@ app.post("/forecast-day", async (req, res) => {
       return res.type("text/xml").send(forecastDayPromptTwiml(location, forecast).toString());
     }
 
+    setLastPlayback(req, { type: "daily", index: selected });
     say(twiml, dailyForecastSpeech(location, forecast, selected));
     twiml.redirect({ method: "POST" }, "/after-prompt");
     return res.type("text/xml").send(twiml.toString());
@@ -1514,7 +1594,7 @@ app.post("/forecast-day", async (req, res) => {
     console.error("FORECAST-DAY error:", error.message);
     console.error("FORECAST-DAY details:", error.response?.data || null);
     speakWeatherError(twiml, error, "Sorry, I could not retrieve that forecast.");
-    twiml.redirect({ method: "POST" }, "/voice");
+    twiml.redirect({ method: "POST" }, "/main-menu");
     return res.type("text/xml").send(twiml.toString());
   }
 });
@@ -1529,7 +1609,7 @@ app.post("/after", async (req, res) => {
   console.log("AFTER Digits:", req.body.Digits, "SpeechResult:", req.body.SpeechResult);
 
   if (isBackKey(req)) {
-    twiml.redirect({ method: "POST" }, "/voice");
+    twiml.redirect({ method: "POST" }, "/main-menu");
     return res.type("text/xml").send(twiml.toString());
   }
 
@@ -1543,24 +1623,34 @@ app.post("/after", async (req, res) => {
     return res.type("text/xml").send(voicemailPromptTwiml().toString());
   }
 
-  if (choice === "9") {
+  if (choice === "#") {
     const location = getActiveLocation(req);
+    const lastPlayback = getLastPlayback(req);
 
-    if (!location) {
-      say(twiml, "You need to choose a location first.");
-      return res.type("text/xml").send(locationMenuTwiml().toString());
+    if (!location || !lastPlayback) {
+      say(twiml, "There is nothing to repeat yet.");
+      twiml.redirect({ method: "POST" }, "/main-menu");
+      return res.type("text/xml").send(twiml.toString());
     }
 
     try {
       const forecast = await fetchForecast(location);
-      say(twiml, currentWeatherSpeech(location, forecast));
+      const speech = await buildPlaybackSpeech(location, forecast, lastPlayback);
+
+      if (!speech) {
+        say(twiml, "There is nothing to repeat yet.");
+        twiml.redirect({ method: "POST" }, "/main-menu");
+        return res.type("text/xml").send(twiml.toString());
+      }
+
+      say(twiml, speech);
       twiml.redirect({ method: "POST" }, "/after-prompt");
       return res.type("text/xml").send(twiml.toString());
     } catch (error) {
-      console.error("AFTER repeat current error:", error.message);
-      console.error("AFTER repeat current details:", error.response?.data || null);
-      speakWeatherError(twiml, error, "Sorry, I could not retrieve the weather.");
-      twiml.redirect({ method: "POST" }, "/voice");
+      console.error("AFTER repeat error:", error.message);
+      console.error("AFTER repeat details:", error.response?.data || null);
+      speakWeatherError(twiml, error, "Sorry, I could not repeat that weather report.");
+      twiml.redirect({ method: "POST" }, "/main-menu");
       return res.type("text/xml").send(twiml.toString());
     }
   }
@@ -1640,6 +1730,11 @@ app.post("/recording-status", (req, res) => {
     pendingLocationChoiceByCall.delete(callSid);
   }
 
+  res.status(204).send();
+});
+
+app.post("/call-ended", (req, res) => {
+  clearCallState(req);
   res.status(204).send();
 });
 
