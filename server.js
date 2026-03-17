@@ -1165,7 +1165,7 @@ async function fetchForecast(location) {
   const params = {
     latitude: Number(location.latitude),
     longitude: Number(location.longitude),
-    apikey: "kyeOk4fK6mvDsd0U",
+    apikey: process.env.OPEN_METEO_API_KEY,
     current: [
       "temperature_2m",
       "apparent_temperature",
