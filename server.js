@@ -758,7 +758,7 @@ function formatTimeRange(startIso, endIso, tz) {
   return `${start} until ${end}`;
 }
 
-function buildHourlyEventSummary(entries, tz) {
+function getDailyTimingDetails(entries, tz) {
   const rainGroups = groupConsecutiveHours(
     entries,
     (e) => Number(e.rain || 0) + Number(e.showers || 0) >= 0.15 || Number(e.precipitationProbability || 0) >= 45
@@ -772,36 +772,15 @@ function buildHourlyEventSummary(entries, tz) {
     (e) => [95, 96, 99].includes(Number(e.weatherCode))
   );
 
-  const parts = [];
-
-  const stormWindow = pickMainWindow(stormGroups);
-  if (stormWindow) {
-    parts.push(
-      `Thunderstorms are most likely from ${formatTimeRange(stormWindow.start, stormWindow.end, tz)}.`
-    );
-  }
-
-  const snowWindow = pickMainWindow(snowGroups);
-  if (snowWindow) {
-    const maxSnow = Math.max(...snowWindow.items.map((x) => Number(x.snowfall || 0)));
-    const snowLabel = maxSnow >= 1 ? "Snow" : "Light snow";
-    parts.push(
-      `${snowLabel} is most likely from ${formatTimeRange(snowWindow.start, snowWindow.end, tz)}.`
-    );
-  }
-
   const rainWindow = pickMainWindow(rainGroups);
-  if (rainWindow) {
-    const maxRain = Math.max(
-      ...rainWindow.items.map((x) => Number(x.rain || 0) + Number(x.showers || 0))
-    );
-    const rainLabel = maxRain >= 2 ? "Heavier rain" : "Rain or showers";
-    parts.push(
-      `${rainLabel} is most likely from ${formatTimeRange(rainWindow.start, rainWindow.end, tz)}.`
-    );
-  }
+  const snowWindow = pickMainWindow(snowGroups);
+  const stormWindow = pickMainWindow(stormGroups);
 
-  return parts.join(" ");
+  return {
+    rain: rainWindow ? formatTimeRange(rainWindow.start, rainWindow.end, tz) : "",
+    snow: snowWindow ? formatTimeRange(snowWindow.start, snowWindow.end, tz) : "",
+    storm: stormWindow ? formatTimeRange(stormWindow.start, stormWindow.end, tz) : ""
+  };
 }
 
 function currentWeatherSpeech(location, forecast) {
@@ -811,23 +790,23 @@ function currentWeatherSpeech(location, forecast) {
   const parts = [
     `Current weather for ${placeLabel(location)}.`,
     `It is ${condition}.`,
-    `The temperature is ${formatTemp(c.temperature_2m)}.`
+    `Temperature ${formatTemp(c.temperature_2m)}.`
   ];
 
   if ((c.wind_speed_10m || 0) >= 15) {
-    parts.push(`Wind is around ${Math.round(c.wind_speed_10m)} kilometres per hour.`);
+    parts.push(`Wind around ${Math.round(c.wind_speed_10m)} kilometres per hour.`);
   }
 
   if ((c.rain || 0) > 0) {
-    parts.push(`Rain is falling now.`);
+    parts.push(`Rain right now.`);
   }
 
   if ((c.showers || 0) > 0) {
-    parts.push(`There are showers right now.`);
+    parts.push(`Showers right now.`);
   }
 
   if ((c.snowfall || 0) > 0) {
-    parts.push(`Snow is falling now.`);
+    parts.push(`Snow right now.`);
   }
 
   return parts.join(" ");
@@ -894,14 +873,14 @@ function summarizeHourlyBlock(block, tz) {
   ];
 
   if (maxRainChance >= 45) {
-    parts.push(`Chance of precipitation up to ${Math.round(maxRainChance)} percent.`);
+    parts.push(`Chance around ${Math.round(maxRainChance)} percent.`);
   }
 
   if (totalRain > 0) {
     if (totalRain >= 3) {
-      parts.push(`Rain is likely at times.`);
+      parts.push(`Rain at times.`);
     } else if (totalRain >= 1) {
-      parts.push(`A few showers are possible.`);
+      parts.push(`A few showers.`);
     } else {
       parts.push(`A slight chance of a little rain.`);
     }
@@ -909,18 +888,18 @@ function summarizeHourlyBlock(block, tz) {
 
   if (totalSnow > 0) {
     if (totalSnow >= 2) {
-      parts.push(`Snow is likely at times.`);
+      parts.push(`Snow at times.`);
     } else if (totalSnow >= 0.8) {
-      parts.push(`Some snow is possible.`);
+      parts.push(`Some snow.`);
     } else {
-      parts.push(`A light bit of snow is possible.`);
+      parts.push(`A light bit of snow.`);
     }
   }
 
   if (maxWind >= 28) {
-    parts.push(`It may be windy.`);
+    parts.push(`Windy.`);
   } else if (maxWind >= 18) {
-    parts.push(`A light breeze is expected.`);
+    parts.push(`A light breeze.`);
   }
 
   return parts.join(" ");
@@ -1006,6 +985,7 @@ function dailyForecastSpeech(location, forecast, index) {
 
   const dateStr = d.time[index];
   const hourlyEntries = getHourlyEntriesForDay(forecast, dateStr);
+  const timing = getDailyTimingDetails(hourlyEntries, location.timezone);
 
   const label =
     index === 0
@@ -1023,37 +1003,35 @@ function dailyForecastSpeech(location, forecast, index) {
   const parts = [
     `Forecast for ${label} in ${placeLabel(location)}.`,
     `Expect ${condition}.`,
-    `The high will be ${Math.round(d.temperature_2m_max[index])} degrees.`,
-    `The low will be ${Math.round(d.temperature_2m_min[index])} degrees.`
+    `High ${Math.round(d.temperature_2m_max[index])}.`,
+    `Low ${Math.round(d.temperature_2m_min[index])}.`
   ];
 
   if ((d.precipitation_probability_max[index] || 0) >= 35) {
-    parts.push(
-      `The highest chance of precipitation is around ${Math.round(d.precipitation_probability_max[index])} percent.`
-    );
+    parts.push(`Chance around ${Math.round(d.precipitation_probability_max[index])} percent.`);
   }
 
   if ((d.wind_speed_10m_max[index] || 0) >= 20) {
-    parts.push(
-      `Winds may reach about ${Math.round(d.wind_speed_10m_max[index])} kilometres per hour.`
-    );
-  }
-
-  if ((d.rain_sum[index] || 0) > 0) {
-    parts.push(`Total rain may be around ${Number(d.rain_sum[index]).toFixed(1)} millimetres.`);
-  }
-
-  if ((d.showers_sum[index] || 0) > 0) {
-    parts.push(`Showers are possible.`);
+    parts.push(`Wind around ${Math.round(d.wind_speed_10m_max[index])} kilometres per hour.`);
   }
 
   if ((d.snowfall_sum[index] || 0) > 0) {
-    parts.push(`Total snowfall may be around ${Number(d.snowfall_sum[index]).toFixed(1)} centimetres.`);
+    const snowText = `Snow around ${Number(d.snowfall_sum[index]).toFixed(1)} centimetres`;
+    parts.push(timing.snow ? `${snowText}, most likely from ${timing.snow}.` : `${snowText}.`);
   }
 
-  const timingSummary = buildHourlyEventSummary(hourlyEntries, location.timezone);
-  if (timingSummary) {
-    parts.push(timingSummary);
+  const rainTotal = Number(d.rain_sum[index] || 0);
+  const showersTotal = Number(d.showers_sum[index] || 0);
+
+  if (rainTotal > 0) {
+    const rainText = `Rain around ${rainTotal.toFixed(1)} millimetres`;
+    parts.push(timing.rain ? `${rainText}, most likely from ${timing.rain}.` : `${rainText}.`);
+  } else if (showersTotal > 0) {
+    parts.push(timing.rain ? `Showers, most likely from ${timing.rain}.` : `Showers.`);
+  }
+
+  if (timing.storm) {
+    parts.push(`Thunderstorms most likely from ${timing.storm}.`);
   }
 
   return parts.join(" ");
