@@ -322,6 +322,44 @@ function timeLabel(iso, tz) {
   });
 }
 
+function getHourInTz(iso, tz) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    hour: "numeric",
+    hour12: false,
+    timeZone: tz || "UTC"
+  }).formatToParts(new Date(iso));
+
+  const hourPart = parts.find((p) => p.type === "hour");
+  return Number(hourPart?.value || 0);
+}
+
+function timeOfDayPhrase(hour) {
+  if (hour < 6) return "overnight";
+  if (hour < 12) return "this morning";
+  if (hour < 18) return "this afternoon";
+  if (hour < 24) return "this evening";
+  return "later";
+}
+
+function nightTransitionPhrase(hour) {
+  if (hour < 3) return "after midnight";
+  if (hour < 6) return "overnight";
+  if (hour < 12) return "toward morning";
+  return "later";
+}
+
+function findTransitionPhrase(entries, tz, type = "day") {
+  if (!entries || entries.length < 2) return "later";
+
+  const splitIndex = Math.max(1, Math.floor(entries.length / 2));
+  const pivot = entries[splitIndex]?.time || entries[entries.length - 1]?.time;
+
+  if (!pivot) return "later";
+
+  const hour = getHourInTz(pivot, tz);
+  return type === "night" ? nightTransitionPhrase(hour) : timeOfDayPhrase(hour);
+}
+
 function getGreetingForTime(timezone) {
   const parts = new Intl.DateTimeFormat("en-US", {
     hour: "numeric",
@@ -1217,7 +1255,7 @@ function describeDayIntro(entries, dailyCode) {
   return weatherCodeToOfficialPhrase(midday?.weatherCode ?? dailyCode, avgCloud);
 }
 
-function describeNightIntro(entries, fallbackCode) {
+function describeNightIntro(entries, fallbackCode, timezone) {
   if (!entries.length) {
     return weatherCodeToOfficialPhrase(fallbackCode, 70);
   }
@@ -1239,15 +1277,15 @@ function describeNightIntro(entries, fallbackCode) {
     return "Cloudy with a chance of showers";
   }
 
-  if (firstCode !== null && lastCode !== null && firstCode !== lastCode) {
-    const startPhrase = weatherCodeToOfficialPhrase(firstCode, avgCloud);
-    const endPhrase = weatherCodeToOfficialPhrase(lastCode, avgCloud);
-    if (startPhrase !== endPhrase) {
-      return `${startPhrase}, becoming ${endPhrase}`;
-    }
+  const startPhrase = weatherCodeToOfficialPhrase(firstCode ?? fallbackCode, avgCloud);
+  const endPhrase = weatherCodeToOfficialPhrase(lastCode ?? fallbackCode, avgCloud);
+
+  if (startPhrase !== endPhrase) {
+    const phrase = findTransitionPhrase(entries, timezone, "night");
+    return `${startPhrase}, becoming ${endPhrase} ${phrase}`;
   }
 
-  return weatherCodeToOfficialPhrase(firstCode ?? fallbackCode, avgCloud);
+  return startPhrase;
 }
 
 function describeWindForPeriod(entries) {
@@ -1266,7 +1304,7 @@ function describeWindForPeriod(entries) {
   return `Wind ${avgDirection} ${maxWind} kilometres per hour.`;
 }
 
-function describeWindTrend(entries) {
+function describeWindTrend(entries, tz, type = "day") {
   if (!entries.length) return "";
 
   const firstHalf = entries.slice(0, Math.ceil(entries.length / 2));
@@ -1283,18 +1321,29 @@ function describeWindTrend(entries) {
 
   const directionChanged = firstDir !== secondDir;
   const speedDropped = firstWind - secondWind >= 12 || firstGust - secondGust >= 15;
+  const speedIncreased = secondWind - firstWind >= 12 || secondGust - firstGust >= 15;
 
-  if (directionChanged || speedDropped) {
-    let start = `Wind ${firstDir} ${firstWind}`;
-    if (firstGust >= firstWind + 10) start += ` gusting to ${firstGust}`;
-
-    let end = `${secondDir} ${secondWind}`;
-    if (secondGust >= secondWind + 10) end += ` gusting to ${secondGust}`;
-
-    return `${start}, becoming ${end} later in the day.`;
+  if (!directionChanged && !speedDropped && !speedIncreased) {
+    return "";
   }
 
-  return "";
+  const phrase = findTransitionPhrase(entries, tz, type);
+
+  let start = `Wind ${firstDir} ${firstWind}`;
+  if (firstGust >= firstWind + 10) start += ` gusting to ${firstGust}`;
+
+  let end = `${secondDir} ${secondWind}`;
+  if (secondGust >= secondWind + 10) end += ` gusting to ${secondGust}`;
+
+  if (directionChanged) {
+    return `${start}, becoming ${end} ${phrase}.`;
+  }
+
+  if (speedDropped) {
+    return `${start}, easing to ${end} ${phrase}.`;
+  }
+
+  return `${start}, increasing to ${end} ${phrase}.`;
 }
 
 function describeWindChill(entries, overnight = false) {
@@ -1348,27 +1397,23 @@ function describePrecipTiming(entries, tz, mode = "day") {
   }
 
   if (totalSnow > 0.2 && timing.snow) {
-    return mode === "night"
-      ? `Snow most likely tonight from ${timing.snow}.`
-      : `Snow most likely from ${timing.snow}.`;
+    return `Snow most likely from ${timing.snow}.`;
   }
 
   if (totalRain > 0.2 && timing.rain) {
-    return mode === "night"
-      ? `Rain most likely tonight from ${timing.rain}.`
-      : `Rain most likely from ${timing.rain}.`;
+    return `Rain most likely from ${timing.rain}.`;
   }
 
   if (totalRain <= 0.2 && timing.rain) {
     return mode === "night"
-      ? `A chance of showers tonight from ${timing.rain}.`
-      : `A chance of showers from ${timing.rain}.`;
+      ? `A chance of showers later tonight, most likely from ${timing.rain}.`
+      : `A chance of showers, most likely from ${timing.rain}.`;
   }
 
   if (totalSnow <= 0.2 && timing.snow) {
     return mode === "night"
-      ? `A chance of flurries tonight from ${timing.snow}.`
-      : `A chance of flurries from ${timing.snow}.`;
+      ? `A chance of flurries later tonight, most likely from ${timing.snow}.`
+      : `A chance of flurries, most likely from ${timing.snow}.`;
   }
 
   return "";
@@ -1381,7 +1426,7 @@ function buildDaySection(location, forecast, index) {
   const label = getDayLabel(index, dateStr, location.timezone);
 
   const intro = describeDayIntro(entries, d.weather_code?.[index]);
-  const windTrend = describeWindTrend(entries);
+  const windTrend = describeWindTrend(entries, location.timezone, "day");
   const windLine = windTrend || describeWindForPeriod(entries);
   const tempLine = describeDayTemperatureTrend(forecast, index, entries);
   const windChillLine = describeWindChill(entries, false);
@@ -1407,8 +1452,9 @@ function buildNightSection(location, forecast, index) {
   const dateStr = d.time?.[index];
   const entries = getNightEntriesForDayIndex(forecast, index);
   const label = getNightLabel(index, dateStr, location.timezone);
-  const intro = describeNightIntro(entries, d.weather_code?.[index]);
-  const windLine = describeWindForPeriod(entries);
+  const intro = describeNightIntro(entries, d.weather_code?.[index], location.timezone);
+  const windTrend = describeWindTrend(entries, location.timezone, "night");
+  const windLine = windTrend || describeWindForPeriod(entries);
   const windChillLine = describeWindChill(entries, true);
   const precipTiming = describePrecipTiming(entries, location.timezone, "night");
 
@@ -1467,7 +1513,7 @@ function shortNightSection(location, forecast, index) {
     index === 1 ? "Tomorrow night" :
     `${dayName(dateStr, location.timezone)} night`;
 
-  const intro = describeNightIntro(entries, d.weather_code?.[index]);
+  const intro = describeNightIntro(entries, d.weather_code?.[index], location.timezone);
 
   const nextDayMin = d.temperature_2m_min?.[index + 1];
   const sameDayMin = d.temperature_2m_min?.[index];
