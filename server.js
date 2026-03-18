@@ -385,7 +385,7 @@ function buildMainMenuInto(twiml, activeLocationName) {
 
   say(
     gather,
-    `${activeLocationName}. Press 1 for the 7 day forecast. Press 2 for hourly forecast. Press 3 for current weather. Press 5 to change location. Or press 6 for feedback, comments, or suggestions.`
+    `${activeLocationName}. Press 1 for the 7 day forecast. Press 2 for hourly forecast. Press 3 for current weather. Press 5 to change location. Or press 9 for feedback, comments, or suggestions.`
   );
 
   twiml.redirect({ method: "POST" }, "/main-menu");
@@ -1751,7 +1751,7 @@ app.post("/voice", async (req, res) => {
       SAY_OPTIONS,
       `${greeting}, welcome to Weather Line. ` +
         `Please note this line is still in progress and should be fully running on Thursday March 19. ` +
-        `You are welcome to leave comments or ideas for improvement by pressing number 6.`
+        `You are welcome to leave comments or ideas for improvement by pressing number 9.`
     );
 
     twiml.redirect({ method: "POST" }, "/location-menu-prompt");
@@ -1843,7 +1843,7 @@ app.post("/menu", async (req, res) => {
     return res.type("text/xml").send(locationMenuTwiml().toString());
   }
 
-  if (choice === "6") {
+  if (choice === "9") {
     return res.type("text/xml").send(voicemailPromptTwiml().toString());
   }
 
@@ -2099,7 +2099,7 @@ app.post("/call-ended", (req, res) => {
   res.status(204).send();
 });
 
-const port = process.env.PORT || 3000;
+const port = process.env.PORT || 3000;8
 app.listen(port, () => {
   console.log(`Weather phone server running on port ${port}`);
 });
