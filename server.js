@@ -936,10 +936,6 @@ function currentWeatherSpeech(location, forecast) {
     }
   }
 
-  if (Number.isFinite(Number(c.cloud_cover))) {
-    parts.push(`Cloud cover ${Math.round(Number(c.cloud_cover))} percent.`);
-  }
-
   const speed = Math.round(Number(c.wind_speed_10m || 0));
   const gusts = Math.round(Number(c.wind_gusts_10m || 0));
   const direction = degreesToCompass(c.wind_direction_10m);
