@@ -916,13 +916,12 @@ function describeTransitionSentence(entries, timezone, isNight = false) {
 
 function currentWeatherSpeech(location, forecast) {
   const c = forecast.current || {};
-  const updatedTime = c.time ? timeLabel(c.time, location.timezone) : "";
   const parts = [
     `Current weather for ${placeLabel(location)}.`,
-    updatedTime ? `Updated at ${updatedTime}.` : "",
+    `Retrieved at ${retrievedTimeLabelNow(location.timezone)}.`,
     `${describeCurrentWeatherSentence(c, location.timezone)}.`,
     `Temperature ${formatSignedTemp(c.temperature_2m)} degrees.`
-  ].filter(Boolean);
+  ];
 
   const apparent = firstNonNull([c.apparent_temperature]);
   if (
@@ -998,9 +997,6 @@ function summarizeHourlyBlock(block, tz) {
     block.items.reduce((sum, x) => sum + Number(x.apparentTemp ?? x.temp ?? 0), 0) /
     block.items.length;
 
-  const avgCloud =
-    block.items.reduce((sum, x) => sum + Number(x.clouds || 0), 0) / block.items.length;
-
   const maxRainChance = Math.max(...block.items.map((x) => Number(x.rainChance || 0)));
   const maxWind = Math.max(...block.items.map((x) => Number(x.wind || 0)));
   const maxGust = Math.max(...block.items.map((x) => Number(x.gusts || 0)));
@@ -1024,8 +1020,6 @@ function summarizeHourlyBlock(block, tz) {
       parts.push(`Feels like ${formatSignedTemp(avgAppTemp)}.`);
     }
   }
-
-  parts.push(`Cloud cover near ${Math.round(avgCloud)} percent.`);
 
   if (maxRainChance >= 45) {
     parts.push(`${Math.round(maxRainChance)} percent chance of precipitation.`);
