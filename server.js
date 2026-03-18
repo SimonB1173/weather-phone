@@ -495,6 +495,10 @@ function cloudCoverToPhrase(percent) {
 }
 
 function cloudCoverNightPhrase(percent) {
+function isNightHourFromIso(iso, tz) {
+  const hour = getHourInTz(iso, tz);
+  return hour < 6 || hour >= 18;
+}
   const p = Number(percent || 0);
   if (p < 20) return "clear";
   if (p < 45) return "partly cloudy";
@@ -858,16 +862,17 @@ function currentWeatherSpeech(location, forecast) {
   return parts.join(" ");
 }
 
-function classifyHourlyBucket(item) {
+function classifyHourlyBucket(item, tz = "UTC") {
   const code = Number(item.code);
   const rainAmount = Number(item.rain || 0) + Number(item.showers || 0);
   const snowAmount = Number(item.snow || 0);
   const wind = Number(item.wind || 0);
   const precipChance = Number(item.rainChance || 0);
   const clouds = Number(item.clouds || 0);
+  const isNight = isNightHourFromIso(item.time, tz);
 
   const condition = [0, 1, 2, 3].includes(code)
-    ? cloudCoverToPhrase(clouds)
+    ? (isNight ? cloudCoverNightPhrase(clouds) : cloudCoverToPhrase(clouds))
     : weatherCodeToText(code);
 
   let precipTag = "dry";
@@ -887,7 +892,6 @@ function classifyHourlyBucket(item) {
 
   return `${condition}|${precipTag}|${windTag}|${tempBand}`;
 }
-
 function summarizeHourlyBlock(block, tz) {
   const first = block.items[0];
   const start = timeLabel(block.start, tz);
@@ -911,8 +915,10 @@ function summarizeHourlyBlock(block, tz) {
   );
   const totalSnow = block.items.reduce((sum, x) => sum + Number(x.snow || 0), 0);
 
+  const isNight = isNightHourFromIso(first.time, tz);
+
   const condition = [0, 1, 2, 3].includes(Number(first.code))
-    ? cloudCoverToPhrase(first.clouds)
+    ? (isNight ? cloudCoverNightPhrase(first.clouds) : cloudCoverToPhrase(first.clouds))
     : weatherCodeToText(first.code);
 
   const parts = [
@@ -941,19 +947,19 @@ function summarizeHourlyBlock(block, tz) {
   return parts.join(" ");
 }
 
-function buildSmartHourlyBlocks(items) {
+function buildSmartHourlyBlocks(items, tz = "UTC") {
   if (!items.length) return [];
 
   const blocks = [];
   let current = {
-    key: classifyHourlyBucket(items[0]),
+    key: classifyHourlyBucket(items[0], tz),
     start: items[0].time,
     end: items[0].time,
     items: [items[0]]
   };
 
   for (let i = 1; i < items.length; i++) {
-    const key = classifyHourlyBucket(items[i]);
+    const key = classifyHourlyBucket(items[i], tz);
     if (key === current.key) {
       current.end = items[i].time;
       current.items.push(items[i]);
@@ -968,6 +974,9 @@ function buildSmartHourlyBlocks(items) {
     }
   }
 
+  blocks.push(current);
+  return blocks;
+}
   blocks.push(current);
   return blocks;
 }
@@ -1003,7 +1012,7 @@ function nextHoursSpeech(location, forecast, hours = 6) {
     return `I could not find future hourly forecast data for ${placeLabel(location)}.`;
   }
 
-  const blocks = buildSmartHourlyBlocks(items);
+  const blocks = buildSmartHourlyBlocks(items, tz);
   const topBlocks = blocks.slice(0, 4);
   const body = topBlocks.map((block) => summarizeHourlyBlock(block, tz)).join(" ");
 
@@ -1554,9 +1563,9 @@ app.post("/voice", async (req, res) => {
     }
 
     twiml.say(
-      SAY_OPTIONS,
-      `${greeting}, welcome to Weather Line.`
-    );
+  SAY_OPTIONS,
+  `${greeting}, welcome to Weather Line.`
+);
 
     twiml.redirect({ method: "POST" }, "/location-menu-prompt");
     return res.type("text/xml").send(twiml.toString());
