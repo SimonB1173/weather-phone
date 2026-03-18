@@ -1840,11 +1840,11 @@ app.post("/menu", async (req, res) => {
   console.log("MENU active location:", location);
 
   if (choice === "5") {
-    return res.type("text/xml").send(locationMenuTwiml().toString());
+  return res.type("text/xml").send(locationMenuTwiml().toString());
   }
 
   if (choice === "9") {
-    return res.type("text/xml").send(voicemailPromptTwiml().toString());
+  return res.type("text/xml").send(voicemailPromptTwiml().toString());
   }
 
   if (!location) {
