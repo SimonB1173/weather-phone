@@ -554,12 +554,16 @@ function weatherCodeToOfficialPhrase(code, cloudCoverLike = 60, isNight = false)
   return map[n] || "mixed weather";
 }
 
-function describeCurrentCondition(current) {
-  return weatherCodeToOfficialPhrase(current.weather_code, current.cloud_cover, false);
+function describeCurrentCondition(current, timezone) {
+  const isNight = current?.time
+    ? isNightHourFromIso(current.time, timezone)
+    : false;
+
+  return weatherCodeToOfficialPhrase(current.weather_code, current.cloud_cover, isNight);
 }
 
-function describeCurrentWeatherSentence(current) {
-  const condition = describeCurrentCondition(current);
+function describeCurrentWeatherSentence(current, timezone) {
+  const condition = describeCurrentCondition(current, timezone);
 
   if (condition === "sunny") return "It is sunny";
   if (condition === "mostly sunny") return "It is mostly sunny";
@@ -847,7 +851,7 @@ function currentWeatherSpeech(location, forecast) {
   const c = forecast.current || {};
   const parts = [
     `Current weather for ${placeLabel(location)}.`,
-    `${describeCurrentWeatherSentence(c)}.`,
+    `${describeCurrentWeatherSentence(c, location.timezone)}.`,
     `Temperature ${formatSignedTemp(c.temperature_2m)} degrees.`
   ];
 
