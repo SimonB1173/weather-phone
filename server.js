@@ -114,10 +114,8 @@ function say(twiml, text) {
     .map((s) => s.trim())
     .filter(Boolean);
 
-  if (!parts.length) return;
-
-  for (let i = 0; i < parts.length; i++) {
-    twiml.say(SAY_OPTIONS, parts[i]);
+  for (const part of parts) {
+    twiml.say(SAY_OPTIONS, part);
   }
 }
 
@@ -162,11 +160,6 @@ function saveTemporaryLocationForCall(req, location) {
   temporaryLocationsByCall.set(callKey, location);
 }
 
-function setPendingLocationChoice(req, location) {
-  const callKey = getCallKey(req);
-  pendingLocationChoiceByCall.set(callKey, location);
-}
-
 function clearPendingLocationChoice(req) {
   const callKey = getCallKey(req);
   pendingLocationChoiceByCall.delete(callKey);
@@ -189,16 +182,6 @@ function getLastPlayback(req) {
 function setMenuState(req, state) {
   const callKey = getCallKey(req);
   menuStateByCall.set(callKey, state);
-}
-
-function getMenuState(req) {
-  const callKey = getCallKey(req);
-  return menuStateByCall.get(callKey) || "main";
-}
-
-function clearMenuState(req) {
-  const callKey = getCallKey(req);
-  menuStateByCall.delete(callKey);
 }
 
 function clearCallState(req) {
@@ -316,7 +299,16 @@ function fullDateLabel(iso, tz) {
   });
 }
 
-function issuedDateLabel(tz) {
+function timeLabel(iso, tz) {
+  return new Date(iso).toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+    timeZone: tz || "UTC"
+  });
+}
+
+function issuedDateLabelToday(tz) {
   return new Date().toLocaleDateString("en-US", {
     month: "long",
     day: "numeric",
@@ -325,8 +317,8 @@ function issuedDateLabel(tz) {
   });
 }
 
-function timeLabel(iso, tz) {
-  return new Date(iso).toLocaleTimeString("en-US", {
+function retrievedTimeLabelNow(tz) {
+  return new Date().toLocaleTimeString("en-US", {
     hour: "numeric",
     minute: "2-digit",
     hour12: true,
@@ -358,7 +350,6 @@ function getNowHourInTz(timezone) {
 
 function getGreetingForTime(timezone) {
   const hour = getNowHourInTz(timezone || "America/Toronto");
-
   if (hour < 12) return "Good morning";
   if (hour < 18) return "Good afternoon";
   return "Good evening";
@@ -394,12 +385,7 @@ function buildMainMenuInto(twiml, activeLocationName) {
 
   say(
     gather,
-    `${activeLocationName}. ` +
-      `Press 1 for the 7 day forecast, or press 1 for today, ` +
-      `2 for hourly forecast, ` +
-      `3 for current weather, ` +
-      `5 to change location, ` +
-      `or 6 for feedback, comments, or suggestions.`
+    `${activeLocationName}. Press 1 for the 7 day forecast. Press 2 for hourly forecast. Press 3 for current weather. Press 5 to change location. Or press 6 for feedback, comments, or suggestions.`
   );
 
   twiml.redirect({ method: "POST" }, "/main-menu");
@@ -407,18 +393,11 @@ function buildMainMenuInto(twiml, activeLocationName) {
 
 function locationMenuTwiml() {
   const twiml = new VoiceResponse();
-
   const gather = twiml.gather(gatherOptions("/set-location-choice", 7, 1));
 
   say(
     gather,
-    `Press 1 for Montreal, ` +
-      `2 for Tosh, ` +
-      `3 for Laurentians, ` +
-      `4 for Brooklyn, ` +
-      `5 for Monsey, ` +
-      `6 for Monroe. ` +
-      `Press star for main menu.`
+    `Press 1 for Montreal. 2 for Tosh. 3 for Laurentians. 4 for Brooklyn. 5 for Monsey. 6 for Monroe. Press star for main menu.`
   );
 
   twiml.redirect({ method: "POST" }, "/location-menu-prompt");
@@ -437,7 +416,7 @@ function afterActionTwiml(backTarget = "/main-menu") {
     finishOnKey: ""
   });
 
-  say(gather, "Press star to go back, or press pound to repeat.");
+  say(gather, "Press star to go back. Or press pound to repeat.");
 
   twiml.hangup();
   return twiml;
@@ -445,7 +424,6 @@ function afterActionTwiml(backTarget = "/main-menu") {
 
 function forecastDayPromptTwiml(location, forecast) {
   const twiml = new VoiceResponse();
-
   const gather = twiml.gather(gatherOptions("/forecast-day", 8, 1));
 
   const dailyTimes = forecast.daily?.time || [];
@@ -470,9 +448,7 @@ function voicemailPromptTwiml() {
 
   say(
     twiml,
-    "Please leave your message after the beep. " +
-      "You can use this for comments or suggestions. " +
-      "Press the star key when you are finished."
+    "Please leave your message after the beep. You can use this for comments or suggestions. Press the star key when you are finished."
   );
 
   twiml.record({
@@ -515,12 +491,15 @@ function playbackWithStarTwiml(text, backTarget) {
   return twiml;
 }
 
-function weatherCodeToText(code) {
+function weatherCodeToText(code, isNight = false) {
+  const n = Number(code);
+
+  if (n === 0) return isNight ? "clear" : "sunny";
+  if (n === 1) return isNight ? "mostly clear" : "mostly sunny";
+  if (n === 2) return isNight ? "partly cloudy" : "a mix of sun and cloud";
+  if (n === 3) return "cloudy";
+
   const map = {
-    0: "clear",
-    1: "mostly clear",
-    2: "partly cloudy",
-    3: "cloudy",
     45: "foggy",
     48: "freezing fog",
     51: "light drizzle",
@@ -546,7 +525,8 @@ function weatherCodeToText(code) {
     96: "thunderstorms with hail",
     99: "severe thunderstorms with hail"
   };
-  return map[code] || "mixed weather";
+
+  return map[n] || "mixed weather";
 }
 
 function cloudCoverToPhrase(percent) {
@@ -561,8 +541,8 @@ function cloudCoverToPhrase(percent) {
 function cloudCoverNightPhrase(percent) {
   const p = Number(percent || 0);
   if (p < 20) return "clear";
-  if (p < 45) return "partly cloudy";
-  if (p < 75) return "mainly cloudy";
+  if (p < 45) return "mostly clear";
+  if (p < 75) return "partly cloudy";
   return "cloudy";
 }
 
@@ -571,21 +551,11 @@ function isNightHourFromIso(iso, tz) {
   return hour < 6 || hour >= 18;
 }
 
-function normalizeNightSkyText(text) {
-  const t = String(text || "").toLowerCase().trim();
-
-  if (t === "sunny" || t === "mostly sunny") return "clear";
-  if (t === "a mix of sun and cloud") return "partly cloudy";
-  if (t === "mainly cloudy") return "mainly cloudy";
-  if (t === "cloudy") return "cloudy";
-  return t;
-}
-
 function weatherCodeToOfficialPhrase(code, cloudCoverLike = 60, isNight = false) {
   const n = Number(code);
 
   if ([0, 1, 2, 3].includes(n)) {
-    return isNight ? cloudCoverNightPhrase(cloudCoverLike) : cloudCoverToPhrase(cloudCoverLike);
+    return weatherCodeToText(n, isNight);
   }
 
   const map = {
@@ -615,7 +585,9 @@ function weatherCodeToOfficialPhrase(code, cloudCoverLike = 60, isNight = false)
     99: "severe thunderstorms with hail"
   };
 
-  return map[n] || "mixed weather";
+  if (map[n]) return map[n];
+
+  return isNight ? cloudCoverNightPhrase(cloudCoverLike) : cloudCoverToPhrase(cloudCoverLike);
 }
 
 function describeCurrentCondition(current, timezone) {
@@ -629,10 +601,10 @@ function describeCurrentWeatherSentence(current, timezone) {
   if (condition === "sunny") return "It is sunny";
   if (condition === "mostly sunny") return "It is mostly sunny";
   if (condition === "a mix of sun and cloud") return "There is a mix of sun and cloud";
-  if (condition === "mainly cloudy") return "It is mainly cloudy";
-  if (condition === "cloudy") return "It is cloudy";
   if (condition === "clear") return "It is clear";
+  if (condition === "mostly clear") return "It is mostly clear";
   if (condition === "partly cloudy") return "It is partly cloudy";
+  if (condition === "cloudy") return "It is cloudy";
   if (condition === "foggy") return "It is foggy";
   if (condition === "freezing fog") return "There is freezing fog";
   if (condition === "thunderstorms") return "There are thunderstorms";
@@ -829,21 +801,23 @@ function splitEntries(entries) {
 
 function getPeriodTimingWord(entries, timezone, type = "day") {
   if (!entries.length) return "later";
+
   const pivot =
     entries[Math.max(0, Math.floor(entries.length / 2))]?.time ||
     entries[entries.length - 1]?.time;
+
   const hour = getHourInTz(pivot, timezone);
 
   if (type === "night") {
-    if (hour < 22) return "early this evening";
-    if (hour < 24) return "this evening";
+    if (hour < 21) return "in the evening";
+    if (hour < 24) return "later in the evening";
     if (hour < 3) return "after midnight";
     return "near morning";
   }
 
   if (hour < 12) return "in the morning";
   if (hour < 18) return "in the afternoon";
-  return "later";
+  return "later in the day";
 }
 
 function precipitationTypeFromEntries(entries) {
@@ -859,6 +833,7 @@ function precipitationTypeFromEntries(entries) {
   if (totalSnow > 0.2 && totalRain > 0.15) return "flurries or rain showers";
   if (totalSnow > 0.2) return "flurries";
   if (totalRain > 0.2) return "rain showers";
+
   if (maxChance >= 50) {
     const snowCodes = entries.some((e) =>
       [71, 73, 75, 77, 85, 86].includes(Number(e.weatherCode))
@@ -866,6 +841,7 @@ function precipitationTypeFromEntries(entries) {
     const rainCodes = entries.some((e) =>
       [51, 53, 55, 61, 63, 65, 80, 81, 82].includes(Number(e.weatherCode))
     );
+
     if (snowCodes && rainCodes) return "flurries or rain showers";
     if (snowCodes) return "flurries";
     if (rainCodes) return "rain showers";
@@ -875,13 +851,14 @@ function precipitationTypeFromEntries(entries) {
 }
 
 function skyPhraseForEntries(entries, isNight = false) {
-  if (!entries.length) return "cloudy";
-  const avgCloud = average(entries.map((e) => e.cloudCover));
-  const mainCode =
-    entries[Math.floor(entries.length / 2)]?.weatherCode ??
-    entries[0]?.weatherCode ??
-    3;
-  return weatherCodeToOfficialPhrase(mainCode, avgCloud, isNight);
+  if (!entries.length) return isNight ? "clear" : "sunny";
+
+  const mid = entries[Math.floor(entries.length / 2)] || entries[0];
+  return weatherCodeToOfficialPhrase(
+    mid.weatherCode,
+    average(entries.map((e) => e.cloudCover)),
+    isNight
+  );
 }
 
 function describeTransitionSentence(entries, timezone, isNight = false) {
@@ -890,14 +867,8 @@ function describeTransitionSentence(entries, timezone, isNight = false) {
   const { first, second } = splitEntries(entries);
   const firstPrecip = precipitationTypeFromEntries(first);
   const secondPrecip = precipitationTypeFromEntries(second);
-  let firstSky = skyPhraseForEntries(first, isNight);
-  let secondSky = skyPhraseForEntries(second, isNight);
-
-  if (isNight) {
-    firstSky = normalizeNightSkyText(firstSky);
-    secondSky = normalizeNightSkyText(secondSky);
-  }
-
+  const firstSky = skyPhraseForEntries(first, isNight);
+  const secondSky = skyPhraseForEntries(second, isNight);
   const timing = getPeriodTimingWord(second.length ? second : entries, timezone, isNight ? "night" : "day");
 
   if (firstPrecip && !secondPrecip) {
@@ -927,7 +898,7 @@ function describeTransitionSentence(entries, timezone, isNight = false) {
       }
 
       if (isNight && firstSky === "partly cloudy" && secondSky === "cloudy") {
-        return "Partly cloudy. Becoming cloudy near midnight.";
+        return "Partly cloudy. Becoming cloudy later in the evening.";
       }
 
       if (isNight && firstSky === "cloudy" && secondSky === "partly cloudy") {
@@ -990,14 +961,9 @@ function classifyHourlyBucket(item, tz = "UTC") {
   const snowAmount = Number(item.snow || 0);
   const wind = Number(item.wind || 0);
   const precipChance = Number(item.rainChance || 0);
-  const clouds = Number(item.clouds || 0);
   const isNight = isNightHourFromIso(item.time, tz);
 
-  const condition = [0, 1, 2, 3].includes(code)
-    ? isNight
-      ? cloudCoverNightPhrase(clouds)
-      : cloudCoverToPhrase(clouds)
-    : weatherCodeToText(code);
+  const condition = weatherCodeToText(code, isNight);
 
   let precipTag = "dry";
   if ([95, 96, 99].includes(code)) {
@@ -1049,12 +1015,7 @@ function summarizeHourlyBlock(block, tz) {
   const totalSnow = block.items.reduce((sum, x) => sum + Number(x.snow || 0), 0);
 
   const isNight = isNightHourFromIso(first.time, tz);
-
-  const condition = [0, 1, 2, 3].includes(Number(first.code))
-    ? isNight
-      ? cloudCoverNightPhrase(first.clouds)
-      : cloudCoverToPhrase(first.clouds)
-    : weatherCodeToText(first.code);
+  const condition = weatherCodeToText(first.code, isNight);
 
   const parts = [
     `From ${start} until ${end}, ${condition}, around ${Math.round(avgTemp)} degrees.`
@@ -1243,7 +1204,7 @@ function buildChanceSentence(entries) {
 }
 
 function describeDetailedPeriodIntro(entries, timezone, isNight = false) {
-  if (!entries.length) return "Cloudy.";
+  if (!entries.length) return isNight ? "Clear." : "Sunny.";
 
   const transition = describeTransitionSentence(entries, timezone, isNight);
   if (transition) return transition;
@@ -1251,25 +1212,17 @@ function describeDetailedPeriodIntro(entries, timezone, isNight = false) {
   const chanceSentence = buildChanceSentence(entries);
   if (chanceSentence) return chanceSentence;
 
-  let sky = skyPhraseForEntries(entries, isNight);
-  if (isNight) {
-    sky = normalizeNightSkyText(sky);
-  }
-
+  const sky = skyPhraseForEntries(entries, isNight);
   return `${capitalizeSentence(sky)}.`;
 }
 
 function describeSimplePeriodIntro(entries, isNight = false) {
-  if (!entries.length) return "Cloudy.";
+  if (!entries.length) return isNight ? "Clear." : "Sunny.";
 
   const chanceSentence = buildChanceSentence(entries);
   if (chanceSentence) return chanceSentence;
 
-  let sky = skyPhraseForEntries(entries, isNight);
-  if (isNight) {
-    sky = normalizeNightSkyText(sky);
-  }
-
+  const sky = skyPhraseForEntries(entries, isNight);
   return `${capitalizeSentence(sky)}.`;
 }
 
@@ -1341,17 +1294,13 @@ function describeNightWindChill(entries) {
   return "";
 }
 
-function buildDetailedDaySection(location, forecast, index) {
+function buildDetailedDayOnlySection(location, forecast, index, labelText) {
   const d = forecast.daily || {};
   const dateStr = d.time?.[index];
   const entries = getHourlyEntriesForDay(forecast, dateStr);
-  const label =
-    index === 0
-      ? `Today, ${fullDateLabel(dateStr, location.timezone)}`
-      : fullDateLabel(dateStr, location.timezone);
 
   const parts = [
-    `${label}.`,
+    `${labelText}.`,
     describeDetailedPeriodIntro(entries, location.timezone, false)
   ];
 
@@ -1368,6 +1317,36 @@ function buildDetailedDaySection(location, forecast, index) {
   return parts.join(" ");
 }
 
+function buildDetailedNightOnlySection(location, forecast, index, labelText = "Night") {
+  const entries = getNightEntriesForDayIndex(forecast, index, location.timezone);
+
+  const parts = [
+    `${labelText}.`,
+    describeDetailedPeriodIntro(entries, location.timezone, true)
+  ];
+
+  const wind = describeWindLine(entries, location.timezone, "night");
+  const temp = describeNightTemperatureLine(forecast, index, entries);
+  const windChill = describeNightWindChill(entries);
+
+  if (wind) parts.push(wind);
+  if (temp) parts.push(temp);
+  if (windChill) parts.push(windChill);
+
+  return parts.join(" ");
+}
+
+function buildDetailedDaySection(location, forecast, index) {
+  const d = forecast.daily || {};
+  const dateStr = d.time?.[index];
+  const label =
+    index === 0
+      ? `Today, ${fullDateLabel(dateStr, location.timezone)}`
+      : fullDateLabel(dateStr, location.timezone);
+
+  return buildDetailedDayOnlySection(location, forecast, index, label);
+}
+
 function buildRestOfTodaySection(location, forecast) {
   const d = forecast.daily || {};
   const dateStr = d.time?.[0];
@@ -1375,7 +1354,7 @@ function buildRestOfTodaySection(location, forecast) {
   const label = dateStr ? fullDateLabel(dateStr, location.timezone) : "Today";
 
   if (!entries.length) {
-    return buildDetailedNightSection(location, forecast, 0);
+    return buildDetailedNightOnlySection(location, forecast, 0, "Night");
   }
 
   const parts = [
@@ -1397,26 +1376,12 @@ function buildRestOfTodaySection(location, forecast) {
 function buildDetailedNightSection(location, forecast, index) {
   const d = forecast.daily || {};
   const dateStr = d.time?.[index];
-  const entries = getNightEntriesForDayIndex(forecast, index, location.timezone);
   const label =
     index === 0
       ? `Tonight, ${fullDateLabel(dateStr, location.timezone)}`
       : `${fullDateLabel(dateStr, location.timezone)} night`;
 
-  const parts = [
-    `${label}.`,
-    describeDetailedPeriodIntro(entries, location.timezone, true)
-  ];
-
-  const wind = describeWindLine(entries, location.timezone, "night");
-  const temp = describeNightTemperatureLine(forecast, index, entries);
-  const windChill = describeNightWindChill(entries);
-
-  if (wind) parts.push(wind);
-  if (temp) parts.push(temp);
-  if (windChill) parts.push(windChill);
-
-  return parts.join(" ");
+  return buildDetailedNightOnlySection(location, forecast, index, label);
 }
 
 function buildShortDaySection(location, forecast, index) {
@@ -1430,17 +1395,15 @@ function buildShortDaySection(location, forecast, index) {
   )}.`;
 }
 
-function buildShortNightSection(location, forecast, index) {
+function buildShortNightSection(location, forecast, index, labelText = "Night") {
   const d = forecast.daily || {};
-  const dateStr = d.time?.[index];
   const entries = getNightEntriesForDayIndex(forecast, index, location.timezone);
-  const label = `${fullDateLabel(dateStr, location.timezone)} night`;
 
   const nextDayMin = d.temperature_2m_min?.[index + 1];
   const sameDayMin = d.temperature_2m_min?.[index];
   const lowValue = Number.isFinite(Number(nextDayMin)) ? nextDayMin : sameDayMin;
 
-  return `${label}. ${describeSimplePeriodIntro(entries, true)} Low ${formatForecastTempValue(
+  return `${labelText}. ${describeSimplePeriodIntro(entries, true)} Low ${formatForecastTempValue(
     lowValue
   )}.`;
 }
@@ -1457,38 +1420,51 @@ function dailyForecastSpeech(location, forecast, index) {
 
   const daySection = buildDetailedDaySection(location, forecast, index);
   const nightSection = buildDetailedNightSection(location, forecast, index);
-
   return `${daySection} ${nightSection}`.trim();
+}
+
+function buildAll7DayEntry(location, forecast, index, includeNight = true, todayMode = "full") {
+  const d = forecast.daily || {};
+  const dateStr = d.time?.[index];
+  const label = fullDateLabel(dateStr, location.timezone);
+  const parts = [];
+
+  if (index === 0 && todayMode === "remaining") {
+    parts.push(buildRestOfTodaySection(location, forecast));
+  } else if (index <= 1) {
+    parts.push(buildDetailedDayOnlySection(location, forecast, index, label));
+  } else {
+    parts.push(buildShortDaySection(location, forecast, index));
+  }
+
+  if (includeNight) {
+    if (index <= 1) {
+      parts.push(buildDetailedNightOnlySection(location, forecast, index, "Night"));
+    } else {
+      parts.push(buildShortNightSection(location, forecast, index, "Night"));
+    }
+  }
+
+  return parts.join(" ");
 }
 
 function sevenDayForecastSpeech(location, forecast) {
   const d = forecast.daily || {};
   const count = Math.min(7, (d.time || []).length);
   const parts = [
-    `Issued on ${issuedDateLabel(location.timezone)}.`,
+    `Issued on ${issuedDateLabelToday(location.timezone)}.`,
+    `Retrieved at ${retrievedTimeLabelNow(location.timezone)}.`,
     `Here is the 7 day forecast for ${placeLabel(location)}.`
   ];
 
   const nowHour = getNowHourInTz(location.timezone);
 
   if (count > 0) {
-    if (nowHour < 12) {
-      parts.push(buildDetailedDaySection(location, forecast, 0));
-      parts.push(buildDetailedNightSection(location, forecast, 0));
-    } else {
-      parts.push(buildRestOfTodaySection(location, forecast));
-      parts.push(buildDetailedNightSection(location, forecast, 0));
-    }
+    parts.push(buildAll7DayEntry(location, forecast, 0, true, nowHour < 12 ? "full" : "remaining"));
   }
 
-  if (count > 1) {
-    parts.push(buildDetailedDaySection(location, forecast, 1));
-    parts.push(buildDetailedNightSection(location, forecast, 1));
-  }
-
-  for (let i = 2; i < count; i++) {
-    parts.push(buildShortDaySection(location, forecast, i));
-    parts.push(buildShortNightSection(location, forecast, i));
+  for (let i = 1; i < count; i++) {
+    parts.push(buildAll7DayEntry(location, forecast, i, true, "full"));
   }
 
   return parts.join(" ");
@@ -1784,8 +1760,8 @@ app.post("/voice", async (req, res) => {
     twiml.say(
       SAY_OPTIONS,
       `${greeting}, welcome to Weather Line. ` +
-        `Please note this line is still in progress and should be fully running soon. ` +
-        `You can leave comments or suggestions by pressing 6 from the main menu.`
+        `Please note this line is still in progress and should be fully running on Thursday March 19. ` +
+        `You are welcome to leave comments or ideas for improvement by pressing number 6.`
     );
 
     twiml.redirect({ method: "POST" }, "/location-menu-prompt");
@@ -1960,6 +1936,7 @@ app.post("/forecast-day", async (req, res) => {
 
     setMenuState(req, "forecast");
     setLastPlayback(req, { type: "daily", index: selected, backTarget: "/forecast-menu" });
+
     return res
       .type("text/xml")
       .send(
