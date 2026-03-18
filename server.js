@@ -1959,6 +1959,7 @@ app.post("/menu", async (req, res) => {
   console.log("MENU active location:", location);
 
   if (isBackKey(req)) {
+    twiml.redirect({ method: "POST" }, "/location-menu-prompt");
     return res.type("text/xml").send(twiml.toString());
   }
 
