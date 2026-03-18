@@ -758,6 +758,14 @@ function skyPhraseForEntries(entries, isNight = false) {
 }
 
 function describeTransitionSentence(entries, timezone, isNight = false) {
+let firstSky = skyPhraseForEntries(first, isNight);
+let secondSky = skyPhraseForEntries(second, isNight);
+
+if (isNight) {
+  firstSky = normalizeNightSkyText(firstSky);
+  secondSky = normalizeNightSkyText(secondSky);
+}
+
   if (!entries.length) return "";
 
   const { first, second } = splitEntries(entries);
