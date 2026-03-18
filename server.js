@@ -495,15 +495,16 @@ function cloudCoverToPhrase(percent) {
 }
 
 function cloudCoverNightPhrase(percent) {
-function isNightHourFromIso(iso, tz) {
-  const hour = getHourInTz(iso, tz);
-  return hour < 6 || hour >= 18;
-}
   const p = Number(percent || 0);
   if (p < 20) return "clear";
   if (p < 45) return "partly cloudy";
   if (p < 75) return "mainly cloudy";
   return "cloudy";
+}
+
+function isNightHourFromIso(iso, tz) {
+  const hour = getHourInTz(iso, tz);
+  return hour < 6 || hour >= 18;
 }
 
 function normalizeNightSkyText(text) {
@@ -974,9 +975,6 @@ function buildSmartHourlyBlocks(items, tz = "UTC") {
     }
   }
 
-  blocks.push(current);
-  return blocks;
-}
   blocks.push(current);
   return blocks;
 }
