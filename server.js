@@ -729,7 +729,9 @@ function splitEntries(entries) {
 
 function getPeriodTimingWord(entries, timezone, type = "day") {
   if (!entries.length) return "later";
-  const pivot = entries[Math.max(0, Math.floor(entries.length / 2))]?.time || entries[entries.length - 1]?.time;
+  const pivot =
+    entries[Math.max(0, Math.floor(entries.length / 2))]?.time ||
+    entries[entries.length - 1]?.time;
   const hour = getHourInTz(pivot, timezone);
 
   if (type === "night") {
@@ -746,7 +748,10 @@ function getPeriodTimingWord(entries, timezone, type = "day") {
 
 function precipitationTypeFromEntries(entries) {
   const totalSnow = entries.reduce((sum, e) => sum + Number(e.snowfall || 0), 0);
-  const totalRain = entries.reduce((sum, e) => sum + Number(e.rain || 0) + Number(e.showers || 0), 0);
+  const totalRain = entries.reduce(
+    (sum, e) => sum + Number(e.rain || 0) + Number(e.showers || 0),
+    0
+  );
   const maxChance = maxValue(entries.map((e) => e.precipitationProbability));
   const hasStorm = entries.some((e) => [95, 96, 99].includes(Number(e.weatherCode)));
 
@@ -755,8 +760,12 @@ function precipitationTypeFromEntries(entries) {
   if (totalSnow > 0.2) return "flurries";
   if (totalRain > 0.2) return "rain showers";
   if (maxChance >= 50) {
-    const snowCodes = entries.some((e) => [71, 73, 75, 77, 85, 86].includes(Number(e.weatherCode)));
-    const rainCodes = entries.some((e) => [51, 53, 55, 61, 63, 65, 80, 81, 82].includes(Number(e.weatherCode)));
+    const snowCodes = entries.some((e) =>
+      [71, 73, 75, 77, 85, 86].includes(Number(e.weatherCode))
+    );
+    const rainCodes = entries.some((e) =>
+      [51, 53, 55, 61, 63, 65, 80, 81, 82].includes(Number(e.weatherCode))
+    );
     if (snowCodes && rainCodes) return "flurries or rain showers";
     if (snowCodes) return "flurries";
     if (rainCodes) return "rain showers";
@@ -766,9 +775,12 @@ function precipitationTypeFromEntries(entries) {
 }
 
 function skyPhraseForEntries(entries, isNight = false) {
-  if (!entries.length) return isNight ? "cloudy" : "cloudy";
+  if (!entries.length) return "cloudy";
   const avgCloud = average(entries.map((e) => e.cloudCover));
-  const mainCode = entries[Math.floor(entries.length / 2)]?.weatherCode ?? entries[0]?.weatherCode ?? 3;
+  const mainCode =
+    entries[Math.floor(entries.length / 2)]?.weatherCode ??
+    entries[0]?.weatherCode ??
+    3;
   return weatherCodeToOfficialPhrase(mainCode, avgCloud, isNight);
 }
 
@@ -873,7 +885,9 @@ function classifyHourlyBucket(item, tz = "UTC") {
   const isNight = isNightHourFromIso(item.time, tz);
 
   const condition = [0, 1, 2, 3].includes(code)
-    ? (isNight ? cloudCoverNightPhrase(clouds) : cloudCoverToPhrase(clouds))
+    ? isNight
+      ? cloudCoverNightPhrase(clouds)
+      : cloudCoverToPhrase(clouds)
     : weatherCodeToText(code);
 
   let precipTag = "dry";
@@ -893,6 +907,7 @@ function classifyHourlyBucket(item, tz = "UTC") {
 
   return `${condition}|${precipTag}|${windTag}|${tempBand}`;
 }
+
 function summarizeHourlyBlock(block, tz) {
   const first = block.items[0];
   const start = timeLabel(block.start, tz);
@@ -919,7 +934,9 @@ function summarizeHourlyBlock(block, tz) {
   const isNight = isNightHourFromIso(first.time, tz);
 
   const condition = [0, 1, 2, 3].includes(Number(first.code))
-    ? (isNight ? cloudCoverNightPhrase(first.clouds) : cloudCoverToPhrase(first.clouds))
+    ? isNight
+      ? cloudCoverNightPhrase(first.clouds)
+      : cloudCoverToPhrase(first.clouds)
     : weatherCodeToText(first.code);
 
   const parts = [
@@ -1042,15 +1059,31 @@ function describeWindLine(entries, timezone, type = "day") {
 
   if (firstActive && secondActive) {
     if (secondWind <= 15 && secondGust < 25 && firstWind >= 20) {
-      return `Wind ${firstDir} ${firstWind}${firstGust >= firstWind + 10 ? ` kilometres per hour gusting to ${firstGust}` : " kilometres per hour"} diminishing to 15 kilometres per hour or less ${timing}.`;
+      return `Wind ${firstDir} ${firstWind}${
+        firstGust >= firstWind + 10
+          ? ` kilometres per hour gusting to ${firstGust}`
+          : " kilometres per hour"
+      } diminishing to 15 kilometres per hour or less ${timing}.`;
     }
 
-    if (firstDir !== secondDir || Math.abs(firstWind - secondWind) >= 10 || Math.abs(firstGust - secondGust) >= 15) {
+    if (
+      firstDir !== secondDir ||
+      Math.abs(firstWind - secondWind) >= 10 ||
+      Math.abs(firstGust - secondGust) >= 15
+    ) {
       if (firstWind > secondWind || firstGust > secondGust) {
-        return `Wind ${firstDir} ${firstWind}${firstGust >= firstWind + 10 ? ` kilometres per hour gusting to ${firstGust}` : " kilometres per hour"} diminishing to ${formatWindSegment(secondDir, secondWind, secondGust)} ${timing}.`;
+        return `Wind ${firstDir} ${firstWind}${
+          firstGust >= firstWind + 10
+            ? ` kilometres per hour gusting to ${firstGust}`
+            : " kilometres per hour"
+        } diminishing to ${formatWindSegment(secondDir, secondWind, secondGust)} ${timing}.`;
       }
 
-      return `Wind ${firstDir} ${firstWind}${firstGust >= firstWind + 10 ? ` kilometres per hour gusting to ${firstGust}` : " kilometres per hour"} becoming ${formatWindSegment(secondDir, secondWind, secondGust)} ${timing}.`;
+      return `Wind ${firstDir} ${firstWind}${
+        firstGust >= firstWind + 10
+          ? ` kilometres per hour gusting to ${firstGust}`
+          : " kilometres per hour"
+      } becoming ${formatWindSegment(secondDir, secondWind, secondGust)} ${timing}.`;
     }
   }
 
@@ -1062,7 +1095,11 @@ function describeWindLine(entries, timezone, type = "day") {
     return `Wind up to 15 kilometres per hour.`;
   }
 
-  return `Wind ${dir} ${maxWind}${maxGust >= maxWind + 10 ? ` kilometres per hour gusting to ${maxGust}` : " kilometres per hour"}.`;
+  return `Wind ${dir} ${maxWind}${
+    maxGust >= maxWind + 10
+      ? ` kilometres per hour gusting to ${maxGust}`
+      : " kilometres per hour"
+  }.`;
 }
 
 function buildChanceSentence(entries) {
@@ -1137,8 +1174,12 @@ function describeDayWindChill(entries) {
   if (!entries.length) return "";
 
   const { first, second } = splitEntries(entries);
-  const firstApp = Math.round(minValue(first.map((e) => Number(e.apparentTemperature ?? e.temperature ?? 0))));
-  const secondApp = Math.round(minValue(second.map((e) => Number(e.apparentTemperature ?? e.temperature ?? 0))));
+  const firstApp = Math.round(
+    minValue(first.map((e) => Number(e.apparentTemperature ?? e.temperature ?? 0)))
+  );
+  const secondApp = Math.round(
+    minValue(second.map((e) => Number(e.apparentTemperature ?? e.temperature ?? 0)))
+  );
   const firstTemp = Math.round(minValue(first.map((e) => Number(e.temperature ?? 0))));
   const secondTemp = Math.round(minValue(second.map((e) => Number(e.temperature ?? 0))));
 
@@ -1161,7 +1202,9 @@ function describeDayWindChill(entries) {
 function describeNightWindChill(entries) {
   if (!entries.length) return "";
 
-  const minApp = Math.round(minValue(entries.map((e) => Number(e.apparentTemperature ?? e.temperature ?? 0))));
+  const minApp = Math.round(
+    minValue(entries.map((e) => Number(e.apparentTemperature ?? e.temperature ?? 0)))
+  );
   const minTemp = Math.round(minValue(entries.map((e) => Number(e.temperature ?? 0))));
 
   if (minApp <= minTemp - 3) {
@@ -1223,7 +1266,9 @@ function buildShortDaySection(location, forecast, index) {
   const entries = getHourlyEntriesForDay(forecast, dateStr);
   const label = dayName(dateStr, location.timezone);
 
-  return `${label}. ${describeSimplePeriodIntro(entries, false)} High ${formatForecastTempValue(d.temperature_2m_max?.[index])}.`;
+  return `${label}. ${describeSimplePeriodIntro(entries, false)} High ${formatForecastTempValue(
+    d.temperature_2m_max?.[index]
+  )}.`;
 }
 
 function buildShortNightSection(location, forecast, index) {
@@ -1236,7 +1281,9 @@ function buildShortNightSection(location, forecast, index) {
   const sameDayMin = d.temperature_2m_min?.[index];
   const lowValue = Number.isFinite(Number(nextDayMin)) ? nextDayMin : sameDayMin;
 
-  return `${label}. ${describeSimplePeriodIntro(entries, true)} Low ${formatForecastTempValue(lowValue)}.`;
+  return `${label}. ${describeSimplePeriodIntro(entries, true)} Low ${formatForecastTempValue(
+    lowValue
+  )}.`;
 }
 
 function dailyForecastSpeech(location, forecast, index) {
@@ -1560,10 +1607,7 @@ app.post("/voice", async (req, res) => {
       twiml.play(INTRO_AUDIO_URL);
     }
 
-    twiml.say(
-  SAY_OPTIONS,
-  `${greeting}, welcome to Weather Line.`
-);
+    twiml.say(SAY_OPTIONS, `${greeting}, welcome to Weather Line.`);
 
     twiml.redirect({ method: "POST" }, "/location-menu-prompt");
     return res.type("text/xml").send(twiml.toString());
@@ -1865,3 +1909,19 @@ const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log(`Weather phone server running on port ${port}`);
 });
+
+Before redeploying, also make sure your package.json has a valid start script, for example:
+
+{
+  "name": "weather-phone",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.0",
+    "express": "^4.21.0",
+    "twilio": "^5.0.0"
+  }
+}
