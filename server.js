@@ -101,13 +101,58 @@ function gatherOptions(action, timeout = 8, numDigits = 1) {
   };
 }
 
-function say(twiml, text) {
-  const cleaned = String(text || "")
+function normalizeSpeechText(text) {
+  return String(text || "")
     .replace(/\s+/g, " ")
+    .replace(/\s+([,.!?;:])/g, "$1")
+    .replace(/\b7 day\b/gi, "seven day")
+    .replace(/\b7-day\b/gi, "seven day")
+    .replace(/\bkmh\b/gi, "kilometres per hour")
     .trim();
+}
 
-  if (!cleaned) return;
-  twiml.say(SAY_OPTIONS, cleaned);
+function splitSpeechIntoChunks(text, maxLen = 850) {
+  const cleaned = normalizeSpeechText(text);
+  if (!cleaned) return [];
+
+  if (cleaned.length <= maxLen) return [cleaned];
+
+  const chunks = [];
+  let remaining = cleaned;
+
+  while (remaining.length > maxLen) {
+    let cut =
+      remaining.lastIndexOf(". ", maxLen) ||
+      remaining.lastIndexOf("! ", maxLen) ||
+      remaining.lastIndexOf("? ", maxLen);
+
+    if (cut <= 0) {
+      cut = remaining.lastIndexOf(", ", maxLen);
+    }
+
+    if (cut <= 0) {
+      cut = remaining.lastIndexOf(" ", maxLen);
+    }
+
+    if (cut <= 0) {
+      cut = maxLen;
+    }
+
+    const part = remaining.slice(0, cut).trim();
+    if (part) chunks.push(part);
+
+    remaining = remaining.slice(cut).trim();
+  }
+
+  if (remaining) chunks.push(remaining);
+  return chunks;
+}
+
+function say(twiml, text) {
+  const chunks = splitSpeechIntoChunks(text);
+  for (const chunk of chunks) {
+    twiml.say(SAY_OPTIONS, chunk);
+  }
 }
 
 function getCallKey(req) {
@@ -350,7 +395,7 @@ function buildWeatherMenuInto(twiml, activeLocationName) {
   say(
     gather,
     `${activeLocationName}. ` +
-      `Press 1 for the 7 day forecast. ` +
+      `Press 1 for the seven day forecast. ` +
       `Press 2 for hourly forecast. ` +
       `Press 3 for current weather. ` +
       `Press star to go back.`
@@ -401,7 +446,7 @@ function forecastDayPromptTwiml(location, forecast) {
   const gather = twiml.gather(gatherOptions("/forecast-day", 8, 1));
 
   const dailyTimes = forecast.daily?.time || [];
-  const parts = [`For the 7 day forecast, press 0.`];
+  const parts = [`For the seven day forecast, press 0.`];
 
   if (dailyTimes[0]) parts.push(`Press 1 for today.`);
   if (dailyTimes[1]) parts.push(`Press 2 for tomorrow.`);
@@ -1348,7 +1393,7 @@ function dailyForecastSpeech(location, forecast, index) {
 function sevenDayForecastSpeech(location, forecast) {
   const d = forecast.daily || {};
   const count = Math.min(7, (d.time || []).length);
-  const parts = [`Here is the 7 day forecast for ${placeLabel(location)}.`];
+  const parts = [`Here is the seven day forecast for ${placeLabel(location)}.`];
 
   if (count > 0) {
     parts.push(buildDetailedNightSection(location, forecast, 0, true));
