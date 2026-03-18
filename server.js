@@ -2104,7 +2104,7 @@ app.post("/call-ended", (req, res) => {
   res.status(204).send();
 });
 
-const port = process.env.PORT || 3000;8
+const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log(`Weather phone server running on port ${port}`);
 });
