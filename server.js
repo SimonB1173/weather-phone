@@ -1589,7 +1589,10 @@ app.get("/", (req, res) => {
 
 app.get("/voice", (req, res) => {
   const twiml = new VoiceResponse();
-  say(twiml, "Weather Line is running. Please call the phone number to use the interactive weather menu.");
+  say(
+    twiml,
+    "Weather Line is running. Please call the phone number to use the interactive weather menu."
+  );
   res.type("text/xml").send(twiml.toString());
 });
 
@@ -1607,7 +1610,12 @@ app.post("/voice", async (req, res) => {
       twiml.play(INTRO_AUDIO_URL);
     }
 
-    twiml.say(SAY_OPTIONS, `${greeting}, welcome to Weather Line.`);
+    twiml.say(
+      SAY_OPTIONS,
+      `${greeting}, welcome to Weather Line. ` +
+        `Please note this line is still in progress and should be fully running on Thursday, March 19. ` +
+        `You are welcome to leave comments or ideas for improvement by pressing 6 from the main menu.`
+    );
 
     twiml.redirect({ method: "POST" }, "/location-menu-prompt");
     return res.type("text/xml").send(twiml.toString());
@@ -1909,19 +1917,3 @@ const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log(`Weather phone server running on port ${port}`);
 });
-
-Before redeploying, also make sure your package.json has a valid start script, for example:
-
-{
-  "name": "weather-phone",
-  "version": "1.0.0",
-  "main": "index.js",
-  "scripts": {
-    "start": "node index.js"
-  },
-  "dependencies": {
-    "axios": "^1.7.0",
-    "express": "^4.21.0",
-    "twilio": "^5.0.0"
-  }
-}
