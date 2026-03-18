@@ -25,6 +25,7 @@ const temporaryLocationsByCall = new Map();
 const pendingLocationChoiceByCall = new Map();
 const lastPlaybackByCall = new Map();
 const menuStateByCall = new Map();
+const menuHistoryByCall = new Map();
 
 const FORECAST_CACHE_MS = 10 * 60 * 1000;
 const STALE_FORECAST_MS = 60 * 60 * 1000;
@@ -184,12 +185,37 @@ function setMenuState(req, state) {
   menuStateByCall.set(callKey, state);
 }
 
+function getMenuHistory(req) {
+  const callKey = getCallKey(req);
+  return menuHistoryByCall.get(callKey) || [];
+}
+
+function pushMenuHistory(req, state) {
+  const callKey = getCallKey(req);
+  const history = menuHistoryByCall.get(callKey) || [];
+  if (history[history.length - 1] !== state) {
+    history.push(state);
+  }
+  menuHistoryByCall.set(callKey, history);
+}
+
+function popMenuHistory(req) {
+  const callKey = getCallKey(req);
+  const history = menuHistoryByCall.get(callKey) || [];
+  if (history.length > 0) {
+    history.pop();
+  }
+  menuHistoryByCall.set(callKey, history);
+  return history;
+}
+
 function clearCallState(req) {
   const callKey = getCallKey(req);
   temporaryLocationsByCall.delete(callKey);
   pendingLocationChoiceByCall.delete(callKey);
   lastPlaybackByCall.delete(callKey);
   menuStateByCall.delete(callKey);
+  menuHistoryByCall.delete(callKey);
 }
 
 function appendVoicemailRecord(record) {
@@ -398,19 +424,19 @@ function locationMenuTwiml() {
 
   say(
     gather,
-    `Press 1 for Montreal. 2 for Tosh. 3 for Laurentians. 4 for Brooklyn. 5 for Monsey. 6 for Monroe. Press 9 to leave a comment or suggestion. Press star for main menu.`
+    `Press 1 for Montreal. 2 for Tosh. 3 for Laurentians. 4 for Brooklyn. 5 for Monsey. 6 for Monroe. Press 9 to leave a comment or suggestion. Press star for the previous menu.`
   );
 
   twiml.redirect({ method: "POST" }, "/location-menu-prompt");
   return twiml;
 }
 
-function afterActionTwiml(backTarget = "/main-menu") {
+function afterActionTwiml() {
   const twiml = new VoiceResponse();
 
   const gather = twiml.gather({
     input: "dtmf",
-    action: `/after?back=${encodeURIComponent(backTarget)}`,
+    action: "/after",
     method: "POST",
     timeout: 6,
     numDigits: 1,
@@ -437,7 +463,7 @@ function forecastDayPromptTwiml(location, forecast) {
     parts.push(`Press ${i + 1} for ${fullDateLabel(dailyTimes[i], location.timezone)}.`);
   }
 
-  parts.push("Press star to go back to the main menu.");
+  parts.push("Press star to go back to the previous menu.");
 
   say(gather, parts.join(" "));
   twiml.redirect({ method: "POST" }, "/forecast-menu");
@@ -470,12 +496,12 @@ function voicemailPromptTwiml() {
   return twiml;
 }
 
-function playbackWithStarTwiml(text, backTarget) {
+function playbackWithStarTwiml(text) {
   const twiml = new VoiceResponse();
 
   const gather = twiml.gather({
     input: "dtmf",
-    action: `/during-playback?back=${encodeURIComponent(backTarget)}`,
+    action: "/during-playback",
     method: "POST",
     timeout: 1,
     numDigits: 1,
@@ -484,10 +510,7 @@ function playbackWithStarTwiml(text, backTarget) {
 
   say(gather, text);
 
-  twiml.redirect(
-    { method: "POST" },
-    `/after-prompt?back=${encodeURIComponent(backTarget)}`
-  );
+  twiml.redirect({ method: "POST" }, "/after-prompt");
 
   return twiml;
 }
@@ -1455,7 +1478,9 @@ function sevenDayForecastSpeech(location, forecast) {
   const nowHour = getNowHourInTz(location.timezone);
 
   if (count > 0) {
-    parts.push(buildAll7DayEntry(location, forecast, 0, true, nowHour < 12 ? "full" : "remaining"));
+    parts.push(
+      buildAll7DayEntry(location, forecast, 0, true, nowHour < 12 ? "full" : "remaining")
+    );
   }
 
   for (let i = 1; i < count; i++) {
@@ -1718,11 +1743,87 @@ async function buildMainMenuResponse(req, twiml) {
       say(twiml, buildCanadianAlertSpeech(activeLocation, canadaAlert));
     }
 
-    setMenuState(req, "main");
+    setMenuState(req, "main-menu");
     buildMainMenuInto(twiml, placeLabel(activeLocation));
   } else {
     twiml.redirect({ method: "POST" }, "/location-menu-prompt");
   }
+}
+
+async function buildStateTwiml(req, state, { push = true } = {}) {
+  if (push) {
+    pushMenuHistory(req, state);
+  }
+
+  setMenuState(req, state);
+
+  if (state === "location-menu") {
+    return locationMenuTwiml();
+  }
+
+  if (state === "main-menu") {
+    const twiml = new VoiceResponse();
+    await buildMainMenuResponse(req, twiml);
+    return twiml;
+  }
+
+  if (state === "forecast-menu") {
+    const location = getActiveLocation(req);
+    if (!location) {
+      return locationMenuTwiml();
+    }
+
+    const forecast = await fetchForecast(location);
+    return forecastDayPromptTwiml(location, forecast);
+  }
+
+  if (state === "playback") {
+    const location = getActiveLocation(req);
+    const lastPlayback = getLastPlayback(req);
+
+    const twiml = new VoiceResponse();
+
+    if (!location || !lastPlayback) {
+      say(twiml, "There is nothing to repeat yet.");
+      twiml.redirect({ method: "POST" }, "/main-menu");
+      return twiml;
+    }
+
+    const forecast = await fetchForecast(location);
+    const speech = await buildPlaybackSpeech(location, forecast, lastPlayback);
+
+    if (!speech) {
+      say(twiml, "There is nothing to repeat yet.");
+      twiml.redirect({ method: "POST" }, "/main-menu");
+      return twiml;
+    }
+
+    return playbackWithStarTwiml(speech);
+  }
+
+  if (state === "after-prompt") {
+    return afterActionTwiml();
+  }
+
+  if (state === "voicemail") {
+    return voicemailPromptTwiml();
+  }
+
+  return locationMenuTwiml();
+}
+
+async function goBackOneMenu(req) {
+  const history = getMenuHistory(req);
+
+  if (history.length <= 1) {
+    return buildStateTwiml(req, "main-menu", { push: false });
+  }
+
+  popMenuHistory(req);
+  const updatedHistory = getMenuHistory(req);
+  const previousState = updatedHistory[updatedHistory.length - 1] || "main-menu";
+
+  return buildStateTwiml(req, previousState, { push: false });
 }
 
 app.get("/", (req, res) => {
@@ -1774,6 +1875,12 @@ app.post("/main-menu", async (req, res) => {
 
   try {
     await buildMainMenuResponse(req, twiml);
+
+    const history = getMenuHistory(req);
+    if (!history.length || history[history.length - 1] !== "main-menu") {
+      pushMenuHistory(req, "main-menu");
+    }
+
     return res.type("text/xml").send(twiml.toString());
   } catch (error) {
     console.error("MAIN-MENU route error:", error.message);
@@ -1783,24 +1890,17 @@ app.post("/main-menu", async (req, res) => {
   }
 });
 
-app.post("/location-menu-prompt", (req, res) => {
-  res.type("text/xml").send(locationMenuTwiml().toString());
+app.post("/location-menu-prompt", async (req, res) => {
+  const twiml = await buildStateTwiml(req, "location-menu");
+  res.type("text/xml").send(twiml.toString());
 });
 
-app.post("/set-location-choice", (req, res) => {
+app.post("/set-location-choice", async (req, res) => {
   const twiml = new VoiceResponse();
 
   if (isBackKey(req)) {
-    const activeLocation = getActiveLocation(req);
-
-    if (activeLocation) {
-      buildMainMenuInto(twiml, placeLabel(activeLocation));
-    } else {
-      say(twiml, "Please choose a location first.");
-      return res.type("text/xml").send(locationMenuTwiml().toString());
-    }
-
-    return res.type("text/xml").send(twiml.toString());
+    const backTwiml = await goBackOneMenu(req);
+    return res.type("text/xml").send(backTwiml.toString());
   }
 
   const choice = parseLocationChoice(req);
@@ -1808,18 +1908,22 @@ app.post("/set-location-choice", (req, res) => {
   console.log("SET-LOCATION-CHOICE choice:", choice, "digits:", getDigits(req));
 
   if (choice === "9") {
-    return res.type("text/xml").send(voicemailPromptTwiml().toString());
+    const voiceTwiml = await buildStateTwiml(req, "voicemail");
+    return res.type("text/xml").send(voiceTwiml.toString());
   }
 
   if (!choice || !PRESET_LOCATIONS[choice]) {
     say(twiml, "I did not understand that location choice.");
-    return res.type("text/xml").send(locationMenuTwiml().toString());
+    const menuTwiml = await buildStateTwiml(req, "location-menu");
+    return res.type("text/xml").send(menuTwiml.toString());
   }
 
   const preset = PRESET_LOCATIONS[choice];
   saveTemporaryLocationForCall(req, preset);
   clearPendingLocationChoice(req);
-  setMenuState(req, "main");
+
+  pushMenuHistory(req, "main-menu");
+  setMenuState(req, "main-menu");
 
   say(twiml, `${preset.label}.`);
   buildMainMenuInto(twiml, preset.label);
@@ -1827,18 +1931,16 @@ app.post("/set-location-choice", (req, res) => {
 });
 
 app.post("/forecast-menu", async (req, res) => {
-  const twiml = new VoiceResponse();
-  const location = getActiveLocation(req);
-
-  if (!location) {
-    return res.type("text/xml").send(locationMenuTwiml().toString());
-  }
-
   try {
-    setMenuState(req, "forecast");
-    const forecast = await fetchForecast(location);
-    return res.type("text/xml").send(forecastDayPromptTwiml(location, forecast).toString());
+    if (isBackKey(req)) {
+      const backTwiml = await goBackOneMenu(req);
+      return res.type("text/xml").send(backTwiml.toString());
+    }
+
+    const twiml = await buildStateTwiml(req, "forecast-menu");
+    return res.type("text/xml").send(twiml.toString());
   } catch (error) {
+    const twiml = new VoiceResponse();
     console.error("FORECAST-MENU error:", error.message);
     console.error("FORECAST-MENU details:", error.response?.data || null);
     speakWeatherError(twiml, error, "Sorry, I could not retrieve that forecast.");
@@ -1856,40 +1958,41 @@ app.post("/menu", async (req, res) => {
   console.log("MENU choice:", choice, "digits:", getDigits(req));
   console.log("MENU active location:", location);
 
+  if (isBackKey(req)) {
+    return res.type("text/xml").send(twiml.toString());
+  }
+
   if (choice === "5") {
-    return res.type("text/xml").send(locationMenuTwiml().toString());
+    const locationTwiml = await buildStateTwiml(req, "location-menu");
+    return res.type("text/xml").send(locationTwiml.toString());
   }
 
   if (choice === "9") {
-    return res.type("text/xml").send(voicemailPromptTwiml().toString());
+    const voicemailTwiml = await buildStateTwiml(req, "voicemail");
+    return res.type("text/xml").send(voicemailTwiml.toString());
   }
 
   if (!location) {
-    return res.type("text/xml").send(locationMenuTwiml().toString());
+    const locationTwiml = await buildStateTwiml(req, "location-menu");
+    return res.type("text/xml").send(locationTwiml.toString());
   }
 
   try {
-    const forecast = await fetchForecast(location);
-
     if (choice === "1") {
-      setMenuState(req, "forecast");
-      return res.type("text/xml").send(forecastDayPromptTwiml(location, forecast).toString());
+      const forecastTwiml = await buildStateTwiml(req, "forecast-menu");
+      return res.type("text/xml").send(forecastTwiml.toString());
     }
 
     if (choice === "2") {
-      setMenuState(req, "main");
-      setLastPlayback(req, { type: "hourly", hours: 6, backTarget: "/main-menu" });
-      return res
-        .type("text/xml")
-        .send(playbackWithStarTwiml(nextHoursSpeech(location, forecast, 6), "/main-menu").toString());
+      setLastPlayback(req, { type: "hourly", hours: 6 });
+      const playbackTwiml = await buildStateTwiml(req, "playback");
+      return res.type("text/xml").send(playbackTwiml.toString());
     }
 
     if (choice === "3") {
-      setMenuState(req, "main");
-      setLastPlayback(req, { type: "current", backTarget: "/main-menu" });
-      return res
-        .type("text/xml")
-        .send(playbackWithStarTwiml(currentWeatherSpeech(location, forecast), "/main-menu").toString());
+      setLastPlayback(req, { type: "current" });
+      const playbackTwiml = await buildStateTwiml(req, "playback");
+      return res.type("text/xml").send(playbackTwiml.toString());
     }
 
     say(twiml, "I did not understand that choice.");
@@ -1916,12 +2019,13 @@ app.post("/forecast-day", async (req, res) => {
   console.log("FORECAST-DAY active location:", location, "digits:", getDigits(req));
 
   if (isBackKey(req)) {
-    twiml.redirect({ method: "POST" }, "/main-menu");
-    return res.type("text/xml").send(twiml.toString());
+    const backTwiml = await goBackOneMenu(req);
+    return res.type("text/xml").send(backTwiml.toString());
   }
 
   if (!location) {
-    return res.type("text/xml").send(locationMenuTwiml().toString());
+    const locationTwiml = await buildStateTwiml(req, "location-menu");
+    return res.type("text/xml").send(locationTwiml.toString());
   }
 
   try {
@@ -1929,29 +2033,20 @@ app.post("/forecast-day", async (req, res) => {
     const selected = parseForecastDayChoice(req);
 
     if (selected === "all") {
-      setMenuState(req, "forecast");
-      setLastPlayback(req, { type: "all7", backTarget: "/forecast-menu" });
-      return res
-        .type("text/xml")
-        .send(playbackWithStarTwiml(sevenDayForecastSpeech(location, forecast), "/forecast-menu").toString());
+      setLastPlayback(req, { type: "all7" });
+      const playbackTwiml = await buildStateTwiml(req, "playback");
+      return res.type("text/xml").send(playbackTwiml.toString());
     }
 
     if (selected < 0 || selected > 6) {
       say(twiml, "I did not understand the forecast day.");
-      return res.type("text/xml").send(forecastDayPromptTwiml(location, forecast).toString());
+      const forecastTwiml = await buildStateTwiml(req, "forecast-menu");
+      return res.type("text/xml").send(forecastTwiml.toString());
     }
 
-    setMenuState(req, "forecast");
-    setLastPlayback(req, { type: "daily", index: selected, backTarget: "/forecast-menu" });
-
-    return res
-      .type("text/xml")
-      .send(
-        playbackWithStarTwiml(
-          dailyForecastSpeech(location, forecast, selected),
-          "/forecast-menu"
-        ).toString()
-      );
+    setLastPlayback(req, { type: "daily", index: selected });
+    const playbackTwiml = await buildStateTwiml(req, "playback");
+    return res.type("text/xml").send(playbackTwiml.toString());
   } catch (error) {
     console.error("FORECAST-DAY error:", error.message);
     console.error("FORECAST-DAY details:", error.response?.data || null);
@@ -1961,85 +2056,46 @@ app.post("/forecast-day", async (req, res) => {
   }
 });
 
-app.post("/during-playback", (req, res) => {
-  const twiml = new VoiceResponse();
-  const digits = getDigits(req);
-  const backTarget = String(req.query.back || "/main-menu");
-
-  if (digits === "*") {
-    twiml.redirect({ method: "POST" }, backTarget);
-  } else {
-    twiml.redirect(
-      { method: "POST" },
-      `/after-prompt?back=${encodeURIComponent(backTarget)}`
-    );
+app.post("/during-playback", async (req, res) => {
+  if (isBackKey(req)) {
+    const backTwiml = await goBackOneMenu(req);
+    return res.type("text/xml").send(backTwiml.toString());
   }
 
-  res.type("text/xml").send(twiml.toString());
+  const afterTwiml = await buildStateTwiml(req, "after-prompt");
+  res.type("text/xml").send(afterTwiml.toString());
 });
 
-app.post("/after-prompt", (req, res) => {
-  const backTarget = String(req.query.back || "/main-menu");
-  res.type("text/xml").send(afterActionTwiml(backTarget).toString());
+app.post("/after-prompt", async (req, res) => {
+  const twiml = await buildStateTwiml(req, "after-prompt");
+  res.type("text/xml").send(twiml.toString());
 });
 
 app.post("/after", async (req, res) => {
   const twiml = new VoiceResponse();
-  const backTarget = String(req.query.back || "/main-menu");
 
   console.log("AFTER Digits:", getDigits(req));
 
   if (isBackKey(req)) {
-    twiml.redirect({ method: "POST" }, backTarget);
-    return res.type("text/xml").send(twiml.toString());
+    const backTwiml = await goBackOneMenu(req);
+    return res.type("text/xml").send(backTwiml.toString());
   }
 
   const choice = parseAfterChoice(req);
 
   if (choice === "5") {
-    return res.type("text/xml").send(locationMenuTwiml().toString());
+    const locationTwiml = await buildStateTwiml(req, "location-menu");
+    return res.type("text/xml").send(locationTwiml.toString());
   }
 
   if (choice === "#") {
-    const location = getActiveLocation(req);
-    const lastPlayback = getLastPlayback(req);
-
-    if (!location || !lastPlayback) {
-      say(twiml, "There is nothing to repeat yet.");
-      twiml.redirect({ method: "POST" }, "/main-menu");
-      return res.type("text/xml").send(twiml.toString());
-    }
-
-    try {
-      const forecast = await fetchForecast(location);
-      const speech = await buildPlaybackSpeech(location, forecast, lastPlayback);
-
-      if (!speech) {
-        say(twiml, "There is nothing to repeat yet.");
-        twiml.redirect({ method: "POST" }, "/main-menu");
-        return res.type("text/xml").send(twiml.toString());
-      }
-
-      return res
-        .type("text/xml")
-        .send(
-          playbackWithStarTwiml(speech, lastPlayback.backTarget || backTarget).toString()
-        );
-    } catch (error) {
-      console.error("AFTER repeat error:", error.message);
-      console.error("AFTER repeat details:", error.response?.data || null);
-      speakWeatherError(twiml, error, "Sorry, I could not repeat that weather report.");
-      twiml.redirect({ method: "POST" }, "/main-menu");
-      return res.type("text/xml").send(twiml.toString());
-    }
+    const playbackTwiml = await buildStateTwiml(req, "playback");
+    return res.type("text/xml").send(playbackTwiml.toString());
   }
 
   say(twiml, "I did not understand that choice.");
-  twiml.redirect(
-    { method: "POST" },
-    `/after-prompt?back=${encodeURIComponent(backTarget)}`
-  );
-  return res.type("text/xml").send(twiml.toString());
+  const afterTwiml = await buildStateTwiml(req, "after-prompt");
+  return res.type("text/xml").send(afterTwiml.toString());
 });
 
 app.post("/handle-recording", (req, res) => {
@@ -2120,7 +2176,7 @@ app.post("/call-ended", (req, res) => {
   res.status(204).send();
 });
 
-const port = process.env.PORT || 3000
+const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log(`Weather phone server running on port ${port}`);
 });
