@@ -417,7 +417,7 @@ function afterActionTwiml(backTarget = "/main-menu") {
     finishOnKey: ""
   });
 
-  say(gather, "Press star to go back. Or press pound to repeat.");
+  say(gather, "Press star to go back. Press pound to repeat. Press 5 to change location.");
 
   twiml.hangup();
   return twiml;
@@ -449,14 +449,14 @@ function voicemailPromptTwiml() {
 
   say(
     twiml,
-    "Please leave your message after the beep. You can use this for comments or suggestions. Press the star key when you are finished."
+    "Please leave your message after the beep. You can use this for comments or suggestions. When you are finished, just hang up."
   );
 
   twiml.record({
     action: "/handle-recording",
     method: "POST",
     maxLength: 180,
-    finishOnKey: "*",
+    finishOnKey: "",
     playBeep: true,
     trim: "trim-silence",
     recordingStatusCallback: "/recording-status",
@@ -870,7 +870,11 @@ function describeTransitionSentence(entries, timezone, isNight = false) {
   const secondPrecip = precipitationTypeFromEntries(second);
   const firstSky = skyPhraseForEntries(first, isNight);
   const secondSky = skyPhraseForEntries(second, isNight);
-  const timing = getPeriodTimingWord(second.length ? second : entries, timezone, isNight ? "night" : "day");
+  const timing = getPeriodTimingWord(
+    second.length ? second : entries,
+    timezone,
+    isNight ? "night" : "day"
+  );
 
   if (firstPrecip && !secondPrecip) {
     const endSky = secondSky === "clear" ? "clearing" : secondSky;
@@ -1787,7 +1791,15 @@ app.post("/set-location-choice", (req, res) => {
   const twiml = new VoiceResponse();
 
   if (isBackKey(req)) {
-    twiml.redirect({ method: "POST" }, "/main-menu");
+    const activeLocation = getActiveLocation(req);
+
+    if (activeLocation) {
+      buildMainMenuInto(twiml, placeLabel(activeLocation));
+    } else {
+      say(twiml, "Please choose a location first.");
+      return res.type("text/xml").send(locationMenuTwiml().toString());
+    }
+
     return res.type("text/xml").send(twiml.toString());
   }
 
@@ -1984,6 +1996,10 @@ app.post("/after", async (req, res) => {
 
   const choice = parseAfterChoice(req);
 
+  if (choice === "5") {
+    return res.type("text/xml").send(locationMenuTwiml().toString());
+  }
+
   if (choice === "#") {
     const location = getActiveLocation(req);
     const lastPlayback = getLastPlayback(req);
@@ -2104,7 +2120,7 @@ app.post("/call-ended", (req, res) => {
   res.status(204).send();
 });
 
-const port = process.env.PORT || 3000;
+const port = process.env.PORT || 3000
 app.listen(port, () => {
   console.log(`Weather phone server running on port ${port}`);
 });
