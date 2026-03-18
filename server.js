@@ -377,6 +377,7 @@ function parseForecastDayChoice(req) {
 function parseLocationChoice(req) {
   const digit = getDigits(req);
   if (/^[1-6]$/.test(digit)) return digit;
+  if (digit === "9") return "9";
   return "";
 }
 
@@ -397,7 +398,7 @@ function locationMenuTwiml() {
 
   say(
     gather,
-    `Press 1 for Montreal. 2 for Tosh. 3 for Laurentians. 4 for Brooklyn. 5 for Monsey. 6 for Monroe. Press star for main menu.`
+    `Press 1 for Montreal. 2 for Tosh. 3 for Laurentians. 4 for Brooklyn. 5 for Monsey. 6 for Monroe. Press 9 to leave a comment or suggestion. Press star for main menu.`
   );
 
   twiml.redirect({ method: "POST" }, "/location-menu-prompt");
@@ -869,11 +870,7 @@ function describeTransitionSentence(entries, timezone, isNight = false) {
   const secondPrecip = precipitationTypeFromEntries(second);
   const firstSky = skyPhraseForEntries(first, isNight);
   const secondSky = skyPhraseForEntries(second, isNight);
-  const timing = getPeriodTimingWord(
-    second.length ? second : entries,
-    timezone,
-    isNight ? "night" : "day"
-  );
+  const timing = getPeriodTimingWord(second.length ? second : entries, timezone, isNight ? "night" : "day");
 
   if (firstPrecip && !secondPrecip) {
     const endSky = secondSky === "clear" ? "clearing" : secondSky;
@@ -1454,9 +1451,7 @@ function sevenDayForecastSpeech(location, forecast) {
   const nowHour = getNowHourInTz(location.timezone);
 
   if (count > 0) {
-    parts.push(
-      buildAll7DayEntry(location, forecast, 0, true, nowHour < 12 ? "full" : "remaining")
-    );
+    parts.push(buildAll7DayEntry(location, forecast, 0, true, nowHour < 12 ? "full" : "remaining"));
   }
 
   for (let i = 1; i < count; i++) {
@@ -1800,6 +1795,10 @@ app.post("/set-location-choice", (req, res) => {
 
   console.log("SET-LOCATION-CHOICE choice:", choice, "digits:", getDigits(req));
 
+  if (choice === "9") {
+    return res.type("text/xml").send(voicemailPromptTwiml().toString());
+  }
+
   if (!choice || !PRESET_LOCATIONS[choice]) {
     say(twiml, "I did not understand that location choice.");
     return res.type("text/xml").send(locationMenuTwiml().toString());
@@ -1870,9 +1869,7 @@ app.post("/menu", async (req, res) => {
       setLastPlayback(req, { type: "hourly", hours: 6, backTarget: "/main-menu" });
       return res
         .type("text/xml")
-        .send(
-          playbackWithStarTwiml(nextHoursSpeech(location, forecast, 6), "/main-menu").toString()
-        );
+        .send(playbackWithStarTwiml(nextHoursSpeech(location, forecast, 6), "/main-menu").toString());
     }
 
     if (choice === "3") {
@@ -1880,9 +1877,7 @@ app.post("/menu", async (req, res) => {
       setLastPlayback(req, { type: "current", backTarget: "/main-menu" });
       return res
         .type("text/xml")
-        .send(
-          playbackWithStarTwiml(currentWeatherSpeech(location, forecast), "/main-menu").toString()
-        );
+        .send(playbackWithStarTwiml(currentWeatherSpeech(location, forecast), "/main-menu").toString());
     }
 
     say(twiml, "I did not understand that choice.");
@@ -1926,12 +1921,7 @@ app.post("/forecast-day", async (req, res) => {
       setLastPlayback(req, { type: "all7", backTarget: "/forecast-menu" });
       return res
         .type("text/xml")
-        .send(
-          playbackWithStarTwiml(
-            sevenDayForecastSpeech(location, forecast),
-            "/forecast-menu"
-          ).toString()
-        );
+        .send(playbackWithStarTwiml(sevenDayForecastSpeech(location, forecast), "/forecast-menu").toString());
     }
 
     if (selected < 0 || selected > 6) {
@@ -2114,7 +2104,7 @@ app.post("/call-ended", (req, res) => {
   res.status(204).send();
 });
 
-const port = process.env.PORT || 3000;
+const port = process.env.PORT || 3000;8
 app.listen(port, () => {
   console.log(`Weather phone server running on port ${port}`);
 });
