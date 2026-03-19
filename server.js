@@ -1,4 +1,4 @@
-	const express = require("express");
+const express = require("express");
 const axios = require("axios");
 const twilio = require("twilio");
 const fs = require("fs");
@@ -99,9 +99,9 @@ const PRESET_LOCATIONS = {
 };
 
 const US_LOCATIONS = {
-  "1": PRESET_LOCATIONS["4"], // Brooklyn
-  "2": PRESET_LOCATIONS["6"], // Monroe
-  "3": PRESET_LOCATIONS["5"]  // Monsey
+  "1": PRESET_LOCATIONS["4"],
+  "2": PRESET_LOCATIONS["6"],
+  "3": PRESET_LOCATIONS["5"]
 };
 
 function gatherOptions(action, timeout = 8, numDigits = 1) {
@@ -366,12 +366,6 @@ function fullDateLabel(iso, tz) {
   });
 }
 
-/**
- * IMPORTANT FIX:
- * Open-Meteo forecast/current timestamps like "2026-03-18T21:00" are local wall-clock
- * timestamps for the requested forecast timezone. Do NOT pass them through new Date()
- * to decide local hour/daypart, because that can reinterpret them in the server timezone.
- */
 function getDatePartFromLocalIso(iso) {
   return String(iso || "").slice(0, 10);
 }
@@ -1153,18 +1147,60 @@ function compassLettersToWords(direction) {
   return map[String(direction || "").toUpperCase()] || String(direction || "").toLowerCase();
 }
 
+function cleanEnvironmentCanadaObservedAt(text) {
+  const raw = String(text || "").replace(/\s+/g, " ").trim();
+  if (!raw) return "";
+
+  const stopMarkers = [
+    "Past 24 hours",
+    "Weather Radar",
+    "Satellite",
+    "Lightning",
+    "°C",
+    "°F",
+    "Observed at:"
+  ];
+
+  let cleaned = raw;
+  for (const marker of stopMarkers) {
+    const idx = cleaned.indexOf(marker);
+    if (idx > 0) {
+      cleaned = cleaned.slice(0, idx).trim();
+    }
+  }
+
+  cleaned = cleaned.replace(/\s+/g, " ").trim();
+
+  if (cleaned.length > 80) return "";
+  return cleaned;
+}
+
 function currentWeatherSpeech(location, forecast, unit = "C", canadaCurrent = null) {
   if (location?.country === "CA" && canadaCurrent) {
     const parts = [`Current weather for ${placeLabel(location)}.`];
 
-    if (canadaCurrent.dateText) {
-      parts.push(`Observed at ${canadaCurrent.dateText}.`);
-    } else if (canadaCurrent.observedAt) {
-      parts.push(`Observed at ${canadaCurrent.observedAt}.`);
+    const safeObservedAt = cleanEnvironmentCanadaObservedAt(canadaCurrent?.observedAt);
+    if (safeObservedAt) {
+      parts.push(`Observed at ${safeObservedAt}.`);
     }
 
     if (canadaCurrent.condition) {
-      parts.push(`It is ${String(canadaCurrent.condition).toLowerCase()}.`);
+      const conditionText = String(canadaCurrent.condition).trim();
+      if (conditionText) {
+        if (/^light snow$/i.test(conditionText)) {
+          parts.push("It is light snow.");
+        } else if (/^snow$/i.test(conditionText)) {
+          parts.push("It is snowing.");
+        } else if (/^light rain$/i.test(conditionText)) {
+          parts.push("It is light rain.");
+        } else if (/^rain$/i.test(conditionText)) {
+          parts.push("It is raining.");
+        } else if (/^cloudy$/i.test(conditionText)) {
+          parts.push("It is cloudy.");
+        } else {
+          parts.push(`It is ${conditionText.toLowerCase()}.`);
+        }
+      }
     }
 
     if (canadaCurrent.temperatureC !== null && Number.isFinite(canadaCurrent.temperatureC)) {
@@ -1762,8 +1798,6 @@ function buildAll7DayEntry(location, forecast, index, includeNight = true, today
 
   if (includeNight) {
     if (index === 0 && todayMode === "remaining") {
-      // Fix: when "Today" is already built from the remaining-hours path,
-      // do not append "Tonight" again for index 0.
     } else if (index <= 1) {
       parts.push(buildDetailedNightOnlySection(location, forecast, index, nightLabel, unit));
     } else {
@@ -1929,19 +1963,24 @@ async function fetchEnvironmentCanadaCurrent(location) {
         .trim();
     }
 
-    const currentBlockMatch = html.match(/Current Conditions([\s\S]*?)Forecast issued:/i);
-    const block = currentBlockMatch ? currentBlockMatch[1] : html;
-    const text = clean(block);
+    const text = clean(html);
 
     function pick(regex) {
       const m = text.match(regex);
       return m ? String(m[1] || "").trim() : "";
     }
 
-    const observedAt = pick(/Observed at:\s*(.*?)\s*Date:/i);
-    const dateText = pick(/Date:\s*(.*?)\s*Condition:/i);
-    const condition = pick(/Condition:\s*(.*?)\s*(Pressure:|Temperature:)/i);
-    const temperatureText = pick(/Temperature:\s*([\-0-9.]+)\s*°\s*C/i);
+    let observedAt =
+      pick(/Observed at:\s*(.*?)(?:Date:|Condition:|Temperature:)/i) ||
+      pick(/Current Conditions\s*Observed at:\s*(.*?)(?:Date:|Condition:|Temperature:)/i);
+
+    let dateText = pick(/Date:\s*(.*?)(?:Condition:|Temperature:)/i);
+    const condition = pick(/Condition:\s*(.*?)(?:Pressure:|Temperature:|Dew point:|Humidity:|Wind:)/i);
+
+    let temperatureText =
+      pick(/Temperature:\s*([\-0-9.]+)\s*°\s*C/i) ||
+      pick(/([\-0-9.]+)\s*°\s*C\s*Observed at:/i);
+
     const windText = pick(/Wind:\s*([A-Z]{1,3}\s+[0-9.]+\s+km\/h|Calm)/i);
     const windChillText = pick(/Wind Chill[^:]*:\s*([\-0-9.]+)/i);
 
@@ -1961,6 +2000,9 @@ async function fetchEnvironmentCanadaCurrent(location) {
         windSpeedKmh = Number(windMatch[2]);
       }
     }
+
+    observedAt = cleanEnvironmentCanadaObservedAt(observedAt);
+    dateText = String(dateText || "").replace(/\s+/g, " ").trim();
 
     console.log("ENV CANADA CURRENT RAW", {
       location: location.label,
