@@ -788,9 +788,6 @@ function weatherCodeToOfficialPhrase(code, cloudCoverLike = 60, isNight = false)
   return isNight ? cloudCoverNightPhrase(cloudCoverLike) : cloudCoverToPhrase(cloudCoverLike);
 }
 
-/* FIXED:
-   Prefer actual current precipitation fields over generic weather_code/cloud wording.
-   This applies to all locations because it changes shared logic only. */
 function describeCurrentCondition(current, timezone) {
   const isNight = current?.time ? isNightHourFromIso(current.time, timezone) : false;
 
@@ -1031,9 +1028,6 @@ function getPeriodTimingWord(entries, timezone, type = "day") {
   return "later in the day";
 }
 
-/* FIXED:
-   Lower thresholds and also respect snow/rain-related weather codes,
-   so light precip is not hidden in summaries. */
 function precipitationTypeFromEntries(entries) {
   const totalSnow = entries.reduce((sum, e) => sum + Number(e.snowfall || e.snow || 0), 0);
   const totalRain = entries.reduce(
@@ -1043,12 +1037,14 @@ function precipitationTypeFromEntries(entries) {
   const maxChance = maxValue(
     entries.map((e) => e.precipitationProbability ?? e.rainChance ?? 0)
   );
-  const hasStorm = entries.some((e) => [95, 96, 99].includes(Number(e.weatherCode)));
+  const hasStorm = entries.some((e) => [95, 96, 99].includes(Number(e.weatherCode || e.code)));
   const hasSnowCode = entries.some((e) =>
-    [71, 73, 75, 77, 85, 86].includes(Number(e.weatherCode))
+    [71, 73, 75, 77, 85, 86].includes(Number(e.weatherCode || e.code))
   );
   const hasRainCode = entries.some((e) =>
-    [51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82].includes(Number(e.weatherCode))
+    [51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82].includes(
+      Number(e.weatherCode || e.code)
+    )
   );
 
   if (hasStorm) return "thunderstorms";
@@ -1179,9 +1175,6 @@ function currentWeatherSpeech(location, forecast, unit = "C") {
   return parts.join(" ");
 }
 
-/* FIXED:
-   Prefer active precip over generic sky wording when grouping hourly blocks,
-   so the block won't be labeled just "cloudy" if snow/rain is actually happening. */
 function classifyHourlyBucket(item, tz = "UTC") {
   const code = Number(item.code);
   const rainAmount = Number(item.rain || 0) + Number(item.showers || 0);
@@ -1224,9 +1217,6 @@ function classifyHourlyBucket(item, tz = "UTC") {
   return `${condition}|${precipTag}|${windTag}|${tempBand}`;
 }
 
-/* FIXED:
-   Build hourly speech from the whole block, not just the first hour,
-   and don't say "chance" when active snow/rain already exists in the block. */
 function summarizeHourlyBlock(block, tz, unit = "C") {
   const first = block.items[0];
   const start = timeLabel(block.start, tz);
