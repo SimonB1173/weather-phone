@@ -1639,7 +1639,10 @@ function buildAll7DayEntry(location, forecast, index, includeNight = true, today
   }
 
   if (includeNight) {
-    if (index <= 1) {
+    if (index === 0 && todayMode === "remaining") {
+      // Fix: when "Today" is already built from the remaining-hours path,
+      // do not append "Tonight" again for index 0.
+    } else if (index <= 1) {
       parts.push(buildDetailedNightOnlySection(location, forecast, index, nightLabel, unit));
     } else {
       parts.push(buildShortNightSection(location, forecast, index, nightLabel, unit));
