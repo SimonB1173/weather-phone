@@ -26,6 +26,7 @@ const pendingLocationChoiceByCall = new Map();
 const lastPlaybackByCall = new Map();
 const menuStateByCall = new Map();
 const menuHistoryByCall = new Map();
+const unitPreferenceByCall = new Map();
 
 const FORECAST_CACHE_MS = 10 * 60 * 1000;
 const STALE_FORECAST_MS = 60 * 60 * 1000;
@@ -89,6 +90,12 @@ const PRESET_LOCATIONS = {
     label: "Monroe",
     country: "US"
   }
+};
+
+const US_LOCATIONS = {
+  "1": PRESET_LOCATIONS["4"], // Brooklyn
+  "2": PRESET_LOCATIONS["6"], // Monroe
+  "3": PRESET_LOCATIONS["5"]  // Monsey
 };
 
 function gatherOptions(action, timeout = 8, numDigits = 1) {
@@ -209,6 +216,22 @@ function popMenuHistory(req) {
   return history;
 }
 
+function getUnitPreference(req) {
+  const callKey = getCallKey(req);
+  return unitPreferenceByCall.get(callKey) || "C";
+}
+
+function setUnitPreference(req, unit) {
+  const callKey = getCallKey(req);
+  unitPreferenceByCall.set(callKey, unit === "F" ? "F" : "C");
+}
+
+function toggleUnitPreference(req) {
+  const nextUnit = getUnitPreference(req) === "F" ? "C" : "F";
+  setUnitPreference(req, nextUnit);
+  return nextUnit;
+}
+
 function clearCallState(req) {
   const callKey = getCallKey(req);
   temporaryLocationsByCall.delete(callKey);
@@ -216,6 +239,7 @@ function clearCallState(req) {
   lastPlaybackByCall.delete(callKey);
   menuStateByCall.delete(callKey);
   menuHistoryByCall.delete(callKey);
+  unitPreferenceByCall.delete(callKey);
 }
 
 function appendVoicemailRecord(record) {
@@ -402,9 +426,51 @@ function parseForecastDayChoice(req) {
 
 function parseLocationChoice(req) {
   const digit = getDigits(req);
-  if (/^[1-6]$/.test(digit)) return digit;
+  if (/^[1-4]$/.test(digit)) return digit;
   if (digit === "9") return "9";
   return "";
+}
+
+function parseUSLocationChoice(req) {
+  const digit = getDigits(req);
+  if (/^[1-3]$/.test(digit)) return digit;
+  return "";
+}
+
+function cToF(value) {
+  return (Number(value || 0) * 9) / 5 + 32;
+}
+
+function kmhToMph(value) {
+  return Number(value || 0) * 0.621371;
+}
+
+function tempValueForUnit(value, unit) {
+  return unit === "F" ? cToF(value) : Number(value || 0);
+}
+
+function speedValueForUnit(value, unit) {
+  return unit === "F" ? kmhToMph(value) : Number(value || 0);
+}
+
+function speedUnitLabel(unit) {
+  return unit === "F" ? "miles per hour" : "kilometres per hour";
+}
+
+function formatSignedTemp(value, unit = "C") {
+  const converted = tempValueForUnit(value, unit);
+  const n = Math.round(converted);
+  if (n < 0) return `minus ${Math.abs(n)}`;
+  if (n > 0) return `${n}`;
+  return "zero";
+}
+
+function formatForecastTempValue(value, unit = "C") {
+  const converted = tempValueForUnit(value, unit);
+  const n = Math.round(converted);
+  if (n < 0) return `minus ${Math.abs(n)}`;
+  if (n > 0) return `plus ${n}`;
+  return "zero";
 }
 
 function buildMainMenuInto(twiml, activeLocationName) {
@@ -424,14 +490,27 @@ function locationMenuTwiml() {
 
   say(
     gather,
-    `Press 1 for Montreal. 2 for Tosh. 3 for Laurentians. 4 for Brooklyn. 5 for Monsey. 6 for Monroe. Press 9 to leave a comment or suggestion. Press star for the previous menu.`
+    `Press 1 for Montreal. 2 for Tosh. 3 for Laurentians. 4 for United States. Press 9 to leave a comment or suggestion. Press star for the previous menu.`
   );
 
   twiml.redirect({ method: "POST" }, "/location-menu-prompt");
   return twiml;
 }
 
-function afterActionTwiml() {
+function usLocationMenuTwiml() {
+  const twiml = new VoiceResponse();
+  const gather = twiml.gather(gatherOptions("/set-us-location-choice", 7, 1));
+
+  say(
+    gather,
+    `For United States, press 1 for Brooklyn. 2 for Monroe. 3 for Monsey. Press star for the previous menu.`
+  );
+
+  twiml.redirect({ method: "POST" }, "/us-location-menu-prompt");
+  return twiml;
+}
+
+function afterActionTwiml(unit = "C") {
   const twiml = new VoiceResponse();
 
   const gather = twiml.gather({
@@ -443,7 +522,15 @@ function afterActionTwiml() {
     finishOnKey: ""
   });
 
-  say(gather, "Press star to go back. Press pound to repeat. Press 5 to change location.");
+  const unitText =
+    unit === "F"
+      ? "Press 7 to switch back to Celsius."
+      : "Press 7 to hear it in Fahrenheit.";
+
+  say(
+    gather,
+    `Press star to go back. Press pound to repeat. Press 5 to change location. ${unitText}`
+  );
 
   twiml.hangup();
   return twiml;
@@ -460,7 +547,7 @@ function forecastDayPromptTwiml(location, forecast) {
   if (dailyTimes[1]) parts.push("Press 2 for tomorrow.");
 
   for (let i = 2; i < Math.min(7, dailyTimes.length); i++) {
-    parts.push(`Press ${i + 1} for ${fullDateLabel(dailyTimes[i], location.timezone)}.`);
+    parts.push(`Press ${i + 1} for ${dayName(dailyTimes[i], location.timezone)}.`);
   }
 
   parts.push("Press star to go back to the previous menu.");
@@ -636,20 +723,6 @@ function describeCurrentWeatherSentence(current, timezone) {
   if (condition === "severe thunderstorms with hail") return "There are severe thunderstorms with hail";
 
   return `It is ${condition}`;
-}
-
-function formatSignedTemp(value) {
-  const n = Math.round(Number(value || 0));
-  if (n < 0) return `minus ${Math.abs(n)}`;
-  if (n > 0) return `${n}`;
-  return "zero";
-}
-
-function formatForecastTempValue(value) {
-  const n = Math.round(Number(value || 0));
-  if (n < 0) return `minus ${Math.abs(n)}`;
-  if (n > 0) return `plus ${n}`;
-  return "zero";
 }
 
 function uvIndexPhrase(value) {
@@ -942,36 +1015,37 @@ function describeTransitionSentence(entries, timezone, isNight = false) {
   return "";
 }
 
-function currentWeatherSpeech(location, forecast) {
+function currentWeatherSpeech(location, forecast, unit = "C") {
   const c = forecast.current || {};
   const parts = [
     `Current weather for ${placeLabel(location)}.`,
     `Retrieved at ${retrievedTimeLabelNow(location.timezone)}.`,
     `${describeCurrentWeatherSentence(c, location.timezone)}.`,
-    `Temperature ${formatSignedTemp(c.temperature_2m)} degrees.`
+    `Temperature ${formatSignedTemp(c.temperature_2m, unit)} degrees.`
   ];
 
   const apparent = firstNonNull([c.apparent_temperature]);
   if (
     apparent !== null &&
-    Math.round(apparent) !== Math.round(Number(c.temperature_2m || 0))
+    Math.round(tempValueForUnit(apparent, unit)) !==
+      Math.round(tempValueForUnit(Number(c.temperature_2m || 0), unit))
   ) {
-    if (apparent <= Number(c.temperature_2m || 0) - 3) {
-      parts.push(`Wind chill ${formatSignedTemp(apparent)}.`);
-    } else if (apparent >= Number(c.temperature_2m || 0) + 3) {
-      parts.push(`Feels like ${formatSignedTemp(apparent)}.`);
+    if (tempValueForUnit(apparent, unit) <= tempValueForUnit(Number(c.temperature_2m || 0), unit) - 3) {
+      parts.push(`Wind chill ${formatSignedTemp(apparent, unit)}.`);
+    } else if (tempValueForUnit(apparent, unit) >= tempValueForUnit(Number(c.temperature_2m || 0), unit) + 3) {
+      parts.push(`Feels like ${formatSignedTemp(apparent, unit)}.`);
     }
   }
 
-  const speed = Math.round(Number(c.wind_speed_10m || 0));
-  const gusts = Math.round(Number(c.wind_gusts_10m || 0));
+  const speed = Math.round(speedValueForUnit(c.wind_speed_10m, unit));
+  const gusts = Math.round(speedValueForUnit(c.wind_gusts_10m, unit));
   const direction = degreesToCompass(c.wind_direction_10m);
 
-  if (speed >= 15) {
-    if (gusts >= speed + 10) {
-      parts.push(`Wind ${direction} ${speed} kilometres per hour, gusting to ${gusts}.`);
+  if (speed >= (unit === "F" ? 9 : 15)) {
+    if (gusts >= speed + (unit === "F" ? 6 : 10)) {
+      parts.push(`Wind ${direction} ${speed} ${speedUnitLabel(unit)}, gusting to ${gusts}.`);
     } else {
-      parts.push(`Wind ${direction} ${speed} kilometres per hour.`);
+      parts.push(`Wind ${direction} ${speed} ${speedUnitLabel(unit)}.`);
     }
   }
 
@@ -1006,7 +1080,7 @@ function classifyHourlyBucket(item, tz = "UTC") {
   return `${condition}|${precipTag}|${windTag}|${tempBand}`;
 }
 
-function summarizeHourlyBlock(block, tz) {
+function summarizeHourlyBlock(block, tz, unit = "C") {
   const first = block.items[0];
   const start = timeLabel(block.start, tz);
   const endDate = new Date(block.end);
@@ -1018,16 +1092,18 @@ function summarizeHourlyBlock(block, tz) {
     timeZone: tz || "UTC"
   });
 
-  const avgTemp =
+  const avgTempC =
     block.items.reduce((sum, x) => sum + Number(x.temp || 0), 0) / block.items.length;
 
-  const avgAppTemp =
+  const avgAppTempC =
     block.items.reduce((sum, x) => sum + Number(x.apparentTemp ?? x.temp ?? 0), 0) /
     block.items.length;
 
+  const avgTemp = Math.round(tempValueForUnit(avgTempC, unit));
+  const avgAppTemp = Math.round(tempValueForUnit(avgAppTempC, unit));
   const maxRainChance = Math.max(...block.items.map((x) => Number(x.rainChance || 0)));
-  const maxWind = Math.max(...block.items.map((x) => Number(x.wind || 0)));
-  const maxGust = Math.max(...block.items.map((x) => Number(x.gusts || 0)));
+  const maxWind = Math.max(...block.items.map((x) => speedValueForUnit(x.wind || 0, unit)));
+  const maxGust = Math.max(...block.items.map((x) => speedValueForUnit(x.gusts || 0, unit)));
   const totalRain = block.items.reduce(
     (sum, x) => sum + Number(x.rain || 0) + Number(x.showers || 0),
     0
@@ -1038,14 +1114,14 @@ function summarizeHourlyBlock(block, tz) {
   const condition = weatherCodeToText(first.code, isNight);
 
   const parts = [
-    `From ${start} until ${end}, ${condition}, around ${Math.round(avgTemp)} degrees.`
+    `From ${start} until ${end}, ${condition}, around ${avgTemp} degrees.`
   ];
 
-  if (Math.abs(Math.round(avgAppTemp) - Math.round(avgTemp)) >= 3) {
+  if (Math.abs(avgAppTemp - avgTemp) >= 3) {
     if (avgAppTemp < avgTemp) {
-      parts.push(`Wind chill near ${formatSignedTemp(avgAppTemp)}.`);
+      parts.push(`Wind chill near ${formatSignedTemp(avgAppTempC, unit)}.`);
     } else {
-      parts.push(`Feels like ${formatSignedTemp(avgAppTemp)}.`);
+      parts.push(`Feels like ${formatSignedTemp(avgAppTempC, unit)}.`);
     }
   }
 
@@ -1065,8 +1141,11 @@ function summarizeHourlyBlock(block, tz) {
     else parts.push("A slight chance of flurries.");
   }
 
-  if (maxWind >= 35 || maxGust >= 55) parts.push("Windy.");
-  else if (maxWind >= 18) parts.push("A light breeze.");
+  if (maxWind >= (unit === "F" ? 22 : 35) || maxGust >= (unit === "F" ? 34 : 55)) {
+    parts.push("Windy.");
+  } else if (maxWind >= (unit === "F" ? 11 : 18)) {
+    parts.push("A light breeze.");
+  }
 
   return parts.join(" ");
 }
@@ -1102,7 +1181,7 @@ function buildSmartHourlyBlocks(items, tz = "UTC") {
   return blocks;
 }
 
-function nextHoursSpeech(location, forecast, hours = 6) {
+function nextHoursSpeech(location, forecast, hours = 6, unit = "C") {
   const now = Date.now();
   const h = forecast.hourly || {};
   const tz = location.timezone || "UTC";
@@ -1135,76 +1214,81 @@ function nextHoursSpeech(location, forecast, hours = 6) {
 
   const blocks = buildSmartHourlyBlocks(items, tz);
   const topBlocks = blocks.slice(0, 4);
-  const body = topBlocks.map((block) => summarizeHourlyBlock(block, tz)).join(" ");
+  const body = topBlocks.map((block) => summarizeHourlyBlock(block, tz, unit)).join(" ");
 
   return `Here is the next ${items.length} hours for ${placeLabel(location)}. ${body}`.trim();
 }
 
-function describeWindLine(entries, timezone, type = "day") {
+function describeWindLine(entries, timezone, type = "day", unit = "C") {
   if (!entries.length) return "";
 
   const { first, second } = splitEntries(entries);
-  const firstWind = Math.round(maxValue(first.map((e) => e.wind)));
-  const secondWind = Math.round(maxValue(second.map((e) => e.wind)));
-  const firstGust = Math.round(maxValue(first.map((e) => e.windGusts)));
-  const secondGust = Math.round(maxValue(second.map((e) => e.windGusts)));
+  const firstWind = Math.round(maxValue(first.map((e) => speedValueForUnit(e.wind, unit))));
+  const secondWind = Math.round(maxValue(second.map((e) => speedValueForUnit(e.wind, unit))));
+  const firstGust = Math.round(maxValue(first.map((e) => speedValueForUnit(e.windGusts, unit))));
+  const secondGust = Math.round(maxValue(second.map((e) => speedValueForUnit(e.windGusts, unit))));
   const firstDir = degreesToCompass(average(first.map((e) => e.windDirection)));
   const secondDir = degreesToCompass(average(second.map((e) => e.windDirection)));
   const timing = getPeriodTimingWord(second.length ? second : entries, timezone, type);
 
-  const firstActive = firstWind >= 15 || firstGust >= 25;
-  const secondActive = secondWind >= 15 || secondGust >= 25;
+  const activeSpeed = unit === "F" ? 9 : 15;
+  const activeGust = unit === "F" ? 16 : 25;
+  const gustDelta = unit === "F" ? 6 : 10;
+  const diminishSpeed = unit === "F" ? 9 : 15;
+
+  const firstActive = firstWind >= activeSpeed || firstGust >= activeGust;
+  const secondActive = secondWind >= activeSpeed || secondGust >= activeGust;
 
   if (!firstActive && !secondActive) return "";
 
   function formatWindSegment(dir, speed, gust) {
     let text = `${dir} ${speed}`;
-    if (gust >= speed + 10) text += ` gusting to ${gust}`;
+    if (gust >= speed + gustDelta) text += ` gusting to ${gust}`;
     return text;
   }
 
   if (firstActive && secondActive) {
-    if (secondWind <= 15 && secondGust < 25 && firstWind >= 20) {
+    if (secondWind <= activeSpeed && secondGust < activeGust && firstWind >= (unit === "F" ? 12 : 20)) {
       return `Wind ${firstDir} ${firstWind}${
-        firstGust >= firstWind + 10
-          ? ` kilometres per hour gusting to ${firstGust}`
-          : " kilometres per hour"
-      } diminishing to 15 kilometres per hour or less ${timing}.`;
+        firstGust >= firstWind + gustDelta
+          ? ` ${speedUnitLabel(unit)} gusting to ${firstGust}`
+          : ` ${speedUnitLabel(unit)}`
+      } diminishing to ${diminishSpeed} ${speedUnitLabel(unit)} or less ${timing}.`;
     }
 
     if (
       firstDir !== secondDir ||
-      Math.abs(firstWind - secondWind) >= 10 ||
-      Math.abs(firstGust - secondGust) >= 15
+      Math.abs(firstWind - secondWind) >= (unit === "F" ? 6 : 10) ||
+      Math.abs(firstGust - secondGust) >= (unit === "F" ? 9 : 15)
     ) {
       if (firstWind > secondWind || firstGust > secondGust) {
         return `Wind ${firstDir} ${firstWind}${
-          firstGust >= firstWind + 10
-            ? ` kilometres per hour gusting to ${firstGust}`
-            : " kilometres per hour"
+          firstGust >= firstWind + gustDelta
+            ? ` ${speedUnitLabel(unit)} gusting to ${firstGust}`
+            : ` ${speedUnitLabel(unit)}`
         } diminishing to ${formatWindSegment(secondDir, secondWind, secondGust)} ${timing}.`;
       }
 
       return `Wind ${firstDir} ${firstWind}${
-        firstGust >= firstWind + 10
-          ? ` kilometres per hour gusting to ${firstGust}`
-          : " kilometres per hour"
+        firstGust >= firstWind + gustDelta
+          ? ` ${speedUnitLabel(unit)} gusting to ${firstGust}`
+          : ` ${speedUnitLabel(unit)}`
       } becoming ${formatWindSegment(secondDir, secondWind, secondGust)} ${timing}.`;
     }
   }
 
-  const maxWind = Math.round(maxValue(entries.map((e) => e.wind)));
-  const maxGust = Math.round(maxValue(entries.map((e) => e.windGusts)));
+  const maxWind = Math.round(maxValue(entries.map((e) => speedValueForUnit(e.wind, unit))));
+  const maxGust = Math.round(maxValue(entries.map((e) => speedValueForUnit(e.windGusts, unit))));
   const dir = degreesToCompass(average(entries.map((e) => e.windDirection)));
 
-  if (maxWind <= 15 && maxGust < 25) {
-    return "Wind up to 15 kilometres per hour.";
+  if (maxWind <= activeSpeed && maxGust < activeGust) {
+    return `Wind up to ${activeSpeed} ${speedUnitLabel(unit)}.`;
   }
 
   return `Wind ${dir} ${maxWind}${
-    maxGust >= maxWind + 10
-      ? ` kilometres per hour gusting to ${maxGust}`
-      : " kilometres per hour"
+    maxGust >= maxWind + gustDelta
+      ? ` ${speedUnitLabel(unit)} gusting to ${maxGust}`
+      : ` ${speedUnitLabel(unit)}`
   }.`;
 }
 
@@ -1244,13 +1328,13 @@ function describeSimplePeriodIntro(entries, isNight = false) {
   return `${capitalizeSentence(sky)}.`;
 }
 
-function describeDayTemperatureLine(forecast, index) {
+function describeDayTemperatureLine(forecast, index, unit = "C") {
   const high = forecast.daily?.temperature_2m_max?.[index];
   if (!Number.isFinite(Number(high))) return "";
-  return `High ${formatForecastTempValue(high)}.`;
+  return `High ${formatForecastTempValue(high, unit)}.`;
 }
 
-function describeNightTemperatureLine(forecast, index, entries) {
+function describeNightTemperatureLine(forecast, index, entries, unit = "C") {
   const d = forecast.daily || {};
   const nextDayMin = d.temperature_2m_min?.[index + 1];
   const sameDayMin = d.temperature_2m_min?.[index];
@@ -1258,61 +1342,67 @@ function describeNightTemperatureLine(forecast, index, entries) {
 
   if (!Number.isFinite(Number(lowValue))) return "";
 
-  const minTemp = minValue(entries.map((e) => e.temperature));
-  const maxTemp = maxValue(entries.map((e) => e.temperature));
+  const minTemp = tempValueForUnit(minValue(entries.map((e) => e.temperature)), unit);
+  const maxTemp = tempValueForUnit(maxValue(entries.map((e) => e.temperature)), unit);
 
   if (entries.length && Math.abs(maxTemp - minTemp) <= 2) {
-    return `Temperature steady near ${formatSignedTemp(average(entries.map((e) => e.temperature)))}.`;
+    return `Temperature steady near ${formatSignedTemp(average(entries.map((e) => e.temperature)), unit)}.`;
   }
 
-  return `Low ${formatForecastTempValue(lowValue)}.`;
+  return `Low ${formatForecastTempValue(lowValue, unit)}.`;
 }
 
-function describeDayWindChill(entries) {
+function describeDayWindChill(entries, unit = "C") {
   if (!entries.length) return "";
 
   const { first, second } = splitEntries(entries);
-  const firstApp = Math.round(
-    minValue(first.map((e) => Number(e.apparentTemperature ?? e.temperature ?? 0)))
+  const firstApp = tempValueForUnit(
+    minValue(first.map((e) => Number(e.apparentTemperature ?? e.temperature ?? 0))),
+    unit
   );
-  const secondApp = Math.round(
-    minValue(second.map((e) => Number(e.apparentTemperature ?? e.temperature ?? 0)))
+  const secondApp = tempValueForUnit(
+    minValue(second.map((e) => Number(e.apparentTemperature ?? e.temperature ?? 0))),
+    unit
   );
-  const firstTemp = Math.round(minValue(first.map((e) => Number(e.temperature ?? 0))));
-  const secondTemp = Math.round(minValue(second.map((e) => Number(e.temperature ?? 0))));
+  const firstTemp = tempValueForUnit(minValue(first.map((e) => Number(e.temperature ?? 0))), unit);
+  const secondTemp = tempValueForUnit(minValue(second.map((e) => Number(e.temperature ?? 0))), unit);
 
   const firstHas = firstApp <= firstTemp - 3;
   const secondHas = secondApp <= secondTemp - 3;
 
-  if (firstHas && secondHas && firstApp !== secondApp) {
-    return `Wind chill ${formatSignedTemp(firstApp)} in the morning and ${formatSignedTemp(secondApp)} in the afternoon.`;
+  if (firstHas && secondHas && Math.round(firstApp) !== Math.round(secondApp)) {
+    return `Wind chill ${formatSignedTemp(firstApp, unit)} in the morning and ${formatSignedTemp(secondApp, unit)} in the afternoon.`;
   }
 
   if (firstHas || secondHas) {
     const value = firstHas ? firstApp : secondApp;
     const part = firstHas ? "in the morning" : "in the afternoon";
-    return `Wind chill ${formatSignedTemp(value)} ${part}.`;
+    return `Wind chill ${formatSignedTemp(value, unit)} ${part}.`;
   }
 
   return "";
 }
 
-function describeNightWindChill(entries) {
+function describeNightWindChill(entries, unit = "C") {
   if (!entries.length) return "";
 
-  const minApp = Math.round(
-    minValue(entries.map((e) => Number(e.apparentTemperature ?? e.temperature ?? 0)))
+  const minApp = tempValueForUnit(
+    minValue(entries.map((e) => Number(e.apparentTemperature ?? e.temperature ?? 0))),
+    unit
   );
-  const minTemp = Math.round(minValue(entries.map((e) => Number(e.temperature ?? 0))));
+  const minTemp = tempValueForUnit(
+    minValue(entries.map((e) => Number(e.temperature ?? 0))),
+    unit
+  );
 
   if (minApp <= minTemp - 3) {
-    return `Wind chill near ${formatSignedTemp(minApp)}.`;
+    return `Wind chill near ${formatSignedTemp(minApp, unit)}.`;
   }
 
   return "";
 }
 
-function buildDetailedDayOnlySection(location, forecast, index, labelText) {
+function buildDetailedDayOnlySection(location, forecast, index, labelText, unit = "C") {
   const d = forecast.daily || {};
   const dateStr = d.time?.[index];
   const entries = getHourlyEntriesForDay(forecast, dateStr);
@@ -1322,9 +1412,9 @@ function buildDetailedDayOnlySection(location, forecast, index, labelText) {
     describeDetailedPeriodIntro(entries, location.timezone, false)
   ];
 
-  const wind = describeWindLine(entries, location.timezone, "day");
-  const high = describeDayTemperatureLine(forecast, index);
-  const windChill = describeDayWindChill(entries);
+  const wind = describeWindLine(entries, location.timezone, "day", unit);
+  const high = describeDayTemperatureLine(forecast, index, unit);
+  const windChill = describeDayWindChill(entries, unit);
   const uv = uvIndexPhrase(d.uv_index_max?.[index]);
 
   if (wind) parts.push(wind);
@@ -1335,7 +1425,7 @@ function buildDetailedDayOnlySection(location, forecast, index, labelText) {
   return parts.join(" ");
 }
 
-function buildDetailedNightOnlySection(location, forecast, index, labelText = "Night") {
+function buildDetailedNightOnlySection(location, forecast, index, labelText = "Night", unit = "C") {
   const entries = getNightEntriesForDayIndex(forecast, index, location.timezone);
 
   const parts = [
@@ -1343,9 +1433,9 @@ function buildDetailedNightOnlySection(location, forecast, index, labelText = "N
     describeDetailedPeriodIntro(entries, location.timezone, true)
   ];
 
-  const wind = describeWindLine(entries, location.timezone, "night");
-  const temp = describeNightTemperatureLine(forecast, index, entries);
-  const windChill = describeNightWindChill(entries);
+  const wind = describeWindLine(entries, location.timezone, "night", unit);
+  const temp = describeNightTemperatureLine(forecast, index, entries, unit);
+  const windChill = describeNightWindChill(entries, unit);
 
   if (wind) parts.push(wind);
   if (temp) parts.push(temp);
@@ -1354,35 +1444,30 @@ function buildDetailedNightOnlySection(location, forecast, index, labelText = "N
   return parts.join(" ");
 }
 
-function buildDetailedDaySection(location, forecast, index) {
+function buildDetailedDaySection(location, forecast, index, unit = "C") {
   const d = forecast.daily || {};
   const dateStr = d.time?.[index];
-  const label =
-    index === 0
-      ? `Today, ${fullDateLabel(dateStr, location.timezone)}`
-      : fullDateLabel(dateStr, location.timezone);
+  const label = index === 0 ? "Today" : dayName(dateStr, location.timezone);
 
-  return buildDetailedDayOnlySection(location, forecast, index, label);
+  return buildDetailedDayOnlySection(location, forecast, index, label, unit);
 }
 
-function buildRestOfTodaySection(location, forecast) {
+function buildRestOfTodaySection(location, forecast, unit = "C") {
   const d = forecast.daily || {};
-  const dateStr = d.time?.[0];
   const entries = getRemainingEntriesForToday(forecast, location.timezone);
-  const label = dateStr ? fullDateLabel(dateStr, location.timezone) : "Today";
 
   if (!entries.length) {
-    return buildDetailedNightOnlySection(location, forecast, 0, "Night");
+    return buildDetailedNightOnlySection(location, forecast, 0, "Tonight", unit);
   }
 
   const parts = [
-    `${label}.`,
+    `Today.`,
     describeDetailedPeriodIntro(entries, location.timezone, false)
   ];
 
-  const wind = describeWindLine(entries, location.timezone, "day");
-  const high = describeDayTemperatureLine(forecast, 0);
-  const windChill = describeDayWindChill(entries);
+  const wind = describeWindLine(entries, location.timezone, "day", unit);
+  const high = describeDayTemperatureLine(forecast, 0, unit);
+  const windChill = describeDayWindChill(entries, unit);
 
   if (wind) parts.push(wind);
   if (high) parts.push(high);
@@ -1391,29 +1476,27 @@ function buildRestOfTodaySection(location, forecast) {
   return parts.join(" ");
 }
 
-function buildDetailedNightSection(location, forecast, index) {
+function buildDetailedNightSection(location, forecast, index, unit = "C") {
   const d = forecast.daily || {};
   const dateStr = d.time?.[index];
-  const label =
-    index === 0
-      ? `Tonight, ${fullDateLabel(dateStr, location.timezone)}`
-      : `${fullDateLabel(dateStr, location.timezone)} night`;
+  const label = index === 0 ? "Tonight" : `${dayName(dateStr, location.timezone)} night`;
 
-  return buildDetailedNightOnlySection(location, forecast, index, label);
+  return buildDetailedNightOnlySection(location, forecast, index, label, unit);
 }
 
-function buildShortDaySection(location, forecast, index) {
+function buildShortDaySection(location, forecast, index, unit = "C") {
   const d = forecast.daily || {};
   const dateStr = d.time?.[index];
   const entries = getHourlyEntriesForDay(forecast, dateStr);
-  const label = fullDateLabel(dateStr, location.timezone);
+  const label = dayName(dateStr, location.timezone);
 
   return `${label}. ${describeSimplePeriodIntro(entries, false)} High ${formatForecastTempValue(
-    d.temperature_2m_max?.[index]
+    d.temperature_2m_max?.[index],
+    unit
   )}.`;
 }
 
-function buildShortNightSection(location, forecast, index, labelText = "Night") {
+function buildShortNightSection(location, forecast, index, labelText = "Night", unit = "C") {
   const d = forecast.daily || {};
   const entries = getNightEntriesForDayIndex(forecast, index, location.timezone);
 
@@ -1422,51 +1505,53 @@ function buildShortNightSection(location, forecast, index, labelText = "Night") 
   const lowValue = Number.isFinite(Number(nextDayMin)) ? nextDayMin : sameDayMin;
 
   return `${labelText}. ${describeSimplePeriodIntro(entries, true)} Low ${formatForecastTempValue(
-    lowValue
+    lowValue,
+    unit
   )}.`;
 }
 
-function dailyForecastSpeech(location, forecast, index) {
+function dailyForecastSpeech(location, forecast, index, unit = "C") {
   const d = forecast.daily || {};
   if (index < 0 || index >= (d.time || []).length) {
     return `That forecast day is not available for ${placeLabel(location)}.`;
   }
 
   if (index === 0) {
-    return buildDetailedDaySection(location, forecast, index);
+    return buildDetailedDaySection(location, forecast, index, unit);
   }
 
-  const daySection = buildDetailedDaySection(location, forecast, index);
-  const nightSection = buildDetailedNightSection(location, forecast, index);
+  const daySection = buildDetailedDaySection(location, forecast, index, unit);
+  const nightSection = buildDetailedNightSection(location, forecast, index, unit);
   return `${daySection} ${nightSection}`.trim();
 }
 
-function buildAll7DayEntry(location, forecast, index, includeNight = true, todayMode = "full") {
+function buildAll7DayEntry(location, forecast, index, includeNight = true, todayMode = "full", unit = "C") {
   const d = forecast.daily || {};
   const dateStr = d.time?.[index];
-  const label = fullDateLabel(dateStr, location.timezone);
+  const dayLabel = index === 0 ? "Today" : dayName(dateStr, location.timezone);
+  const nightLabel = index === 0 ? "Tonight" : `${dayName(dateStr, location.timezone)} night`;
   const parts = [];
 
   if (index === 0 && todayMode === "remaining") {
-    parts.push(buildRestOfTodaySection(location, forecast));
+    parts.push(buildRestOfTodaySection(location, forecast, unit));
   } else if (index <= 1) {
-    parts.push(buildDetailedDayOnlySection(location, forecast, index, label));
+    parts.push(buildDetailedDayOnlySection(location, forecast, index, dayLabel, unit));
   } else {
-    parts.push(buildShortDaySection(location, forecast, index));
+    parts.push(buildShortDaySection(location, forecast, index, unit));
   }
 
   if (includeNight) {
     if (index <= 1) {
-      parts.push(buildDetailedNightOnlySection(location, forecast, index, "Night"));
+      parts.push(buildDetailedNightOnlySection(location, forecast, index, nightLabel, unit));
     } else {
-      parts.push(buildShortNightSection(location, forecast, index, "Night"));
+      parts.push(buildShortNightSection(location, forecast, index, nightLabel, unit));
     }
   }
 
   return parts.join(" ");
 }
 
-function sevenDayForecastSpeech(location, forecast) {
+function sevenDayForecastSpeech(location, forecast, unit = "C") {
   const d = forecast.daily || {};
   const count = Math.min(7, (d.time || []).length);
   const parts = [
@@ -1479,34 +1564,34 @@ function sevenDayForecastSpeech(location, forecast) {
 
   if (count > 0) {
     parts.push(
-      buildAll7DayEntry(location, forecast, 0, true, nowHour < 12 ? "full" : "remaining")
+      buildAll7DayEntry(location, forecast, 0, true, nowHour < 12 ? "full" : "remaining", unit)
     );
   }
 
   for (let i = 1; i < count; i++) {
-    parts.push(buildAll7DayEntry(location, forecast, i, true, "full"));
+    parts.push(buildAll7DayEntry(location, forecast, i, true, "full", unit));
   }
 
   return parts.join(" ");
 }
 
-async function buildPlaybackSpeech(location, forecast, playback) {
+async function buildPlaybackSpeech(location, forecast, playback, unit = "C") {
   if (!playback || !playback.type) return "";
 
   if (playback.type === "current") {
-    return currentWeatherSpeech(location, forecast);
+    return currentWeatherSpeech(location, forecast, unit);
   }
 
   if (playback.type === "hourly") {
-    return nextHoursSpeech(location, forecast, playback.hours || 6);
+    return nextHoursSpeech(location, forecast, playback.hours || 6, unit);
   }
 
   if (playback.type === "daily") {
-    return dailyForecastSpeech(location, forecast, playback.index);
+    return dailyForecastSpeech(location, forecast, playback.index, unit);
   }
 
   if (playback.type === "all7") {
-    return sevenDayForecastSpeech(location, forecast);
+    return sevenDayForecastSpeech(location, forecast, unit);
   }
 
   return "";
@@ -1761,6 +1846,10 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
     return locationMenuTwiml();
   }
 
+  if (state === "us-location-menu") {
+    return usLocationMenuTwiml();
+  }
+
   if (state === "main-menu") {
     const twiml = new VoiceResponse();
     await buildMainMenuResponse(req, twiml);
@@ -1790,7 +1879,7 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
     }
 
     const forecast = await fetchForecast(location);
-    const speech = await buildPlaybackSpeech(location, forecast, lastPlayback);
+    const speech = await buildPlaybackSpeech(location, forecast, lastPlayback, getUnitPreference(req));
 
     if (!speech) {
       say(twiml, "There is nothing to repeat yet.");
@@ -1802,7 +1891,7 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
   }
 
   if (state === "after-prompt") {
-    return afterActionTwiml();
+    return afterActionTwiml(getUnitPreference(req));
   }
 
   if (state === "voicemail") {
@@ -1844,6 +1933,7 @@ app.post("/voice", async (req, res) => {
 
   try {
     clearCallState(req);
+    setUnitPreference(req, "C");
 
     const greeting = getGreetingForTime("America/Toronto");
 
@@ -1895,6 +1985,11 @@ app.post("/location-menu-prompt", async (req, res) => {
   res.type("text/xml").send(twiml.toString());
 });
 
+app.post("/us-location-menu-prompt", async (req, res) => {
+  const twiml = await buildStateTwiml(req, "us-location-menu");
+  res.type("text/xml").send(twiml.toString());
+});
+
 app.post("/set-location-choice", async (req, res) => {
   const twiml = new VoiceResponse();
 
@@ -1912,6 +2007,11 @@ app.post("/set-location-choice", async (req, res) => {
     return res.type("text/xml").send(voiceTwiml.toString());
   }
 
+  if (choice === "4") {
+    const usTwiml = await buildStateTwiml(req, "us-location-menu");
+    return res.type("text/xml").send(usTwiml.toString());
+  }
+
   if (!choice || !PRESET_LOCATIONS[choice]) {
     say(twiml, "I did not understand that location choice.");
     const menuTwiml = await buildStateTwiml(req, "location-menu");
@@ -1919,6 +2019,36 @@ app.post("/set-location-choice", async (req, res) => {
   }
 
   const preset = PRESET_LOCATIONS[choice];
+  saveTemporaryLocationForCall(req, preset);
+  clearPendingLocationChoice(req);
+
+  pushMenuHistory(req, "main-menu");
+  setMenuState(req, "main-menu");
+
+  say(twiml, `${preset.label}.`);
+  buildMainMenuInto(twiml, preset.label);
+  return res.type("text/xml").send(twiml.toString());
+});
+
+app.post("/set-us-location-choice", async (req, res) => {
+  const twiml = new VoiceResponse();
+
+  if (isBackKey(req)) {
+    const backTwiml = await goBackOneMenu(req);
+    return res.type("text/xml").send(backTwiml.toString());
+  }
+
+  const choice = parseUSLocationChoice(req);
+
+  console.log("SET-US-LOCATION-CHOICE choice:", choice, "digits:", getDigits(req));
+
+  if (!choice || !US_LOCATIONS[choice]) {
+    say(twiml, "I did not understand that location choice.");
+    const menuTwiml = await buildStateTwiml(req, "us-location-menu");
+    return res.type("text/xml").send(menuTwiml.toString());
+  }
+
+  const preset = US_LOCATIONS[choice];
   saveTemporaryLocationForCall(req, preset);
   clearPendingLocationChoice(req);
 
@@ -2030,7 +2160,7 @@ app.post("/forecast-day", async (req, res) => {
   }
 
   try {
-    const forecast = await fetchForecast(location);
+    await fetchForecast(location);
     const selected = parseForecastDayChoice(req);
 
     if (selected === "all") {
@@ -2090,6 +2220,12 @@ app.post("/after", async (req, res) => {
   }
 
   if (choice === "#") {
+    const playbackTwiml = await buildStateTwiml(req, "playback");
+    return res.type("text/xml").send(playbackTwiml.toString());
+  }
+
+  if (choice === "7") {
+    toggleUnitPreference(req);
     const playbackTwiml = await buildStateTwiml(req, "playback");
     return res.type("text/xml").send(playbackTwiml.toString());
   }
