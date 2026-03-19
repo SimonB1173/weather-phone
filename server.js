@@ -1,4 +1,4 @@
-const express = require("express");
+	const express = require("express");
 const axios = require("axios");
 const twilio = require("twilio");
 const fs = require("fs");
@@ -1929,11 +1929,7 @@ async function fetchEnvironmentCanadaCurrent(location) {
         .trim();
     }
 
-    // Narrow to Current Conditions area first
-    const currentBlockMatch = html.match(
-      /Current Conditions([\s\S]*?)Forecast issued:/i
-    );
-
+    const currentBlockMatch = html.match(/Current Conditions([\s\S]*?)Forecast issued:/i);
     const block = currentBlockMatch ? currentBlockMatch[1] : html;
     const text = clean(block);
 
