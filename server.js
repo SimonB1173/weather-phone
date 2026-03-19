@@ -2057,9 +2057,8 @@ app.post("/voice", async (req, res) => {
     twiml.say(
       SAY_OPTIONS,
       `${greeting}, welcome to Weather Line. ` +
-        `We are continuing to improve the service and add new features. ` +
-        `Thank you to everyone in the community who has been leaving helpful suggestions by voicemail. ` +
-        `Press 9 to leave a comment or suggestion.`
+        `We are continuously improving our system, with many exciting new features coming in the coming days. ` +
+        `you are weclome to leave comments or ideas for improment by pressing number 9.`
     );
 
     twiml.redirect({ method: "POST" }, "/location-menu-prompt");
