@@ -95,7 +95,7 @@ const PRESET_LOCATIONS = {
 const US_LOCATIONS = {
   "1": PRESET_LOCATIONS["4"], // Brooklyn
   "2": PRESET_LOCATIONS["6"], // Monroe
-  "3": PRESET_LOCATIONS["5"]  // Monsey
+  "3": PRESET_LOCATIONS["5"] // Monsey
 };
 
 function gatherOptions(action, timeout = 8, numDigits = 1) {
@@ -360,12 +360,6 @@ function fullDateLabel(iso, tz) {
   });
 }
 
-/**
- * IMPORTANT FIX:
- * Open-Meteo forecast/current timestamps like "2026-03-18T21:00" are local wall-clock
- * timestamps for the requested forecast timezone. Do NOT pass them through new Date()
- * to decide local hour/daypart, because that can reinterpret them in the server timezone.
- */
 function getDatePartFromLocalIso(iso) {
   return String(iso || "").slice(0, 10);
 }
@@ -862,6 +856,21 @@ function degreesToCompass(deg) {
   return directions[index];
 }
 
+function compassLettersToWords(direction) {
+  const map = {
+    N: "north",
+    NE: "northeast",
+    E: "east",
+    SE: "southeast",
+    S: "south",
+    SW: "southwest",
+    W: "west",
+    NW: "northwest"
+  };
+
+  return map[String(direction || "").toUpperCase()] || String(direction || "").toLowerCase();
+}
+
 function average(values) {
   const nums = values.map(Number).filter((v) => Number.isFinite(v));
   if (!nums.length) return 0;
@@ -1132,14 +1141,94 @@ function describeTransitionSentence(entries, timezone, isNight = false) {
   return "";
 }
 
+async function fetchEnvironmentCanadaCurrent(location) {
+  if (!location || location.country !== "CA") {
+    return null;
+  }
+
+  const coords = `${Number(location.latitude).toFixed(3)},${Number(location.longitude).toFixed(3)}`;
+  const url = `https://weather.gc.ca/en/location/index.html?coords=${encodeURIComponent(coords)}`;
+
+  try {
+    const response = await axios.get(url, {
+      timeout: 10000,
+      headers: {
+        "User-Agent": "weather-line-canada-current/1.0"
+      }
+    });
+
+    const html = String(response.data || "");
+
+    function clean(text) {
+      return String(text || "")
+        .replace(/<[^>]+>/g, " ")
+        .replace(/&nbsp;/g, " ")
+        .replace(/&amp;/g, "&")
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/\s+/g, " ")
+        .trim();
+    }
+
+    function match(regex) {
+      const m = html.match(regex);
+      return m ? clean(m[1]) : "";
+    }
+
+    const observedAt = match(/Observed at:\s*([^<\n]+(?:<[^>]+>[^<\n]+)*)/i);
+    const dateText = match(/Date:\s*([^<\n]+(?:<[^>]+>[^<\n]+)*)/i);
+    const condition = match(/Condition:\s*([^<\n]+(?:<[^>]+>[^<\n]+)*)/i);
+    const temperatureText = match(/Temperature:\s*([\-0-9.]+)\s*°C/i);
+    const windText = match(/Wind:\s*([^<\n]+(?:<[^>]+>[^<\n]+)*)/i);
+    const windChillText = match(/Wind Chill[^:]*:\s*([\-0-9.]+)/i);
+    const visibilityText = match(/Visibility:\s*([\-0-9.]+)\s*km/i);
+
+    const temperatureC = temperatureText ? Number(temperatureText) : null;
+    const windChillC = windChillText ? Number(windChillText) : null;
+    const visibilityKm = visibilityText ? Number(visibilityText) : null;
+
+    let windDirection = "";
+    let windSpeedKmh = null;
+
+    if (windText) {
+      const windMatch = windText.match(/^([A-Z]{1,3})\s+([0-9.]+)/i);
+      if (windMatch) {
+        windDirection = String(windMatch[1] || "").toUpperCase();
+        windSpeedKmh = Number(windMatch[2]);
+      }
+    }
+
+    if (!condition && temperatureC === null) {
+      return null;
+    }
+
+    return {
+      source: "environment-canada",
+      observedAt,
+      dateText,
+      condition,
+      temperatureC,
+      windDirection,
+      windSpeedKmh,
+      windChillC,
+      visibilityKm
+    };
+  } catch (error) {
+    console.error("Environment Canada current fetch failed:", error.message);
+    return null;
+  }
+}
+
 function currentWeatherSpeech(location, forecast, unit = "C", canadaCurrent = null) {
   if (location?.country === "CA" && canadaCurrent) {
-    const parts = [
-      `Current weather for ${placeLabel(location)}.`
-    ];
+    const parts = [`Current weather for ${placeLabel(location)}.`];
 
     if (canadaCurrent.dateText) {
       parts.push(`Observed at ${canadaCurrent.dateText}.`);
+    } else if (canadaCurrent.observedAt) {
+      parts.push(`Observed at ${canadaCurrent.observedAt}.`);
     }
 
     if (canadaCurrent.condition) {
@@ -1167,7 +1256,6 @@ function currentWeatherSpeech(location, forecast, unit = "C", canadaCurrent = nu
     ) {
       const speed = Math.round(speedValueForUnit(canadaCurrent.windSpeedKmh, unit));
       const dir = compassLettersToWords(canadaCurrent.windDirection);
-
       parts.push(`Wind ${dir} ${speed} ${speedUnitLabel(unit)}.`);
     }
 
@@ -1742,8 +1830,7 @@ function buildAll7DayEntry(location, forecast, index, includeNight = true, today
 
   if (includeNight) {
     if (index === 0 && todayMode === "remaining") {
-      // Fix: when "Today" is already built from the remaining-hours path,
-      // do not append "Tonight" again for index 0.
+      // do not append tonight again
     } else if (index <= 1) {
       parts.push(buildDetailedNightOnlySection(location, forecast, index, nightLabel, unit));
     } else {
@@ -1892,102 +1979,6 @@ async function fetchCanadianAlert(location) {
     return null;
   }
 }
-
-async function fetchEnvironmentCanadaCurrent(location) {
-  if (!location || location.country !== "CA") {
-    return null;
-  }
-
-  const coords = `${Number(location.latitude).toFixed(3)},${Number(location.longitude).toFixed(3)}`;
-  const url = `https://weather.gc.ca/en/location/index.html?coords=${encodeURIComponent(coords)}`;
-
-  try {
-    const response = await axios.get(url, {
-      timeout: 10000,
-      headers: {
-        "User-Agent": "weather-line-canada-current/1.0"
-      }
-    });
-
-    const html = String(response.data || "");
-
-    function clean(text) {
-      return String(text || "")
-        .replace(/<[^>]+>/g, " ")
-        .replace(/&nbsp;/g, " ")
-        .replace(/&amp;/g, "&")
-        .replace(/&quot;/g, '"')
-        .replace(/&#39;/g, "'")
-        .replace(/&lt;/g, "<")
-        .replace(/&gt;/g, ">")
-        .replace(/\s+/g, " ")
-        .trim();
-    }
-
-    function match(regex) {
-      const m = html.match(regex);
-      return m ? clean(m[1]) : "";
-    }
-
-    const observedAt = match(/Observed at:\s*([^<\n]+(?:<[^>]+>[^<\n]+)*)/i);
-    const dateText = match(/Date:\s*([^<\n]+(?:<[^>]+>[^<\n]+)*)/i);
-    const condition = match(/Condition:\s*([^<\n]+(?:<[^>]+>[^<\n]+)*)/i);
-    const temperatureText = match(/Temperature:\s*([\-0-9.]+)\s*°C/i);
-    const windText = match(/Wind:\s*([^<\n]+(?:<[^>]+>[^<\n]+)*)/i);
-    const windChillText = match(/Wind Chill[^:]*:\s*([\-0-9.]+)/i);
-    const visibilityText = match(/Visibility:\s*([\-0-9.]+)\s*km/i);
-
-    const temperatureC = temperatureText ? Number(temperatureText) : null;
-    const windChillC = windChillText ? Number(windChillText) : null;
-    const visibilityKm = visibilityText ? Number(visibilityText) : null;
-
-    let windDirection = "";
-    let windSpeedKmh = null;
-
-    if (windText) {
-      const windMatch = windText.match(/^([A-Z]{1,3})\s+([0-9.]+)/i);
-      if (windMatch) {
-        windDirection = String(windMatch[1] || "").toUpperCase();
-        windSpeedKmh = Number(windMatch[2]);
-      }
-    }
-
-    if (!condition && temperatureC === null) {
-      return null;
-    }
-
-    return {
-      source: "environment-canada",
-      observedAt,
-      dateText,
-      condition,
-      temperatureC,
-      windDirection,
-      windSpeedKmh,
-      windChillC,
-      visibilityKm
-    };
-  } catch (error) {
-    console.error("Environment Canada current fetch failed:", error.message);
-    return null;
-  }
-}
-
-function compassLettersToWords(direction) {
-  const map = {
-    N: "north",
-    NE: "northeast",
-    E: "east",
-    SE: "southeast",
-    S: "south",
-    SW: "southwest",
-    W: "west",
-    NW: "northwest"
-  };
-
-  return map[String(direction || "").toUpperCase()] || String(direction || "").toLowerCase();
-}
-
 
 function buildCanadianAlertSpeech(location, alert) {
   if (!location || !alert) return "";
@@ -2188,7 +2179,12 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
     }
 
     const forecast = await fetchForecast(location);
-    const speech = await buildPlaybackSpeech(location, forecast, lastPlayback, getUnitPreference(req));
+    const speech = await buildPlaybackSpeech(
+      location,
+      forecast,
+      lastPlayback,
+      getUnitPreference(req)
+    );
 
     if (!speech) {
       say(twiml, "There is nothing to repeat yet.");
