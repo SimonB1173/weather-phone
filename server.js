@@ -360,6 +360,12 @@ function fullDateLabel(iso, tz) {
   });
 }
 
+/**
+ * IMPORTANT FIX:
+ * Open-Meteo forecast/current timestamps like "2026-03-18T21:00" are local wall-clock
+ * timestamps for the requested forecast timezone. Do NOT pass them through new Date()
+ * to decide local hour/daypart, because that can reinterpret them in the server timezone.
+ */
 function getDatePartFromLocalIso(iso) {
   return String(iso || "").slice(0, 10);
 }
@@ -1126,19 +1132,51 @@ function describeTransitionSentence(entries, timezone, isNight = false) {
   return "";
 }
 
-function currentWeatherSpeech(location, forecast, unit = "C") {
+function currentWeatherSpeech(location, forecast, unit = "C", canadaCurrent = null) {
+  if (location?.country === "CA" && canadaCurrent) {
+    const parts = [
+      `Current weather for ${placeLabel(location)}.`
+    ];
+
+    if (canadaCurrent.dateText) {
+      parts.push(`Observed at ${canadaCurrent.dateText}.`);
+    }
+
+    if (canadaCurrent.condition) {
+      parts.push(`It is ${String(canadaCurrent.condition).toLowerCase()}.`);
+    }
+
+    if (canadaCurrent.temperatureC !== null && Number.isFinite(canadaCurrent.temperatureC)) {
+      parts.push(`Temperature ${formatSignedTemp(canadaCurrent.temperatureC, unit)} degrees.`);
+    }
+
+    if (
+      canadaCurrent.windChillC !== null &&
+      Number.isFinite(canadaCurrent.windChillC) &&
+      canadaCurrent.temperatureC !== null &&
+      Math.round(tempValueForUnit(canadaCurrent.windChillC, unit)) !==
+        Math.round(tempValueForUnit(canadaCurrent.temperatureC, unit))
+    ) {
+      parts.push(`Wind chill ${formatSignedTemp(canadaCurrent.windChillC, unit)}.`);
+    }
+
+    if (
+      canadaCurrent.windSpeedKmh !== null &&
+      Number.isFinite(canadaCurrent.windSpeedKmh) &&
+      canadaCurrent.windSpeedKmh > 0
+    ) {
+      const speed = Math.round(speedValueForUnit(canadaCurrent.windSpeedKmh, unit));
+      const dir = compassLettersToWords(canadaCurrent.windDirection);
+
+      parts.push(`Wind ${dir} ${speed} ${speedUnitLabel(unit)}.`);
+    }
+
+    return parts.join(" ");
+  }
+
   const c = forecast.current || {};
-
-  console.log("LIVE CURRENT DATA", {
-    weather_code: c.weather_code,
-    snowfall: c.snowfall,
-    rain: c.rain,
-    showers: c.showers,
-    temperature_2m: c.temperature_2m
-  });
-
   const parts = [
-    `Current weather test version for ${placeLabel(location)}.`,
+    `Current weather for ${placeLabel(location)}.`,
     `Retrieved at ${retrievedTimeLabelNow(location.timezone)}.`,
     `${describeCurrentWeatherSentence(c, location.timezone)}.`,
     `Temperature ${formatSignedTemp(c.temperature_2m, unit)} degrees.`
@@ -1370,8 +1408,6 @@ function nextHoursSpeech(location, forecast, hours = 6, unit = "C") {
     }
     if (items.length >= hours) break;
   }
-
-  console.log("LIVE HOURLY SAMPLE", items.slice(0, 3));
 
   if (!items.length) {
     return `I could not find future hourly forecast data for ${placeLabel(location)}.`;
@@ -1706,7 +1742,8 @@ function buildAll7DayEntry(location, forecast, index, includeNight = true, today
 
   if (includeNight) {
     if (index === 0 && todayMode === "remaining") {
-      // do not append tonight again
+      // Fix: when "Today" is already built from the remaining-hours path,
+      // do not append "Tonight" again for index 0.
     } else if (index <= 1) {
       parts.push(buildDetailedNightOnlySection(location, forecast, index, nightLabel, unit));
     } else {
@@ -1745,7 +1782,13 @@ async function buildPlaybackSpeech(location, forecast, playback, unit = "C") {
   if (!playback || !playback.type) return "";
 
   if (playback.type === "current") {
-    return currentWeatherSpeech(location, forecast, unit);
+    let canadaCurrent = null;
+
+    if (location?.country === "CA") {
+      canadaCurrent = await fetchEnvironmentCanadaCurrent(location);
+    }
+
+    return currentWeatherSpeech(location, forecast, unit, canadaCurrent);
   }
 
   if (playback.type === "hourly") {
@@ -1849,6 +1892,102 @@ async function fetchCanadianAlert(location) {
     return null;
   }
 }
+
+async function fetchEnvironmentCanadaCurrent(location) {
+  if (!location || location.country !== "CA") {
+    return null;
+  }
+
+  const coords = `${Number(location.latitude).toFixed(3)},${Number(location.longitude).toFixed(3)}`;
+  const url = `https://weather.gc.ca/en/location/index.html?coords=${encodeURIComponent(coords)}`;
+
+  try {
+    const response = await axios.get(url, {
+      timeout: 10000,
+      headers: {
+        "User-Agent": "weather-line-canada-current/1.0"
+      }
+    });
+
+    const html = String(response.data || "");
+
+    function clean(text) {
+      return String(text || "")
+        .replace(/<[^>]+>/g, " ")
+        .replace(/&nbsp;/g, " ")
+        .replace(/&amp;/g, "&")
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/\s+/g, " ")
+        .trim();
+    }
+
+    function match(regex) {
+      const m = html.match(regex);
+      return m ? clean(m[1]) : "";
+    }
+
+    const observedAt = match(/Observed at:\s*([^<\n]+(?:<[^>]+>[^<\n]+)*)/i);
+    const dateText = match(/Date:\s*([^<\n]+(?:<[^>]+>[^<\n]+)*)/i);
+    const condition = match(/Condition:\s*([^<\n]+(?:<[^>]+>[^<\n]+)*)/i);
+    const temperatureText = match(/Temperature:\s*([\-0-9.]+)\s*°C/i);
+    const windText = match(/Wind:\s*([^<\n]+(?:<[^>]+>[^<\n]+)*)/i);
+    const windChillText = match(/Wind Chill[^:]*:\s*([\-0-9.]+)/i);
+    const visibilityText = match(/Visibility:\s*([\-0-9.]+)\s*km/i);
+
+    const temperatureC = temperatureText ? Number(temperatureText) : null;
+    const windChillC = windChillText ? Number(windChillText) : null;
+    const visibilityKm = visibilityText ? Number(visibilityText) : null;
+
+    let windDirection = "";
+    let windSpeedKmh = null;
+
+    if (windText) {
+      const windMatch = windText.match(/^([A-Z]{1,3})\s+([0-9.]+)/i);
+      if (windMatch) {
+        windDirection = String(windMatch[1] || "").toUpperCase();
+        windSpeedKmh = Number(windMatch[2]);
+      }
+    }
+
+    if (!condition && temperatureC === null) {
+      return null;
+    }
+
+    return {
+      source: "environment-canada",
+      observedAt,
+      dateText,
+      condition,
+      temperatureC,
+      windDirection,
+      windSpeedKmh,
+      windChillC,
+      visibilityKm
+    };
+  } catch (error) {
+    console.error("Environment Canada current fetch failed:", error.message);
+    return null;
+  }
+}
+
+function compassLettersToWords(direction) {
+  const map = {
+    N: "north",
+    NE: "northeast",
+    E: "east",
+    SE: "southeast",
+    S: "south",
+    SW: "southwest",
+    W: "west",
+    NW: "northwest"
+  };
+
+  return map[String(direction || "").toUpperCase()] || String(direction || "").toLowerCase();
+}
+
 
 function buildCanadianAlertSpeech(location, alert) {
   if (!location || !alert) return "";
