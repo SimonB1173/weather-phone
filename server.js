@@ -553,7 +553,7 @@ function buildMainMenuInto(twiml, activeLocationName) {
 
   say(
     gather,
-    `${activeLocationName}. Press 1 for the 7 day forecast. Press 2 for hourly forecast. Press 3 for current weather. Press 5 to change location.`
+    `${activeLocationName}. Press 1 for the 7 day forecast. Press 2 for hourly forecast. Press 3 for current weather.`
   );
 
   twiml.redirect({ method: "POST" }, "/main-menu");
@@ -2004,7 +2004,13 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
 }
 
 async function goBackOneMenu(req) {
+  const currentState = getMenuState(req);
   const history = getMenuHistory(req);
+
+  if (currentState === "playback" || currentState === "after-prompt") {
+    const previousTrackedState = history[history.length - 1] || "location-menu";
+    return buildStateTwiml(req, previousTrackedState, { push: false });
+  }
 
   if (history.length <= 1) {
     return buildStateTwiml(req, "location-menu", { push: false });
@@ -2197,11 +2203,6 @@ app.post("/menu", async (req, res) => {
   if (isBackKey(req)) {
     twiml.redirect({ method: "POST" }, "/location-menu-prompt");
     return res.type("text/xml").send(twiml.toString());
-  }
-
-  if (choice === "5") {
-    const locationTwiml = await buildStateTwiml(req, "location-menu");
-    return res.type("text/xml").send(locationTwiml.toString());
   }
 
   if (!location) {
