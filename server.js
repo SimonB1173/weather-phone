@@ -1941,7 +1941,7 @@ async function fetchEnvironmentCanadaCurrent(location) {
     const observedAt = pick(/Observed at:\s*(.*?)\s*Date:/i);
     const dateText = pick(/Date:\s*(.*?)\s*Condition:/i);
     const condition = pick(/Condition:\s*(.*?)\s*(Pressure:|Temperature:)/i);
-    const temperatureText = pick(/Temperature:\s*([\-0-9.]+)\s*°C/i);
+    const temperatureText = pick(/Temperature:\s*([\-0-9.]+)\s*°\s*C/i);
     const windText = pick(/Wind:\s*([A-Z]{1,3}\s+[0-9.]+\s+km\/h|Calm)/i);
     const windChillText = pick(/Wind Chill[^:]*:\s*([\-0-9.]+)/i);
 
