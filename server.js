@@ -788,8 +788,33 @@ function weatherCodeToOfficialPhrase(code, cloudCoverLike = 60, isNight = false)
   return isNight ? cloudCoverNightPhrase(cloudCoverLike) : cloudCoverToPhrase(cloudCoverLike);
 }
 
+/* FIXED:
+   Prefer actual current precipitation fields over generic weather_code/cloud wording.
+   This applies to all locations because it changes shared logic only. */
 function describeCurrentCondition(current, timezone) {
   const isNight = current?.time ? isNightHourFromIso(current.time, timezone) : false;
+
+  const snow = Number(current?.snowfall || 0);
+  const rain = Number(current?.rain || 0);
+  const showers = Number(current?.showers || 0);
+  const totalLiquid = rain + showers;
+  const code = Number(current?.weather_code);
+
+  if (snow > 0) {
+    if (snow >= 1.0) return "snow";
+    return "light snow";
+  }
+
+  if (totalLiquid > 0) {
+    if ([80, 81, 82].includes(code)) {
+      if (totalLiquid >= 1.5) return "showers";
+      return "light showers";
+    }
+
+    if (totalLiquid >= 1.5) return "rain";
+    return "light rain";
+  }
+
   return weatherCodeToOfficialPhrase(current.weather_code, current.cloud_cover, isNight);
 }
 
@@ -1006,31 +1031,38 @@ function getPeriodTimingWord(entries, timezone, type = "day") {
   return "later in the day";
 }
 
+/* FIXED:
+   Lower thresholds and also respect snow/rain-related weather codes,
+   so light precip is not hidden in summaries. */
 function precipitationTypeFromEntries(entries) {
-  const totalSnow = entries.reduce((sum, e) => sum + Number(e.snowfall || 0), 0);
+  const totalSnow = entries.reduce((sum, e) => sum + Number(e.snowfall || e.snow || 0), 0);
   const totalRain = entries.reduce(
     (sum, e) => sum + Number(e.rain || 0) + Number(e.showers || 0),
     0
   );
-  const maxChance = maxValue(entries.map((e) => e.precipitationProbability));
+  const maxChance = maxValue(
+    entries.map((e) => e.precipitationProbability ?? e.rainChance ?? 0)
+  );
   const hasStorm = entries.some((e) => [95, 96, 99].includes(Number(e.weatherCode)));
+  const hasSnowCode = entries.some((e) =>
+    [71, 73, 75, 77, 85, 86].includes(Number(e.weatherCode))
+  );
+  const hasRainCode = entries.some((e) =>
+    [51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82].includes(Number(e.weatherCode))
+  );
 
   if (hasStorm) return "thunderstorms";
-  if (totalSnow > 0.2 && totalRain > 0.15) return "flurries or rain showers";
-  if (totalSnow > 0.2) return "flurries";
-  if (totalRain > 0.2) return "rain showers";
 
-  if (maxChance >= 50) {
-    const snowCodes = entries.some((e) =>
-      [71, 73, 75, 77, 85, 86].includes(Number(e.weatherCode))
-    );
-    const rainCodes = entries.some((e) =>
-      [51, 53, 55, 61, 63, 65, 80, 81, 82].includes(Number(e.weatherCode))
-    );
+  if ((totalSnow > 0.02 || hasSnowCode) && (totalRain > 0.05 || hasRainCode)) {
+    return "flurries or rain showers";
+  }
 
-    if (snowCodes && rainCodes) return "flurries or rain showers";
-    if (snowCodes) return "flurries";
-    if (rainCodes) return "rain showers";
+  if (totalSnow > 0.02 || hasSnowCode) {
+    return totalSnow >= 1.0 ? "snow" : "flurries";
+  }
+
+  if (totalRain > 0.05 || (maxChance >= 35 && hasRainCode)) {
+    return totalRain >= 1.5 ? "rain showers" : "light rain";
   }
 
   return "";
@@ -1147,6 +1179,9 @@ function currentWeatherSpeech(location, forecast, unit = "C") {
   return parts.join(" ");
 }
 
+/* FIXED:
+   Prefer active precip over generic sky wording when grouping hourly blocks,
+   so the block won't be labeled just "cloudy" if snow/rain is actually happening. */
 function classifyHourlyBucket(item, tz = "UTC") {
   const code = Number(item.code);
   const rainAmount = Number(item.rain || 0) + Number(item.showers || 0);
@@ -1155,14 +1190,28 @@ function classifyHourlyBucket(item, tz = "UTC") {
   const precipChance = Number(item.rainChance || 0);
   const isNight = isNightHourFromIso(item.time, tz);
 
-  const condition = weatherCodeToText(code, isNight);
+  let condition = weatherCodeToText(code, isNight);
+
+  if (snowAmount > 0) {
+    condition = snowAmount >= 1.0 ? "snow" : "light snow";
+  } else if (rainAmount > 0) {
+    if ([80, 81, 82].includes(code)) {
+      condition = rainAmount >= 1.5 ? "showers" : "light showers";
+    } else {
+      condition = rainAmount >= 1.5 ? "rain" : "light rain";
+    }
+  }
 
   let precipTag = "dry";
   if ([95, 96, 99].includes(code)) {
     precipTag = "storm";
-  } else if (snowAmount > 0) {
-    precipTag = snowAmount >= 0.8 ? "snow" : "light-snow";
-  } else if (rainAmount > 0 || precipChance >= 35) {
+  } else if (snowAmount > 0.02 || [71, 73, 75, 77, 85, 86].includes(code)) {
+    precipTag = snowAmount >= 1.0 ? "snow" : "light-snow";
+  } else if (
+    rainAmount > 0.05 ||
+    precipChance >= 35 ||
+    [51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82].includes(code)
+  ) {
     precipTag = rainAmount >= 1.5 ? "rain" : "light-rain";
   }
 
@@ -1175,6 +1224,9 @@ function classifyHourlyBucket(item, tz = "UTC") {
   return `${condition}|${precipTag}|${windTag}|${tempBand}`;
 }
 
+/* FIXED:
+   Build hourly speech from the whole block, not just the first hour,
+   and don't say "chance" when active snow/rain already exists in the block. */
 function summarizeHourlyBlock(block, tz, unit = "C") {
   const first = block.items[0];
   const start = timeLabel(block.start, tz);
@@ -1199,10 +1251,31 @@ function summarizeHourlyBlock(block, tz, unit = "C") {
   const totalSnow = block.items.reduce((sum, x) => sum + Number(x.snow || 0), 0);
 
   const isNight = isNightHourFromIso(first.time, tz);
-  const condition = weatherCodeToText(first.code, isNight);
+
+  const precipSummary = precipitationTypeFromEntries(
+    block.items.map((x) => ({
+      snowfall: x.snow,
+      rain: x.rain,
+      showers: x.showers,
+      precipitationProbability: x.rainChance,
+      weatherCode: x.code
+    }))
+  );
+
+  let spokenCondition = weatherCodeToText(first.code, isNight);
+
+  if (precipSummary === "flurries") spokenCondition = "flurries";
+  else if (precipSummary === "snow") spokenCondition = "snow";
+  else if (precipSummary === "light rain") spokenCondition = "light rain";
+  else if (precipSummary === "rain showers") spokenCondition = "showers";
+  else if (precipSummary === "flurries or rain showers") {
+    spokenCondition = "a mix of flurries and showers";
+  } else if (precipSummary === "thunderstorms") {
+    spokenCondition = "thunderstorms";
+  }
 
   const parts = [
-    `From ${start} until ${end}, ${condition}, around ${avgTemp} degrees.`
+    `From ${start} until ${end}, ${spokenCondition}, around ${avgTemp} degrees.`
   ];
 
   if (Math.abs(avgAppTemp - avgTemp) >= 3) {
@@ -1213,20 +1286,18 @@ function summarizeHourlyBlock(block, tz, unit = "C") {
     }
   }
 
-  if (maxRainChance >= 45) {
+  if (maxRainChance >= 45 && totalRain <= 0.05 && totalSnow <= 0.02 && !precipSummary) {
     parts.push(`${Math.round(maxRainChance)} percent chance of precipitation.`);
   }
 
-  if (totalRain > 0) {
+  if (totalRain > 0.05) {
     if (totalRain >= 3) parts.push("Rain at times.");
-    else if (totalRain >= 1) parts.push("A few showers.");
-    else parts.push("A slight chance of rain.");
+    else parts.push("Light rain or a few showers.");
   }
 
-  if (totalSnow > 0) {
+  if (totalSnow > 0.02) {
     if (totalSnow >= 2) parts.push("Snow at times.");
-    else if (totalSnow >= 0.8) parts.push("Some flurries.");
-    else parts.push("A slight chance of flurries.");
+    else parts.push("Light snow or flurries.");
   }
 
   if (maxWind >= (unit === "F" ? 22 : 35) || maxGust >= (unit === "F" ? 34 : 55)) {
