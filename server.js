@@ -856,21 +856,6 @@ function degreesToCompass(deg) {
   return directions[index];
 }
 
-function compassLettersToWords(direction) {
-  const map = {
-    N: "north",
-    NE: "northeast",
-    E: "east",
-    SE: "southeast",
-    S: "south",
-    SW: "southwest",
-    W: "west",
-    NW: "northwest"
-  };
-
-  return map[String(direction || "").toUpperCase()] || String(direction || "").toLowerCase();
-}
-
 function average(values) {
   const nums = values.map(Number).filter((v) => Number.isFinite(v));
   if (!nums.length) return 0;
@@ -1141,82 +1126,168 @@ function describeTransitionSentence(entries, timezone, isNight = false) {
   return "";
 }
 
+function toIsoUtc(date) {
+  return new Date(date).toISOString();
+}
+
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const toRad = (n) => (Number(n) * Math.PI) / 180;
+  const R = 6371;
+  const dLat = toRad(Number(lat2) - Number(lat1));
+  const dLon = toRad(Number(lon2) - Number(lon1));
+
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) *
+      Math.cos(toRad(lat2)) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+
+  return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function parseEcObsTime(feature) {
+  const p = feature?.properties || {};
+  return p.obs_date_tm || p["trans_date_tm-value"] || p.processed_date_tm || "";
+}
+
+function mapEcPresentWeather(code, airTempC, precip1hMm) {
+  const n = Number(code);
+
+  if (!Number.isFinite(n)) {
+    if (Number(precip1hMm || 0) > 0) {
+      return Number(airTempC) <= 1 ? "light snow" : "light rain";
+    }
+    return "";
+  }
+
+  if (n >= 95) return "thunderstorms";
+  if (n >= 90) return "thunderstorms";
+  if (n === 89 || n === 88 || n === 87 || n === 86 || n === 85) return "snow showers";
+  if (n === 84 || n === 83 || n === 82 || n === 81 || n === 80) {
+    return Number(airTempC) <= 1 ? "snow showers" : "rain showers";
+  }
+  if (n >= 75 && n <= 79) return "snow";
+  if (n >= 70 && n <= 74) return "light snow";
+  if (n >= 66 && n <= 69) return "freezing rain";
+  if (n >= 60 && n <= 65) return "rain";
+  if (n >= 50 && n <= 59) return "drizzle";
+  if (n >= 40 && n <= 49) return "foggy";
+  if (n >= 30 && n <= 39) return "blowing snow";
+  return "";
+}
+
+function normalizeEcCondition(feature) {
+  const p = feature?.properties || {};
+
+  const airTempC = firstNonNull([p.air_temp, p.air_temp_1, p.air_temp_2, p.air_temp_3]);
+  const windSpeedKmh = firstNonNull([
+    p.avg_wnd_spd_10m_pst10mts,
+    p.avg_wnd_spd_10m_pst2mts,
+    p.avg_wnd_spd_10m_pst1hr,
+    p.max_wnd_spd_10m_pst1hr
+  ]);
+
+  const windDirDeg = firstNonNull([
+    p.avg_wnd_dir_10m_pst10mts,
+    p.avg_wnd_dir_10m_pst2mts,
+    p.avg_wnd_dir_10m_pst1hr
+  ]);
+
+  const visKm = firstNonNull([p.vis, p.min_vis_pst10mts]);
+  const precip1hMm = firstNonNull([
+    p.pcpn_amt_pst1hr,
+    p.rnfl_amt_pst1hr,
+    p.pcpn_amt_snc_top_of_hr
+  ]);
+
+  const presentWx = firstNonNull([p.prsnt_wx_1, p.prsnt_wx_2, p.prsnt_wx_3]);
+  let condition = mapEcPresentWeather(presentWx, airTempC, precip1hMm);
+
+  if (!condition) {
+    if (Number(visKm) > 0 && Number(visKm) < 1) {
+      condition = "foggy";
+    } else if (Number(precip1hMm || 0) > 0) {
+      condition = Number(airTempC) <= 1 ? "light snow" : "light rain";
+    }
+  }
+
+  const obsTime = parseEcObsTime(feature);
+
+  return {
+    source: "environment-canada-geomet",
+    stationName: p["stn_nam-value"] || "",
+    stationId: p["stn_id-value"] || p["msc_id-value"] || "",
+    observedAt: obsTime,
+    condition,
+    temperatureC: airTempC,
+    windSpeedKmh,
+    windDirDeg,
+    visibilityKm: visKm,
+    precip1hMm
+  };
+}
+
 async function fetchEnvironmentCanadaCurrent(location) {
   if (!location || location.country !== "CA") {
     return null;
   }
 
-  const coords = `${Number(location.latitude).toFixed(3)},${Number(location.longitude).toFixed(3)}`;
-  const url = `https://weather.gc.ca/en/location/index.html?coords=${encodeURIComponent(coords)}`;
+  const lat = Number(location.latitude);
+  const lon = Number(location.longitude);
+
+  const now = new Date();
+  const sixHoursAgo = new Date(now.getTime() - 6 * 60 * 60 * 1000);
+
+  const bboxPad = 0.75;
 
   try {
-    const response = await axios.get(url, {
-      timeout: 10000,
-      headers: {
-        "User-Agent": "weather-line-canada-current/1.0"
+    const response = await axios.get(
+      "https://api.weather.gc.ca/collections/swob-realtime/items",
+      {
+        timeout: 12000,
+        params: {
+          f: "json",
+          bbox: `${lon - bboxPad},${lat - bboxPad},${lon + bboxPad},${lat + bboxPad}`,
+          datetime: `${toIsoUtc(sixHoursAgo)}/${toIsoUtc(now)}`,
+          limit: 100
+        },
+        headers: {
+          "User-Agent": "weather-line-geomet/1.0"
+        }
       }
-    });
+    );
 
-    const html = String(response.data || "");
+    const features = Array.isArray(response.data?.features) ? response.data.features : [];
+    if (!features.length) return null;
 
-    function clean(text) {
-      return String(text || "")
-        .replace(/<[^>]+>/g, " ")
-        .replace(/&nbsp;/g, " ")
-        .replace(/&amp;/g, "&")
-        .replace(/&quot;/g, '"')
-        .replace(/&#39;/g, "'")
-        .replace(/&lt;/g, "<")
-        .replace(/&gt;/g, ">")
-        .replace(/\s+/g, " ")
-        .trim();
-    }
+    const ranked = features
+      .map((feature) => {
+        const coords = feature?.geometry?.coordinates || [];
+        const featureLon = Number(coords[0]);
+        const featureLat = Number(coords[1]);
+        const obsTime = parseEcObsTime(feature);
+        const obsMs = obsTime ? new Date(obsTime).getTime() : 0;
+        const distanceKm = haversineKm(lat, lon, featureLat, featureLon);
 
-    function match(regex) {
-      const m = html.match(regex);
-      return m ? clean(m[1]) : "";
-    }
+        return {
+          feature,
+          distanceKm,
+          obsMs
+        };
+      })
+      .filter((x) => Number.isFinite(x.distanceKm))
+      .sort((a, b) => {
+        if (a.distanceKm !== b.distanceKm) return a.distanceKm - b.distanceKm;
+        return b.obsMs - a.obsMs;
+      });
 
-    const observedAt = match(/Observed at:\s*([^<\n]+(?:<[^>]+>[^<\n]+)*)/i);
-    const dateText = match(/Date:\s*([^<\n]+(?:<[^>]+>[^<\n]+)*)/i);
-    const condition = match(/Condition:\s*([^<\n]+(?:<[^>]+>[^<\n]+)*)/i);
-    const temperatureText = match(/Temperature:\s*([\-0-9.]+)\s*°C/i);
-    const windText = match(/Wind:\s*([^<\n]+(?:<[^>]+>[^<\n]+)*)/i);
-    const windChillText = match(/Wind Chill[^:]*:\s*([\-0-9.]+)/i);
-    const visibilityText = match(/Visibility:\s*([\-0-9.]+)\s*km/i);
+    const best = ranked[0]?.feature;
+    if (!best) return null;
 
-    const temperatureC = temperatureText ? Number(temperatureText) : null;
-    const windChillC = windChillText ? Number(windChillText) : null;
-    const visibilityKm = visibilityText ? Number(visibilityText) : null;
-
-    let windDirection = "";
-    let windSpeedKmh = null;
-
-    if (windText) {
-      const windMatch = windText.match(/^([A-Z]{1,3})\s+([0-9.]+)/i);
-      if (windMatch) {
-        windDirection = String(windMatch[1] || "").toUpperCase();
-        windSpeedKmh = Number(windMatch[2]);
-      }
-    }
-
-    if (!condition && temperatureC === null) {
-      return null;
-    }
-
-    return {
-      source: "environment-canada",
-      observedAt,
-      dateText,
-      condition,
-      temperatureC,
-      windDirection,
-      windSpeedKmh,
-      windChillC,
-      visibilityKm
-    };
+    return normalizeEcCondition(best);
   } catch (error) {
-    console.error("Environment Canada current fetch failed:", error.message);
+    console.error("Environment Canada GeoMet current fetch failed:", error.message);
     return null;
   }
 }
@@ -1225,10 +1296,22 @@ function currentWeatherSpeech(location, forecast, unit = "C", canadaCurrent = nu
   if (location?.country === "CA" && canadaCurrent) {
     const parts = [`Current weather for ${placeLabel(location)}.`];
 
-    if (canadaCurrent.dateText) {
-      parts.push(`Observed at ${canadaCurrent.dateText}.`);
-    } else if (canadaCurrent.observedAt) {
-      parts.push(`Observed at ${canadaCurrent.observedAt}.`);
+    if (canadaCurrent.stationName) {
+      parts.push(`Observed at ${canadaCurrent.stationName}.`);
+    }
+
+    if (canadaCurrent.observedAt) {
+      const observed = new Date(canadaCurrent.observedAt);
+      if (!Number.isNaN(observed.getTime())) {
+        parts.push(
+          `Observation time ${observed.toLocaleTimeString("en-US", {
+            hour: "numeric",
+            minute: "2-digit",
+            hour12: true,
+            timeZone: location.timezone || "UTC"
+          })}.`
+        );
+      }
     }
 
     if (canadaCurrent.condition) {
@@ -1240,22 +1323,12 @@ function currentWeatherSpeech(location, forecast, unit = "C", canadaCurrent = nu
     }
 
     if (
-      canadaCurrent.windChillC !== null &&
-      Number.isFinite(canadaCurrent.windChillC) &&
-      canadaCurrent.temperatureC !== null &&
-      Math.round(tempValueForUnit(canadaCurrent.windChillC, unit)) !==
-        Math.round(tempValueForUnit(canadaCurrent.temperatureC, unit))
-    ) {
-      parts.push(`Wind chill ${formatSignedTemp(canadaCurrent.windChillC, unit)}.`);
-    }
-
-    if (
       canadaCurrent.windSpeedKmh !== null &&
       Number.isFinite(canadaCurrent.windSpeedKmh) &&
       canadaCurrent.windSpeedKmh > 0
     ) {
       const speed = Math.round(speedValueForUnit(canadaCurrent.windSpeedKmh, unit));
-      const dir = compassLettersToWords(canadaCurrent.windDirection);
+      const dir = degreesToCompass(canadaCurrent.windDirDeg);
       parts.push(`Wind ${dir} ${speed} ${speedUnitLabel(unit)}.`);
     }
 
