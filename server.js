@@ -43,6 +43,8 @@ const PRESET_LOCATIONS = {
     timezone: "America/Toronto",
     label: "Montreal",
     country: "CA",
+    postalCode: "H2V 4B7",
+    ecCurrentCoords: "45.483,-73.633",
     alertFeedUrl: "https://weather.gc.ca/rss/alerts/45.5017_-73.5673_e.xml"
   },
   "2": {
@@ -52,7 +54,9 @@ const PRESET_LOCATIONS = {
     longitude: -73.8396,
     timezone: "America/Toronto",
     label: "Tosh",
-    country: "CA"
+    country: "CA",
+    postalCode: "J7E 4H4",
+    ecCurrentCoords: "45.613,-73.838"
   },
   "3": {
     id: "laurentians",
@@ -61,7 +65,9 @@ const PRESET_LOCATIONS = {
     longitude: -74.2239,
     timezone: "America/Toronto",
     label: "Laurentians",
-    country: "CA"
+    country: "CA",
+    postalCode: "J0T 2B0",
+    ecCurrentCoords: "46.206,-74.470"
   },
   "4": {
     id: "brooklyn",
@@ -93,9 +99,9 @@ const PRESET_LOCATIONS = {
 };
 
 const US_LOCATIONS = {
-  "1": PRESET_LOCATIONS["4"], // Brooklyn
-  "2": PRESET_LOCATIONS["6"], // Monroe
-  "3": PRESET_LOCATIONS["5"]  // Monsey
+  "1": PRESET_LOCATIONS["4"],
+  "2": PRESET_LOCATIONS["6"],
+  "3": PRESET_LOCATIONS["5"]
 };
 
 function gatherOptions(action, timeout = 8, numDigits = 1) {
@@ -360,12 +366,6 @@ function fullDateLabel(iso, tz) {
   });
 }
 
-/**
- * IMPORTANT FIX:
- * Open-Meteo forecast/current timestamps like "2026-03-18T21:00" are local wall-clock
- * timestamps for the requested forecast timezone. Do NOT pass them through new Date()
- * to decide local hour/daypart, because that can reinterpret them in the server timezone.
- */
 function getDatePartFromLocalIso(iso) {
   return String(iso || "").slice(0, 10);
 }
@@ -790,6 +790,28 @@ function weatherCodeToOfficialPhrase(code, cloudCoverLike = 60, isNight = false)
 
 function describeCurrentCondition(current, timezone) {
   const isNight = current?.time ? isNightHourFromIso(current.time, timezone) : false;
+
+  const snow = Number(current?.snowfall || 0);
+  const rain = Number(current?.rain || 0);
+  const showers = Number(current?.showers || 0);
+  const totalLiquid = rain + showers;
+  const code = Number(current?.weather_code);
+
+  if (snow > 0) {
+    if (snow >= 1.0) return "snow";
+    return "light snow";
+  }
+
+  if (totalLiquid > 0) {
+    if ([80, 81, 82].includes(code)) {
+      if (totalLiquid >= 1.5) return "showers";
+      return "light showers";
+    }
+
+    if (totalLiquid >= 1.5) return "rain";
+    return "light rain";
+  }
+
   return weatherCodeToOfficialPhrase(current.weather_code, current.cloud_cover, isNight);
 }
 
@@ -1007,30 +1029,36 @@ function getPeriodTimingWord(entries, timezone, type = "day") {
 }
 
 function precipitationTypeFromEntries(entries) {
-  const totalSnow = entries.reduce((sum, e) => sum + Number(e.snowfall || 0), 0);
+  const totalSnow = entries.reduce((sum, e) => sum + Number(e.snowfall || e.snow || 0), 0);
   const totalRain = entries.reduce(
     (sum, e) => sum + Number(e.rain || 0) + Number(e.showers || 0),
     0
   );
-  const maxChance = maxValue(entries.map((e) => e.precipitationProbability));
-  const hasStorm = entries.some((e) => [95, 96, 99].includes(Number(e.weatherCode)));
+  const maxChance = maxValue(
+    entries.map((e) => e.precipitationProbability ?? e.rainChance ?? 0)
+  );
+  const hasStorm = entries.some((e) => [95, 96, 99].includes(Number(e.weatherCode || e.code)));
+  const hasSnowCode = entries.some((e) =>
+    [71, 73, 75, 77, 85, 86].includes(Number(e.weatherCode || e.code))
+  );
+  const hasRainCode = entries.some((e) =>
+    [51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82].includes(
+      Number(e.weatherCode || e.code)
+    )
+  );
 
   if (hasStorm) return "thunderstorms";
-  if (totalSnow > 0.2 && totalRain > 0.15) return "flurries or rain showers";
-  if (totalSnow > 0.2) return "flurries";
-  if (totalRain > 0.2) return "rain showers";
 
-  if (maxChance >= 50) {
-    const snowCodes = entries.some((e) =>
-      [71, 73, 75, 77, 85, 86].includes(Number(e.weatherCode))
-    );
-    const rainCodes = entries.some((e) =>
-      [51, 53, 55, 61, 63, 65, 80, 81, 82].includes(Number(e.weatherCode))
-    );
+  if ((totalSnow > 0.02 || hasSnowCode) && (totalRain > 0.05 || hasRainCode)) {
+    return "flurries or rain showers";
+  }
 
-    if (snowCodes && rainCodes) return "flurries or rain showers";
-    if (snowCodes) return "flurries";
-    if (rainCodes) return "rain showers";
+  if (totalSnow > 0.02 || hasSnowCode) {
+    return totalSnow >= 1.0 ? "snow" : "flurries";
+  }
+
+  if (totalRain > 0.05 || (maxChance >= 35 && hasRainCode)) {
+    return totalRain >= 1.5 ? "rain showers" : "light rain";
   }
 
   return "";
@@ -1104,7 +1132,104 @@ function describeTransitionSentence(entries, timezone, isNight = false) {
   return "";
 }
 
-function currentWeatherSpeech(location, forecast, unit = "C") {
+function compassLettersToWords(direction) {
+  const map = {
+    N: "north",
+    NE: "northeast",
+    E: "east",
+    SE: "southeast",
+    S: "south",
+    SW: "southwest",
+    W: "west",
+    NW: "northwest"
+  };
+
+  return map[String(direction || "").toUpperCase()] || String(direction || "").toLowerCase();
+}
+
+function cleanEnvironmentCanadaObservedAt(text) {
+  const raw = String(text || "").replace(/\s+/g, " ").trim();
+  if (!raw) return "";
+
+  const stopMarkers = [
+    "Past 24 hours",
+    "Weather Radar",
+    "Satellite",
+    "Lightning",
+    "°C",
+    "°F",
+    "Observed at:"
+  ];
+
+  let cleaned = raw;
+  for (const marker of stopMarkers) {
+    const idx = cleaned.indexOf(marker);
+    if (idx > 0) {
+      cleaned = cleaned.slice(0, idx).trim();
+    }
+  }
+
+  cleaned = cleaned.replace(/\s+/g, " ").trim();
+
+  if (cleaned.length > 80) return "";
+  return cleaned;
+}
+
+function currentWeatherSpeech(location, forecast, unit = "C", canadaCurrent = null) {
+  if (location?.country === "CA" && canadaCurrent) {
+    const parts = [`Current weather for ${placeLabel(location)}.`];
+
+    const safeObservedAt = cleanEnvironmentCanadaObservedAt(canadaCurrent?.observedAt);
+    if (safeObservedAt) {
+      parts.push(`Observed at ${safeObservedAt}.`);
+    }
+
+    if (canadaCurrent.condition) {
+      const conditionText = String(canadaCurrent.condition).trim();
+      if (conditionText) {
+        if (/^light snow$/i.test(conditionText)) {
+          parts.push("It is light snow.");
+        } else if (/^snow$/i.test(conditionText)) {
+          parts.push("It is snowing.");
+        } else if (/^light rain$/i.test(conditionText)) {
+          parts.push("It is light rain.");
+        } else if (/^rain$/i.test(conditionText)) {
+          parts.push("It is raining.");
+        } else if (/^cloudy$/i.test(conditionText)) {
+          parts.push("It is cloudy.");
+        } else {
+          parts.push(`It is ${conditionText.toLowerCase()}.`);
+        }
+      }
+    }
+
+    if (canadaCurrent.temperatureC !== null && Number.isFinite(canadaCurrent.temperatureC)) {
+      parts.push(`Temperature ${formatSignedTemp(canadaCurrent.temperatureC, unit)} degrees.`);
+    }
+
+    if (
+      canadaCurrent.windChillC !== null &&
+      Number.isFinite(canadaCurrent.windChillC) &&
+      canadaCurrent.temperatureC !== null &&
+      Math.round(tempValueForUnit(canadaCurrent.windChillC, unit)) !==
+        Math.round(tempValueForUnit(canadaCurrent.temperatureC, unit))
+    ) {
+      parts.push(`Wind chill ${formatSignedTemp(canadaCurrent.windChillC, unit)}.`);
+    }
+
+    if (
+      canadaCurrent.windSpeedKmh !== null &&
+      Number.isFinite(canadaCurrent.windSpeedKmh) &&
+      canadaCurrent.windSpeedKmh > 0
+    ) {
+      const speed = Math.round(speedValueForUnit(canadaCurrent.windSpeedKmh, unit));
+      const dir = compassLettersToWords(canadaCurrent.windDirection);
+      parts.push(`Wind ${dir} ${speed} ${speedUnitLabel(unit)}.`);
+    }
+
+    return parts.join(" ");
+  }
+
   const c = forecast.current || {};
   const parts = [
     `Current weather for ${placeLabel(location)}.`,
@@ -1155,14 +1280,28 @@ function classifyHourlyBucket(item, tz = "UTC") {
   const precipChance = Number(item.rainChance || 0);
   const isNight = isNightHourFromIso(item.time, tz);
 
-  const condition = weatherCodeToText(code, isNight);
+  let condition = weatherCodeToText(code, isNight);
+
+  if (snowAmount > 0) {
+    condition = snowAmount >= 1.0 ? "snow" : "light snow";
+  } else if (rainAmount > 0) {
+    if ([80, 81, 82].includes(code)) {
+      condition = rainAmount >= 1.5 ? "showers" : "light showers";
+    } else {
+      condition = rainAmount >= 1.5 ? "rain" : "light rain";
+    }
+  }
 
   let precipTag = "dry";
   if ([95, 96, 99].includes(code)) {
     precipTag = "storm";
-  } else if (snowAmount > 0) {
-    precipTag = snowAmount >= 0.8 ? "snow" : "light-snow";
-  } else if (rainAmount > 0 || precipChance >= 35) {
+  } else if (snowAmount > 0.02 || [71, 73, 75, 77, 85, 86].includes(code)) {
+    precipTag = snowAmount >= 1.0 ? "snow" : "light-snow";
+  } else if (
+    rainAmount > 0.05 ||
+    precipChance >= 35 ||
+    [51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82].includes(code)
+  ) {
     precipTag = rainAmount >= 1.5 ? "rain" : "light-rain";
   }
 
@@ -1199,10 +1338,31 @@ function summarizeHourlyBlock(block, tz, unit = "C") {
   const totalSnow = block.items.reduce((sum, x) => sum + Number(x.snow || 0), 0);
 
   const isNight = isNightHourFromIso(first.time, tz);
-  const condition = weatherCodeToText(first.code, isNight);
+
+  const precipSummary = precipitationTypeFromEntries(
+    block.items.map((x) => ({
+      snowfall: x.snow,
+      rain: x.rain,
+      showers: x.showers,
+      precipitationProbability: x.rainChance,
+      weatherCode: x.code
+    }))
+  );
+
+  let spokenCondition = weatherCodeToText(first.code, isNight);
+
+  if (precipSummary === "flurries") spokenCondition = "flurries";
+  else if (precipSummary === "snow") spokenCondition = "snow";
+  else if (precipSummary === "light rain") spokenCondition = "light rain";
+  else if (precipSummary === "rain showers") spokenCondition = "showers";
+  else if (precipSummary === "flurries or rain showers") {
+    spokenCondition = "a mix of flurries and showers";
+  } else if (precipSummary === "thunderstorms") {
+    spokenCondition = "thunderstorms";
+  }
 
   const parts = [
-    `From ${start} until ${end}, ${condition}, around ${avgTemp} degrees.`
+    `From ${start} until ${end}, ${spokenCondition}, around ${avgTemp} degrees.`
   ];
 
   if (Math.abs(avgAppTemp - avgTemp) >= 3) {
@@ -1213,20 +1373,18 @@ function summarizeHourlyBlock(block, tz, unit = "C") {
     }
   }
 
-  if (maxRainChance >= 45) {
+  if (maxRainChance >= 45 && totalRain <= 0.05 && totalSnow <= 0.02 && !precipSummary) {
     parts.push(`${Math.round(maxRainChance)} percent chance of precipitation.`);
   }
 
-  if (totalRain > 0) {
+  if (totalRain > 0.05) {
     if (totalRain >= 3) parts.push("Rain at times.");
-    else if (totalRain >= 1) parts.push("A few showers.");
-    else parts.push("A slight chance of rain.");
+    else parts.push("Light rain or a few showers.");
   }
 
-  if (totalSnow > 0) {
+  if (totalSnow > 0.02) {
     if (totalSnow >= 2) parts.push("Snow at times.");
-    else if (totalSnow >= 0.8) parts.push("Some flurries.");
-    else parts.push("A slight chance of flurries.");
+    else parts.push("Light snow or flurries.");
   }
 
   if (maxWind >= (unit === "F" ? 22 : 35) || maxGust >= (unit === "F" ? 34 : 55)) {
@@ -1640,8 +1798,6 @@ function buildAll7DayEntry(location, forecast, index, includeNight = true, today
 
   if (includeNight) {
     if (index === 0 && todayMode === "remaining") {
-      // Fix: when "Today" is already built from the remaining-hours path,
-      // do not append "Tonight" again for index 0.
     } else if (index <= 1) {
       parts.push(buildDetailedNightOnlySection(location, forecast, index, nightLabel, unit));
     } else {
@@ -1674,28 +1830,6 @@ function sevenDayForecastSpeech(location, forecast, unit = "C") {
   }
 
   return parts.join(" ");
-}
-
-async function buildPlaybackSpeech(location, forecast, playback, unit = "C") {
-  if (!playback || !playback.type) return "";
-
-  if (playback.type === "current") {
-    return currentWeatherSpeech(location, forecast, unit);
-  }
-
-  if (playback.type === "hourly") {
-    return nextHoursSpeech(location, forecast, playback.hours || 6, unit);
-  }
-
-  if (playback.type === "daily") {
-    return dailyForecastSpeech(location, forecast, playback.index, unit);
-  }
-
-  if (playback.type === "all7") {
-    return sevenDayForecastSpeech(location, forecast, unit);
-  }
-
-  return "";
 }
 
 function stripXmlTags(text) {
@@ -1793,6 +1927,113 @@ function buildCanadianAlertSpeech(location, alert) {
   if (alert.description) parts.push(alert.description);
 
   return parts.join(" ");
+}
+
+async function fetchEnvironmentCanadaCurrent(location) {
+  if (!location || location.country !== "CA") {
+    return null;
+  }
+
+  const coordText =
+    location.ecCurrentCoords ||
+    `${Number(location.latitude).toFixed(3)},${Number(location.longitude).toFixed(3)}`;
+
+  const url = `https://weather.gc.ca/en/location/index.html?coords=${encodeURIComponent(coordText)}`;
+
+  try {
+    const response = await axios.get(url, {
+      timeout: 10000,
+      headers: {
+        "User-Agent": "weather-line-canada-current/1.0"
+      }
+    });
+
+    const html = String(response.data || "");
+
+    function clean(text) {
+      return String(text || "")
+        .replace(/<[^>]+>/g, " ")
+        .replace(/&nbsp;/g, " ")
+        .replace(/&amp;/g, "&")
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/\s+/g, " ")
+        .trim();
+    }
+
+    const text = clean(html);
+
+    function pick(regex) {
+      const m = text.match(regex);
+      return m ? String(m[1] || "").trim() : "";
+    }
+
+    let observedAt =
+      pick(/Observed at:\s*(.*?)(?:Date:|Condition:|Temperature:)/i) ||
+      pick(/Current Conditions\s*Observed at:\s*(.*?)(?:Date:|Condition:|Temperature:)/i);
+
+    let dateText = pick(/Date:\s*(.*?)(?:Condition:|Temperature:)/i);
+    const condition = pick(/Condition:\s*(.*?)(?:Pressure:|Temperature:|Dew point:|Humidity:|Wind:)/i);
+
+    let temperatureText =
+      pick(/Temperature:\s*([\-0-9.]+)\s*°\s*C/i) ||
+      pick(/([\-0-9.]+)\s*°\s*C\s*Observed at:/i);
+
+    const windText = pick(/Wind:\s*([A-Z]{1,3}\s+[0-9.]+\s+km\/h|Calm)/i);
+    const windChillText = pick(/Wind Chill[^:]*:\s*([\-0-9.]+)/i);
+
+    const temperatureC = temperatureText ? Number(temperatureText) : null;
+    const windChillC = windChillText ? Number(windChillText) : null;
+
+    let windDirection = "";
+    let windSpeedKmh = null;
+
+    if (/^calm$/i.test(windText)) {
+      windDirection = "calm";
+      windSpeedKmh = 0;
+    } else {
+      const windMatch = windText.match(/^([A-Z]{1,3})\s+([0-9.]+)/i);
+      if (windMatch) {
+        windDirection = String(windMatch[1] || "").toUpperCase();
+        windSpeedKmh = Number(windMatch[2]);
+      }
+    }
+
+    observedAt = cleanEnvironmentCanadaObservedAt(observedAt);
+    dateText = String(dateText || "").replace(/\s+/g, " ").trim();
+
+    console.log("ENV CANADA CURRENT RAW", {
+      location: location.label,
+      coordText,
+      observedAt,
+      dateText,
+      condition,
+      temperatureC,
+      windDirection,
+      windSpeedKmh,
+      windChillC
+    });
+
+    if (!condition && temperatureC === null) {
+      return null;
+    }
+
+    return {
+      source: "environment-canada",
+      observedAt,
+      dateText,
+      condition,
+      temperatureC,
+      windDirection,
+      windSpeedKmh,
+      windChillC
+    };
+  } catch (error) {
+    console.error("Environment Canada current fetch failed:", error.message);
+    return null;
+  }
 }
 
 async function fetchForecast(location) {
@@ -2004,6 +2245,34 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
   }
 
   return locationMenuTwiml({ allowBack: false, allowVoicemail: true });
+}
+
+async function buildPlaybackSpeech(location, forecast, playback, unit = "C") {
+  if (!playback || !playback.type) return "";
+
+  if (playback.type === "current") {
+    let canadaCurrent = null;
+
+    if (location?.country === "CA") {
+      canadaCurrent = await fetchEnvironmentCanadaCurrent(location);
+    }
+
+    return currentWeatherSpeech(location, forecast, unit, canadaCurrent);
+  }
+
+  if (playback.type === "hourly") {
+    return nextHoursSpeech(location, forecast, playback.hours || 6, unit);
+  }
+
+  if (playback.type === "daily") {
+    return dailyForecastSpeech(location, forecast, playback.index, unit);
+  }
+
+  if (playback.type === "all7") {
+    return sevenDayForecastSpeech(location, forecast, unit);
+  }
+
+  return "";
 }
 
 async function goBackOneMenu(req) {
@@ -2226,6 +2495,7 @@ app.post("/menu", async (req, res) => {
     }
 
     if (choice === "3") {
+      console.log("CURRENT REQUEST USING LOCATION", location);
       setLastPlayback(req, { type: "current" });
       const playbackTwiml = await buildStateTwiml(req, "playback", { push: false });
       return res.type("text/xml").send(playbackTwiml.toString());
