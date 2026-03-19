@@ -349,13 +349,64 @@ function fullDateLabel(iso, tz) {
   });
 }
 
+/**
+ * IMPORTANT FIX:
+ * Open-Meteo forecast/current timestamps like "2026-03-18T21:00" are local wall-clock
+ * timestamps for the requested forecast timezone. Do NOT pass them through new Date()
+ * to decide local hour/daypart, because that can reinterpret them in the server timezone.
+ */
+function getDatePartFromLocalIso(iso) {
+  return String(iso || "").slice(0, 10);
+}
+
+function getHourFromLocalIso(iso) {
+  const text = String(iso || "");
+  const match = text.match(/T(\d{1,2}):(\d{2})/);
+  if (!match) return 12;
+  return Number(match[1]);
+}
+
+function getMinuteFromLocalIso(iso) {
+  const text = String(iso || "");
+  const match = text.match(/T(\d{1,2}):(\d{2})/);
+  if (!match) return 0;
+  return Number(match[2]);
+}
+
+function formatLocalIsoTimeLabel(iso) {
+  const hour24 = getHourFromLocalIso(iso);
+  const minute = getMinuteFromLocalIso(iso);
+
+  const suffix = hour24 >= 12 ? "PM" : "AM";
+  let hour12 = hour24 % 12;
+  if (hour12 === 0) hour12 = 12;
+
+  return `${hour12}:${String(minute).padStart(2, "0")} ${suffix}`;
+}
+
+function addHoursToLocalIso(iso, hoursToAdd) {
+  const text = String(iso || "");
+  const datePart = getDatePartFromLocalIso(text);
+  const [year, month, day] = datePart.split("-").map(Number);
+  const hour = getHourFromLocalIso(text);
+  const minute = getMinuteFromLocalIso(text);
+
+  if (!year || !month || !day) return text;
+
+  const dt = new Date(Date.UTC(year, month - 1, day, hour, minute, 0));
+  dt.setUTCHours(dt.getUTCHours() + Number(hoursToAdd || 0));
+
+  const y = dt.getUTCFullYear();
+  const m = String(dt.getUTCMonth() + 1).padStart(2, "0");
+  const d = String(dt.getUTCDate()).padStart(2, "0");
+  const h = String(dt.getUTCHours()).padStart(2, "0");
+  const min = String(dt.getUTCMinutes()).padStart(2, "0");
+
+  return `${y}-${m}-${d}T${h}:${min}`;
+}
+
 function timeLabel(iso, tz) {
-  return new Date(iso).toLocaleTimeString("en-US", {
-    hour: "numeric",
-    minute: "2-digit",
-    hour12: true,
-    timeZone: tz || "UTC"
-  });
+  return formatLocalIsoTimeLabel(iso);
 }
 
 function issuedDateLabelToday(tz) {
@@ -377,14 +428,7 @@ function retrievedTimeLabelNow(tz) {
 }
 
 function getHourInTz(iso, tz) {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    hour: "numeric",
-    hour12: false,
-    timeZone: tz || "UTC"
-  }).formatToParts(new Date(iso));
-
-  const hourPart = parts.find((p) => p.type === "hour");
-  return Number(hourPart?.value || 0);
+  return getHourFromLocalIso(iso);
 }
 
 function getNowHourInTz(timezone) {
@@ -396,6 +440,26 @@ function getNowHourInTz(timezone) {
 
   const hourPart = parts.find((p) => p.type === "hour");
   return Number(hourPart?.value || 12);
+}
+
+function getCurrentLocalDateParts(timezone) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone || "UTC",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).formatToParts(new Date());
+
+  const get = (type) => parts.find((p) => p.type === type)?.value;
+
+  return {
+    date: `${get("year")}-${get("month")}-${get("day")}`,
+    hour: Number(get("hour") || 0),
+    minute: Number(get("minute") || 0)
+  };
 }
 
 function getGreetingForTime(timezone) {
@@ -665,9 +729,11 @@ function isNightHourFromIso(iso, tz) {
 function weatherCodeToOfficialPhrase(code, cloudCoverLike = 60, isNight = false) {
   const n = Number(code);
 
-  if ([0, 1, 2, 3].includes(n)) {
-    return weatherCodeToText(n, isNight);
-  }
+  // Important: force nighttime-friendly wording for codes that can sound sunny by day.
+  if (n === 0) return isNight ? "clear" : "sunny";
+  if (n === 1) return isNight ? "mostly clear" : "mostly sunny";
+  if (n === 2) return isNight ? "partly cloudy" : "a mix of sun and cloud";
+  if (n === 3) return "cloudy";
 
   const map = {
     45: "foggy",
@@ -816,18 +882,20 @@ function getHourlyEntriesForDay(forecast, dateStr) {
 
 function getRemainingEntriesForToday(forecast, timezone) {
   const tz = timezone || "UTC";
-  const today = new Date().toLocaleDateString("en-CA", {
-    timeZone: tz
-  });
+  const nowLocal = getCurrentLocalDateParts(tz);
 
   const h = forecast.hourly || {};
   const entries = [];
 
   for (let i = 0; i < (h.time || []).length; i++) {
-    const t = h.time[i];
-    const day = new Date(t).toLocaleDateString("en-CA", { timeZone: tz });
-    if (day !== today) continue;
-    if (new Date(t).getTime() < Date.now()) continue;
+    const t = String(h.time[i] || "");
+    const datePart = getDatePartFromLocalIso(t);
+    const hourPart = getHourFromLocalIso(t);
+    const minutePart = getMinuteFromLocalIso(t);
+
+    if (datePart !== nowLocal.date) continue;
+    if (hourPart < nowLocal.hour) continue;
+    if (hourPart === nowLocal.hour && minutePart < nowLocal.minute) continue;
 
     entries.push({
       time: h.time?.[i],
@@ -1030,9 +1098,15 @@ function currentWeatherSpeech(location, forecast, unit = "C") {
     Math.round(tempValueForUnit(apparent, unit)) !==
       Math.round(tempValueForUnit(Number(c.temperature_2m || 0), unit))
   ) {
-    if (tempValueForUnit(apparent, unit) <= tempValueForUnit(Number(c.temperature_2m || 0), unit) - 3) {
+    if (
+      tempValueForUnit(apparent, unit) <=
+      tempValueForUnit(Number(c.temperature_2m || 0), unit) - 3
+    ) {
       parts.push(`Wind chill ${formatSignedTemp(apparent, unit)}.`);
-    } else if (tempValueForUnit(apparent, unit) >= tempValueForUnit(Number(c.temperature_2m || 0), unit) + 3) {
+    } else if (
+      tempValueForUnit(apparent, unit) >=
+      tempValueForUnit(Number(c.temperature_2m || 0), unit) + 3
+    ) {
       parts.push(`Feels like ${formatSignedTemp(apparent, unit)}.`);
     }
   }
@@ -1083,14 +1157,7 @@ function classifyHourlyBucket(item, tz = "UTC") {
 function summarizeHourlyBlock(block, tz, unit = "C") {
   const first = block.items[0];
   const start = timeLabel(block.start, tz);
-  const endDate = new Date(block.end);
-  endDate.setHours(endDate.getHours() + 1);
-  const end = endDate.toLocaleTimeString("en-US", {
-    hour: "numeric",
-    minute: "2-digit",
-    hour12: true,
-    timeZone: tz || "UTC"
-  });
+  const end = formatLocalIsoTimeLabel(addHoursToLocalIso(block.end, 1));
 
   const avgTempC =
     block.items.reduce((sum, x) => sum + Number(x.temp || 0), 0) / block.items.length;
@@ -1182,14 +1249,25 @@ function buildSmartHourlyBlocks(items, tz = "UTC") {
 }
 
 function nextHoursSpeech(location, forecast, hours = 6, unit = "C") {
-  const now = Date.now();
   const h = forecast.hourly || {};
   const tz = location.timezone || "UTC";
   const items = [];
+  const nowLocal = getCurrentLocalDateParts(tz);
 
   for (let i = 0; i < (h.time || []).length; i++) {
-    const t = new Date(h.time[i]).getTime();
-    if (t >= now) {
+    const t = String(h.time[i] || "");
+    const datePart = getDatePartFromLocalIso(t);
+    const hourPart = getHourFromLocalIso(t);
+    const minutePart = getMinuteFromLocalIso(t);
+
+    const isFuture =
+      datePart > nowLocal.date ||
+      (datePart === nowLocal.date && hourPart > nowLocal.hour) ||
+      (datePart === nowLocal.date &&
+        hourPart === nowLocal.hour &&
+        minutePart >= nowLocal.minute);
+
+    if (isFuture) {
       items.push({
         time: h.time[i],
         temp: h.temperature_2m?.[i],
@@ -1453,7 +1531,6 @@ function buildDetailedDaySection(location, forecast, index, unit = "C") {
 }
 
 function buildRestOfTodaySection(location, forecast, unit = "C") {
-  const d = forecast.daily || {};
   const entries = getRemainingEntriesForToday(forecast, location.timezone);
 
   if (!entries.length) {
