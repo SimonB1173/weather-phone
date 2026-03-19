@@ -360,12 +360,6 @@ function fullDateLabel(iso, tz) {
   });
 }
 
-/**
- * IMPORTANT FIX:
- * Open-Meteo forecast/current timestamps like "2026-03-18T21:00" are local wall-clock
- * timestamps for the requested forecast timezone. Do NOT pass them through new Date()
- * to decide local hour/daypart, because that can reinterpret them in the server timezone.
- */
 function getDatePartFromLocalIso(iso) {
   return String(iso || "").slice(0, 10);
 }
@@ -1134,8 +1128,17 @@ function describeTransitionSentence(entries, timezone, isNight = false) {
 
 function currentWeatherSpeech(location, forecast, unit = "C") {
   const c = forecast.current || {};
+
+  console.log("LIVE CURRENT DATA", {
+    weather_code: c.weather_code,
+    snowfall: c.snowfall,
+    rain: c.rain,
+    showers: c.showers,
+    temperature_2m: c.temperature_2m
+  });
+
   const parts = [
-    `Current weather for ${placeLabel(location)}.`,
+    `Current weather test version for ${placeLabel(location)}.`,
     `Retrieved at ${retrievedTimeLabelNow(location.timezone)}.`,
     `${describeCurrentWeatherSentence(c, location.timezone)}.`,
     `Temperature ${formatSignedTemp(c.temperature_2m, unit)} degrees.`
@@ -1367,6 +1370,8 @@ function nextHoursSpeech(location, forecast, hours = 6, unit = "C") {
     }
     if (items.length >= hours) break;
   }
+
+  console.log("LIVE HOURLY SAMPLE", items.slice(0, 3));
 
   if (!items.length) {
     return `I could not find future hourly forecast data for ${placeLabel(location)}.`;
@@ -1701,8 +1706,7 @@ function buildAll7DayEntry(location, forecast, index, includeNight = true, today
 
   if (includeNight) {
     if (index === 0 && todayMode === "remaining") {
-      // Fix: when "Today" is already built from the remaining-hours path,
-      // do not append "Tonight" again for index 0.
+      // do not append tonight again
     } else if (index <= 1) {
       parts.push(buildDetailedNightOnlySection(location, forecast, index, nightLabel, unit));
     } else {
