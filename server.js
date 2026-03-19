@@ -2057,8 +2057,8 @@ app.post("/voice", async (req, res) => {
     twiml.say(
       SAY_OPTIONS,
       `${greeting}, welcome to Weather Line. ` +
-        `Please note this line is still in progress and should be fully running on Thursday March 19. ` +
-        `You are welcome to leave comments or ideas for improvement by pressing number 9.`
+        `We are continuously improving our system, with many exciting new features coming in the coming days. ` +
+        `you are welcome to leave comments or ideas for improvement by pressing number 9.`
     );
 
     twiml.redirect({ method: "POST" }, "/location-menu-prompt");
