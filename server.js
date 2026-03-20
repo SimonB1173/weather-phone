@@ -633,7 +633,7 @@ function forecastDayPromptTwiml(location, forecast) {
   if (dailyTimes[1]) parts.push("Press 2 for tomorrow.");
 
   for (let i = 2; i < Math.min(7, dailyTimes.length); i++) {
-    parts.push(`Press ${i + 1} for ${dayName(dailyTimes[i], location.timezone)}.`);
+    parts.push(`Press ${i + 1} for ${fullDateLabel(dailyTimes[i], location.timezone)}.`);
   }
 
   parts.push("Press star to go back to the previous menu.");
@@ -960,6 +960,11 @@ function getRemainingEntriesForToday(forecast, timezone) {
   return entries;
 }
 
+function getRemainingDayEntriesForToday(forecast, timezone) {
+  const entries = getRemainingEntriesForToday(forecast, timezone);
+  return entries.filter((e) => getHourInTz(e.time, timezone) < 18);
+}
+
 function getNightEntriesForDayIndex(forecast, index, timezone) {
   const dailyTimes = forecast.daily?.time || [];
   const currentDate = dailyTimes[index];
@@ -1173,6 +1178,64 @@ function cleanEnvironmentCanadaObservedAt(text) {
 
   if (cleaned.length > 80) return "";
   return cleaned;
+}
+
+function formatPrecipAmount(value) {
+  const n = Number(value || 0);
+  if (n <= 0) return "0";
+  if (n < 10) return String(Number(n.toFixed(1)));
+  return String(Math.round(n));
+}
+
+function isSnowEntry(entry) {
+  const code = Number(entry.weatherCode || entry.code);
+  return Number(entry.snowfall || entry.snow || 0) > 0.02 || [71, 73, 75, 77, 85, 86].includes(code);
+}
+
+function isRainEntry(entry) {
+  const code = Number(entry.weatherCode || entry.code);
+  return Number(entry.rain || 0) + Number(entry.showers || 0) > 0.05 ||
+    [51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82].includes(code);
+}
+
+function buildPrecipSummaryLines(entries, timezone, { includeTiming = false } = {}) {
+  const lines = [];
+
+  const snowTotal = entries.reduce((sum, e) => sum + Number(e.snowfall || e.snow || 0), 0);
+  const rainTotal = entries.reduce(
+    (sum, e) => sum + Number(e.rain || 0) + Number(e.showers || 0),
+    0
+  );
+
+  if (snowTotal > 0.02) {
+    if (includeTiming) {
+      const snowEntries = entries.filter(isSnowEntry);
+      if (snowEntries.length) {
+        lines.push(
+          `Snow expected from ${timeLabel(snowEntries[0].time, timezone)} until ${formatLocalIsoTimeLabel(
+            addHoursToLocalIso(snowEntries[snowEntries.length - 1].time, 1)
+          )}.`
+        );
+      }
+    }
+    lines.push(`Snow amount around ${formatPrecipAmount(snowTotal)} centimetres.`);
+  }
+
+  if (rainTotal > 0.05) {
+    if (includeTiming) {
+      const rainEntries = entries.filter(isRainEntry);
+      if (rainEntries.length) {
+        lines.push(
+          `Rain expected from ${timeLabel(rainEntries[0].time, timezone)} until ${formatLocalIsoTimeLabel(
+            addHoursToLocalIso(rainEntries[rainEntries.length - 1].time, 1)
+          )}.`
+        );
+      }
+    }
+    lines.push(`Rain amount around ${formatPrecipAmount(rainTotal)} millimetres.`);
+  }
+
+  return lines;
 }
 
 function currentWeatherSpeech(location, forecast, unit = "C", canadaCurrent = null) {
@@ -1659,7 +1722,7 @@ function describeNightWindChill(entries, unit = "C") {
   return "";
 }
 
-function buildDetailedDayOnlySection(location, forecast, index, labelText, unit = "C") {
+function buildDetailedDayOnlySection(location, forecast, index, labelText, unit = "C", opts = {}) {
   const d = forecast.daily || {};
   const dateStr = d.time?.[index];
   const entries = getHourlyEntriesForDay(forecast, dateStr);
@@ -1669,11 +1732,16 @@ function buildDetailedDayOnlySection(location, forecast, index, labelText, unit 
     describeDetailedPeriodIntro(entries, location.timezone, false)
   ];
 
+  const precipLines = buildPrecipSummaryLines(entries, location.timezone, {
+    includeTiming: !!opts.includePrecipTiming
+  });
+
   const wind = describeWindLine(entries, location.timezone, "day", unit);
   const high = describeDayTemperatureLine(forecast, index, unit);
   const windChill = describeDayWindChill(entries, unit);
   const uv = uvIndexPhrase(d.uv_index_max?.[index]);
 
+  if (opts.includePrecipAmounts) parts.push(...precipLines);
   if (wind) parts.push(wind);
   if (high) parts.push(high);
   if (windChill) parts.push(windChill);
@@ -1682,7 +1750,7 @@ function buildDetailedDayOnlySection(location, forecast, index, labelText, unit 
   return parts.join(" ");
 }
 
-function buildDetailedNightOnlySection(location, forecast, index, labelText = "Night", unit = "C") {
+function buildDetailedNightOnlySection(location, forecast, index, labelText = "Night", unit = "C", opts = {}) {
   const entries = getNightEntriesForDayIndex(forecast, index, location.timezone);
 
   const parts = [
@@ -1690,10 +1758,15 @@ function buildDetailedNightOnlySection(location, forecast, index, labelText = "N
     describeDetailedPeriodIntro(entries, location.timezone, true)
   ];
 
+  const precipLines = buildPrecipSummaryLines(entries, location.timezone, {
+    includeTiming: !!opts.includePrecipTiming
+  });
+
   const wind = describeWindLine(entries, location.timezone, "night", unit);
   const temp = describeNightTemperatureLine(forecast, index, entries, unit);
   const windChill = describeNightWindChill(entries, unit);
 
+  if (opts.includePrecipAmounts) parts.push(...precipLines);
   if (wind) parts.push(wind);
   if (temp) parts.push(temp);
   if (windChill) parts.push(windChill);
@@ -1701,12 +1774,12 @@ function buildDetailedNightOnlySection(location, forecast, index, labelText = "N
   return parts.join(" ");
 }
 
-function buildDetailedDaySection(location, forecast, index, unit = "C") {
+function buildDetailedDaySection(location, forecast, index, unit = "C", opts = {}) {
   const d = forecast.daily || {};
   const dateStr = d.time?.[index];
   const label = index === 0 ? "Today" : dayName(dateStr, location.timezone);
 
-  return buildDetailedDayOnlySection(location, forecast, index, label, unit);
+  return buildDetailedDayOnlySection(location, forecast, index, label, unit, opts);
 }
 
 function buildRestOfTodaySection(location, forecast, unit = "C") {
@@ -1732,27 +1805,72 @@ function buildRestOfTodaySection(location, forecast, unit = "C") {
   return parts.join(" ");
 }
 
-function buildDetailedNightSection(location, forecast, index, unit = "C") {
+function buildRemainingTodayAndTonightSection(location, forecast, unit = "C") {
+  const daytimeEntries = getRemainingDayEntriesForToday(forecast, location.timezone);
+  const tonightEntries = getNightEntriesForDayIndex(forecast, 0, location.timezone);
+  const nowHour = getNowHourInTz(location.timezone);
+  const parts = [];
+
+  if (daytimeEntries.length && nowHour < 18) {
+    const dayParts = [
+      "Today.",
+      describeDetailedPeriodIntro(daytimeEntries, location.timezone, false)
+    ];
+
+    const wind = describeWindLine(daytimeEntries, location.timezone, "day", unit);
+    const high = describeDayTemperatureLine(forecast, 0, unit);
+    const windChill = describeDayWindChill(daytimeEntries, unit);
+
+    if (wind) dayParts.push(wind);
+    if (high) dayParts.push(high);
+    if (windChill) dayParts.push(windChill);
+
+    parts.push(dayParts.join(" "));
+  }
+
+  if (tonightEntries.length) {
+    parts.push(buildDetailedNightOnlySection(location, forecast, 0, "Tonight", unit));
+  }
+
+  if (!parts.length) {
+    return buildRestOfTodaySection(location, forecast, unit);
+  }
+
+  return parts.join(" ");
+}
+
+function buildDetailedNightSection(location, forecast, index, unit = "C", opts = {}) {
   const d = forecast.daily || {};
   const dateStr = d.time?.[index];
   const label = index === 0 ? "Tonight" : `${dayName(dateStr, location.timezone)} night`;
 
-  return buildDetailedNightOnlySection(location, forecast, index, label, unit);
+  return buildDetailedNightOnlySection(location, forecast, index, label, unit, opts);
 }
 
-function buildShortDaySection(location, forecast, index, unit = "C") {
+function buildShortDaySection(location, forecast, index, unit = "C", opts = {}) {
   const d = forecast.daily || {};
   const dateStr = d.time?.[index];
   const entries = getHourlyEntriesForDay(forecast, dateStr);
   const label = dayName(dateStr, location.timezone);
 
-  return `${label}. ${describeSimplePeriodIntro(entries, false)} High ${formatForecastTempValue(
-    d.temperature_2m_max?.[index],
-    unit
-  )}.`;
+  const parts = [
+    `${label}.`,
+    describeSimplePeriodIntro(entries, false),
+    `High ${formatForecastTempValue(d.temperature_2m_max?.[index], unit)}.`
+  ];
+
+  if (opts.includePrecipAmounts) {
+    parts.push(
+      ...buildPrecipSummaryLines(entries, location.timezone, {
+        includeTiming: !!opts.includePrecipTiming
+      })
+    );
+  }
+
+  return parts.join(" ");
 }
 
-function buildShortNightSection(location, forecast, index, labelText = "Night", unit = "C") {
+function buildShortNightSection(location, forecast, index, labelText = "Night", unit = "C", opts = {}) {
   const d = forecast.daily || {};
   const entries = getNightEntriesForDayIndex(forecast, index, location.timezone);
 
@@ -1760,10 +1878,21 @@ function buildShortNightSection(location, forecast, index, labelText = "Night", 
   const sameDayMin = d.temperature_2m_min?.[index];
   const lowValue = Number.isFinite(Number(nextDayMin)) ? nextDayMin : sameDayMin;
 
-  return `${labelText}. ${describeSimplePeriodIntro(entries, true)} Low ${formatForecastTempValue(
-    lowValue,
-    unit
-  )}.`;
+  const parts = [
+    `${labelText}.`,
+    describeSimplePeriodIntro(entries, true),
+    `Low ${formatForecastTempValue(lowValue, unit)}.`
+  ];
+
+  if (opts.includePrecipAmounts) {
+    parts.push(
+      ...buildPrecipSummaryLines(entries, location.timezone, {
+        includeTiming: !!opts.includePrecipTiming
+      })
+    );
+  }
+
+  return parts.join(" ");
 }
 
 function dailyForecastSpeech(location, forecast, index, unit = "C") {
@@ -1772,12 +1901,32 @@ function dailyForecastSpeech(location, forecast, index, unit = "C") {
     return `That forecast day is not available for ${placeLabel(location)}.`;
   }
 
+  const opts = {
+    includePrecipAmounts: true,
+    includePrecipTiming: index <= 1
+  };
+
   if (index === 0) {
-    return buildDetailedDaySection(location, forecast, index, unit);
+    return buildDetailedDaySection(location, forecast, index, unit, opts);
   }
 
-  const daySection = buildDetailedDaySection(location, forecast, index, unit);
-  const nightSection = buildDetailedNightSection(location, forecast, index, unit);
+  const daySection =
+    index <= 1
+      ? buildDetailedDaySection(location, forecast, index, unit, opts)
+      : buildShortDaySection(location, forecast, index, unit, opts);
+
+  const nightSection =
+    index <= 1
+      ? buildDetailedNightSection(location, forecast, index, unit, opts)
+      : buildShortNightSection(
+          location,
+          forecast,
+          index,
+          `${dayName(d.time?.[index], location.timezone)} night`,
+          unit,
+          opts
+        );
+
   return `${daySection} ${nightSection}`.trim();
 }
 
@@ -1789,7 +1938,7 @@ function buildAll7DayEntry(location, forecast, index, includeNight = true, today
   const parts = [];
 
   if (index === 0 && todayMode === "remaining") {
-    parts.push(buildRestOfTodaySection(location, forecast, unit));
+    parts.push(buildRemainingTodayAndTonightSection(location, forecast, unit));
   } else if (index <= 1) {
     parts.push(buildDetailedDayOnlySection(location, forecast, index, dayLabel, unit));
   } else {
@@ -1798,6 +1947,7 @@ function buildAll7DayEntry(location, forecast, index, includeNight = true, today
 
   if (includeNight) {
     if (index === 0 && todayMode === "remaining") {
+      // already included inside buildRemainingTodayAndTonightSection
     } else if (index <= 1) {
       parts.push(buildDetailedNightOnlySection(location, forecast, index, nightLabel, unit));
     } else {
