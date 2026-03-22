@@ -218,8 +218,7 @@ function shouldTrackHistoryState(state) {
     "us-location-menu",
     "main-menu",
     "forecast-menu",
-    "exchange-menu",
-    "exchange-amount"
+    "exchange-menu"
   ].includes(state);
 }
 
