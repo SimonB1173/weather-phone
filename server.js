@@ -3162,9 +3162,9 @@ if (playback.type === "all7") {
     forecast = await fetchForecast(location);
   }
   return sevenDayForecastSpeech(location, forecast, unit);
-}
+ }
 
-return "";
+ return "";
 }
 
 async function goBackOneMenu(req) {
