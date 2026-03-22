@@ -3002,24 +3002,34 @@ async function buildPlaybackSpeech(location, forecast, playback, unit = "C") {
   }
 
   if (playback.type === "daily") {
-    if (location?.country === "CA") {
-      const ecPage = await fetchEnvironmentCanadaForecastPage(location);
-      const ecSpeech = dailyForecastSpeechEC(location, ecPage, playback.index, unit);
-      if (ecSpeech) return ecSpeech;
-    }
+  if (location?.country === "CA") {
+    const ecPage = await fetchEnvironmentCanadaForecastPage(location);
+    console.log("EC PAGE FOR DAILY:", JSON.stringify(ecPage, null, 2));
 
-    return dailyForecastSpeech(location, forecast, playback.index, unit);
+    const ecSpeech = dailyForecastSpeechEC(location, ecPage, playback.index, unit);
+    console.log("EC SPEECH FOR DAILY:", ecSpeech);
+
+    if (ecSpeech) return ecSpeech;
   }
+
+  console.log("FALLING BACK TO OPEN-METEO DAILY");
+  return dailyForecastSpeech(location, forecast, playback.index, unit);
+}
 
   if (playback.type === "all7") {
-    if (location?.country === "CA") {
-      const ecPage = await fetchEnvironmentCanadaForecastPage(location);
-      const ecSpeech = sevenDayForecastSpeechEC(location, ecPage, unit);
-      if (ecSpeech) return ecSpeech;
-    }
+  if (location?.country === "CA") {
+    const ecPage = await fetchEnvironmentCanadaForecastPage(location);
+    console.log("EC PAGE FOR ALL7:", JSON.stringify(ecPage, null, 2));
 
-    return sevenDayForecastSpeech(location, forecast, unit);
+    const ecSpeech = sevenDayForecastSpeechEC(location, ecPage, unit);
+    console.log("EC SPEECH FOR ALL7:", ecSpeech);
+
+    if (ecSpeech) return ecSpeech;
   }
+
+  console.log("FALLING BACK TO OPEN-METEO ALL7");
+  return sevenDayForecastSpeech(location, forecast, unit);
+}
 
   return "";
 }
