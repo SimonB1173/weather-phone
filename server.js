@@ -2305,40 +2305,78 @@ function extractEcIssuedText($) {
 }
 
 function extractEcDailyPeriods($) {
-  const labelPattern =
-    /^(Tonight|Monday night|Tuesday night|Wednesday night|Thursday night|Friday night|Saturday night|Sunday night|Today|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\s*:?\s*(.+)$/i;
+  const bodyText = cleanEcText($("body").text());
+  if (!bodyText) return [];
+
+  const detailedIndex = bodyText.search(/Detailed Forecast/i);
+  const sourceText = detailedIndex >= 0 ? bodyText.slice(detailedIndex) : bodyText;
+
+  const labelRegex =
+    /\b(Tonight|Today|Monday night|Tuesday night|Wednesday night|Thursday night|Friday night|Saturday night|Sunday night|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Mon(?:day)?(?:,\s*\d{1,2}\s+\w+)?|Tue(?:sday)?(?:,\s*\d{1,2}\s+\w+)?|Wed(?:nesday)?(?:,\s*\d{1,2}\s+\w+)?|Thu(?:rsday)?(?:,\s*\d{1,2}\s+\w+)?|Fri(?:day)?(?:,\s*\d{1,2}\s+\w+)?|Sat(?:urday)?(?:,\s*\d{1,2}\s+\w+)?|Sun(?:day)?(?:,\s*\d{1,2}\s+\w+)?|Night)\b\s*:*/gi;
+
+  const matches = [];
+  let match;
+
+  while ((match = labelRegex.exec(sourceText)) !== null) {
+    matches.push({
+      rawLabel: cleanEcText(match[1]),
+      index: match.index,
+      length: match[0].length
+    });
+  }
+
+  if (!matches.length) return [];
+
+  function normalizeDayLabel(raw, prevDayLabel = "") {
+    const t = cleanEcText(raw).toLowerCase();
+
+    if (t === "today") return "Today";
+    if (t === "tonight") return "Tonight";
+    if (t === "night") {
+      if (prevDayLabel && prevDayLabel !== "Today") return `${prevDayLabel} night`;
+      return "Tonight";
+    }
+
+    if (t.startsWith("mon")) return "Monday";
+    if (t.startsWith("tue")) return "Tuesday";
+    if (t.startsWith("wed")) return "Wednesday";
+    if (t.startsWith("thu")) return "Thursday";
+    if (t.startsWith("fri")) return "Friday";
+    if (t.startsWith("sat")) return "Saturday";
+    if (t.startsWith("sun")) return "Sunday";
+
+    return cleanEcText(raw);
+  }
 
   const periods = [];
-  const seen = new Set();
+  let lastDayLabel = "";
 
-  const candidateTexts = $("main, body")
-    .find("h1, h2, h3, h4, h5, h6, p, li, div, section, article, strong, b")
-    .toArray()
-    .map((el) => cleanEcText($(el).text()))
-    .filter((text) => text && text.length > 10);
+  for (let i = 0; i < matches.length; i++) {
+    const current = matches[i];
+    const next = matches[i + 1];
 
-  for (const text of candidateTexts) {
-    const match = text.match(labelPattern);
-    if (!match) continue;
+    const start = current.index + current.length;
+    const end = next ? next.index : sourceText.length;
 
-    const label = cleanEcText(match[1]);
-    const body = cleanEcText(match[2]);
+    let text = cleanEcText(sourceText.slice(start, end));
+    text = text.replace(/^[:.\-\s]+/, "").trim();
 
-    if (!isEcDayLabel(label) || !body) continue;
+    if (!text || text.length < 8) continue;
 
-    const key = normalizeEcLabel(label);
-    if (seen.has(key)) continue;
+    const label = normalizeDayLabel(current.rawLabel, lastDayLabel);
+
+    if (!/night$/i.test(label) && label !== "Tonight") {
+      lastDayLabel = label;
+    }
 
     periods.push({
       label,
-      text: body
+      text
     });
-    seen.add(key);
   }
 
-  if (periods.length >= 2) {
-    return periods;
-  }
+  return periods;
+}
 
   const fullText = cleanEcText($("body").text());
   if (!fullText) return [];
@@ -2724,64 +2762,69 @@ async function fetchEnvironmentCanadaForecastPage(location) {
 
 function buildEcDayPairs(periods) {
   const pairs = [];
-  const used = new Set();
+  let i = 0;
 
-  for (let i = 0; i < periods.length; i++) {
-    if (used.has(i)) continue;
+  while (i < periods.length) {
     const current = periods[i];
     const next = periods[i + 1];
 
-    const currentLabel = normalizeEcLabel(current?.label || "");
-    const nextLabel = normalizeEcLabel(next?.label || "");
+    if (!current) break;
 
-    if (currentLabel.includes("night") || currentLabel === "tonight") {
+    const currentLabel = normalizeEcLabel(current.label);
+
+    if (currentLabel === "tonight" || currentLabel.endsWith(" night")) {
+      pairs.push({
+        day: currentLabel === "tonight" ? { label: "Today", text: "" } : null,
+        night: current
+      });
+      i += 1;
       continue;
     }
 
     let night = null;
-    if (next && (nextLabel.includes("night") || nextLabel === "tonight")) {
-      night = next;
-      used.add(i + 1);
+    if (next) {
+      const nextLabel = normalizeEcLabel(next.label);
+      if (
+        nextLabel === "tonight" ||
+        nextLabel === `${currentLabel} night` ||
+        nextLabel.endsWith(" night")
+      ) {
+        night = next;
+        i += 1;
+      }
     }
 
     pairs.push({
       day: current,
       night
     });
+
+    i += 1;
   }
 
-  if (!pairs.length && periods.length) {
-    for (let i = 0; i < periods.length; i += 2) {
-      pairs.push({
-        day: periods[i] || null,
-        night: periods[i + 1] || null
-      });
-    }
-  }
-
-  return pairs;
+  return pairs.filter((p) => p.day || p.night);
 }
 
 function dailyForecastSpeechEC(location, ecPage, index, unit = "C") {
   const pairs = buildEcDayPairs(ecPage?.dailyPeriods || []);
-  if (!pairs.length || !pairs[index] || !pairs[index].day) return "";
+  if (!pairs.length || !pairs[index] || (!pairs[index].day && !pairs[index].night)) return "";
 
   const pair = pairs[index];
   const parts = [];
 
   if (index === 0) {
     if (ecPage?.issuedText) {
-      parts.push(`Issued by Environment Canada. ${cleanEcText(ecPage.issuedText)}`);
+      parts.push(`Issued by Environment Canada. ${cleanEcText(ecPage.issuedText)}.`);
     } else {
       parts.push("Issued by Environment Canada.");
     }
   }
 
-  if (pair.day?.label && pair.day?.text) {
+  if (pair.day?.text) {
     parts.push(`${pair.day.label}. ${cleanEcText(pair.day.text)}.`);
   }
 
-  if (pair.night?.label && pair.night?.text) {
+  if (pair.night?.text) {
     parts.push(`${pair.night.label}. ${cleanEcText(pair.night.text)}.`);
   }
 
@@ -2795,7 +2838,7 @@ function sevenDayForecastSpeechEC(location, ecPage, unit = "C") {
   const parts = [];
 
   if (ecPage?.issuedText) {
-    parts.push(`Issued by Environment Canada. ${cleanEcText(ecPage.issuedText)}`);
+    parts.push(`Issued by Environment Canada. ${cleanEcText(ecPage.issuedText)}.`);
   } else {
     parts.push("Issued by Environment Canada.");
   }
@@ -2805,11 +2848,11 @@ function sevenDayForecastSpeechEC(location, ecPage, unit = "C") {
   for (let i = 0; i < Math.min(7, pairs.length); i++) {
     const pair = pairs[i];
 
-    if (pair.day?.label && pair.day?.text) {
+    if (pair.day?.text) {
       parts.push(`${pair.day.label}. ${cleanEcText(pair.day.text)}.`);
     }
 
-    if (pair.night?.label && pair.night?.text) {
+    if (pair.night?.text) {
       parts.push(`${pair.night.label}. ${cleanEcText(pair.night.text)}.`);
     }
   }
@@ -3080,16 +3123,7 @@ async function buildPlaybackSpeech(location, forecast, playback, unit = "C") {
     if (location?.country === "CA") {
       const ecPage = await fetchEnvironmentCanadaForecastPage(location);
       const ecSpeech = hourlyForecastSpeechEC(location, ecPage, playback.hours || 12, unit);
-
-      if (ecSpeech) {
-        return ecSpeech;
-      }
-
-      // only if EC completely fails
-      if (!forecast) {
-        forecast = await fetchForecast(location);
-      }
-      return nextHoursSpeech(location, forecast, playback.hours || 6, unit);
+      if (ecSpeech) return ecSpeech;
     }
 
     if (!forecast) {
@@ -3099,58 +3133,35 @@ async function buildPlaybackSpeech(location, forecast, playback, unit = "C") {
   }
 
   if (playback.type === "daily") {
-    if (location?.country === "CA") {
-      const ecPage = await fetchEnvironmentCanadaForecastPage(location);
-      const ecSpeech = dailyForecastSpeechEC(location, ecPage, playback.index, unit);
+  if (location?.country === "CA") {
+    const ecPage = await fetchEnvironmentCanadaForecastPage(location);
+    const ecSpeech = dailyForecastSpeechEC(location, ecPage, playback.index, unit);
+    if (ecSpeech) return ecSpeech;
 
-      if (ecSpeech) {
-        return ecSpeech;
-      }
-
-      // do not silently prefer old API unless EC totally failed
-      if (ecPage) {
-        return `Issued by Environment Canada. I could not read the detailed daily forecast page for ${placeLabel(location)} at this moment.`;
-      }
-
-      if (!forecast) {
-        forecast = await fetchForecast(location);
-      }
-      return dailyForecastSpeech(location, forecast, playback.index, unit);
-    }
-
-    if (!forecast) {
-      forecast = await fetchForecast(location);
-    }
-    return dailyForecastSpeech(location, forecast, playback.index, unit);
+    return `Issued by Environment Canada. I could not read the detailed forecast page correctly for ${placeLabel(location)}.`;
   }
 
-  if (playback.type === "all7") {
-    if (location?.country === "CA") {
-      const ecPage = await fetchEnvironmentCanadaForecastPage(location);
-      const ecSpeech = sevenDayForecastSpeechEC(location, ecPage, unit);
+  if (!forecast) {
+    forecast = await fetchForecast(location);
+  }
+  return dailyForecastSpeech(location, forecast, playback.index, unit);
+}
 
-      if (ecSpeech) {
-        return ecSpeech;
-      }
+if (playback.type === "all7") {
+  if (location?.country === "CA") {
+    const ecPage = await fetchEnvironmentCanadaForecastPage(location);
+    const ecSpeech = sevenDayForecastSpeechEC(location, ecPage, unit);
+    console.log("EC issuedText:", ecPage?.issuedText);
+    console.log("EC dailyPeriods:", JSON.stringify(ecPage?.dailyPeriods || [], null, 2));
+    if (ecSpeech) return ecSpeech;
 
-      // do not silently prefer old API unless EC totally failed
-      if (ecPage) {
-        return `Issued by Environment Canada. I could not read the full 7 day forecast page for ${placeLabel(location)} at this moment.`;
-      }
-
-      if (!forecast) {
-        forecast = await fetchForecast(location);
-      }
-      return sevenDayForecastSpeech(location, forecast, unit);
-    }
-
-    if (!forecast) {
-      forecast = await fetchForecast(location);
-    }
-    return sevenDayForecastSpeech(location, forecast, unit);
+    return `Issued by Environment Canada. I could not read the full seven day forecast page correctly for ${placeLabel(location)}.`;
   }
 
-  return "";
+  if (!forecast) {
+    forecast = await fetchForecast(location);
+  }
+  return sevenDayForecastSpeech(location, forecast, unit);
 }
 
 async function goBackOneMenu(req) {
