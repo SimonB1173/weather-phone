@@ -2384,7 +2384,7 @@ function extractEcDailyPeriods($) {
   }
 
   return fallbackPeriods;
-}v
+}
 
 function parseEcHourValue(raw) {
   const text = cleanEcText(raw).toLowerCase();
