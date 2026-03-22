@@ -3164,6 +3164,9 @@ if (playback.type === "all7") {
   return sevenDayForecastSpeech(location, forecast, unit);
 }
 
+return "";
+}
+
 async function goBackOneMenu(req) {
   const currentState = getMenuState(req);
   const history = getMenuHistory(req);
