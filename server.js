@@ -2487,9 +2487,29 @@ app.post("/voice", async (req, res) => {
     clearCallState(req);
     setUnitPreference(req, "C");
 
+    const greeting = getGreetingForTime("America/Toronto");
+
     console.log("VOICE CallSid:", req.body.CallSid, "From:", req.body.From);
 
+    // Locked greeting first
+    say(twiml, `${greeting}.`);
+
+    // Interruptible intro + location menu
+    const gather = twiml.gather(gatherOptions("/set-location-choice", 7, 1));
+
+    say(
+      gather,
+      "Welcome to the Weather Line. " +
+        "Press 1 for Montreal. " +
+        "2 for Tosh. " +
+        "3 for Laurentians. " +
+        "4 for United States. " +
+        "Press 9 to leave a comment or suggestion."
+    );
+
+    // If no key is pressed, replay the normal location menu prompt
     twiml.redirect({ method: "POST" }, "/location-menu-prompt");
+
     return res.type("text/xml").send(twiml.toString());
   } catch (error) {
     console.error("VOICE route error:", error.message);
