@@ -3,7 +3,6 @@ const axios = require("axios");
 const twilio = require("twilio");
 const fs = require("fs");
 const path = require("path");
-const cheerio = require("cheerio");
 
 const app = express();
 app.use(express.urlencoded({ extended: false }));
@@ -21,7 +20,6 @@ const INTRO_AUDIO_URL = process.env.INTRO_AUDIO_URL || "";
 const forecastCache = new Map();
 const inFlightForecasts = new Map();
 const canadaAlertCache = new Map();
-const environmentCanadaPageCache = new Map();
 
 const temporaryLocationsByCall = new Map();
 const pendingLocationChoiceByCall = new Map();
@@ -33,7 +31,6 @@ const unitPreferenceByCall = new Map();
 const FORECAST_CACHE_MS = 10 * 60 * 1000;
 const STALE_FORECAST_MS = 60 * 60 * 1000;
 const ALERT_CACHE_MS = 10 * 60 * 1000;
-const EC_PAGE_CACHE_MS = 10 * 60 * 1000;
 
 const VOICEMAILS_FILE = path.join(__dirname, "voicemails.json");
 
@@ -1192,18 +1189,13 @@ function formatPrecipAmount(value) {
 
 function isSnowEntry(entry) {
   const code = Number(entry.weatherCode || entry.code);
-  return (
-    Number(entry.snowfall || entry.snow || 0) > 0.02 ||
-    [71, 73, 75, 77, 85, 86].includes(code)
-  );
+  return Number(entry.snowfall || entry.snow || 0) > 0.02 || [71, 73, 75, 77, 85, 86].includes(code);
 }
 
 function isRainEntry(entry) {
   const code = Number(entry.weatherCode || entry.code);
-  return (
-    Number(entry.rain || 0) + Number(entry.showers || 0) > 0.05 ||
-    [51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82].includes(code)
-  );
+  return Number(entry.rain || 0) + Number(entry.showers || 0) > 0.05 ||
+    [51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82].includes(code);
 }
 
 function buildPrecipSummaryLines(entries, timezone, { includeTiming = false } = {}) {
@@ -1576,11 +1568,7 @@ function describeWindLine(entries, timezone, type = "day", unit = "C") {
   }
 
   if (firstActive && secondActive) {
-    if (
-      secondWind <= activeSpeed &&
-      secondGust < activeGust &&
-      firstWind >= (unit === "F" ? 12 : 20)
-    ) {
+    if (secondWind <= activeSpeed && secondGust < activeGust && firstWind >= (unit === "F" ? 12 : 20)) {
       return `Wind ${firstDir} ${firstWind}${
         firstGust >= firstWind + gustDelta
           ? ` ${speedUnitLabel(unit)} gusting to ${firstGust}`
@@ -1794,22 +1782,27 @@ function buildDetailedDaySection(location, forecast, index, unit = "C", opts = {
   return buildDetailedDayOnlySection(location, forecast, index, label, unit, opts);
 }
 
-function buildRestOfTodaySection(location, forecast, unit = "C") {
+function buildRestOfTodaySection(location, forecast, unit = "C", opts = {}) {
   const entries = getRemainingEntriesForToday(forecast, location.timezone);
 
   if (!entries.length) {
-    return buildDetailedNightOnlySection(location, forecast, 0, "Tonight", unit);
+    return buildDetailedNightOnlySection(location, forecast, 0, "Tonight", unit, opts);
   }
 
   const parts = [
-    `Today.`,
+    "Today.",
     describeDetailedPeriodIntro(entries, location.timezone, false)
   ];
+
+  const precipLines = buildPrecipSummaryLines(entries, location.timezone, {
+    includeTiming: !!opts.includePrecipTiming
+  });
 
   const wind = describeWindLine(entries, location.timezone, "day", unit);
   const high = describeDayTemperatureLine(forecast, 0, unit);
   const windChill = describeDayWindChill(entries, unit);
 
+  if (opts.includePrecipAmounts) parts.push(...precipLines);
   if (wind) parts.push(wind);
   if (high) parts.push(high);
   if (windChill) parts.push(windChill);
@@ -1817,7 +1810,7 @@ function buildRestOfTodaySection(location, forecast, unit = "C") {
   return parts.join(" ");
 }
 
-function buildRemainingTodayAndTonightSection(location, forecast, unit = "C") {
+function buildRemainingTodayAndTonightSection(location, forecast, unit = "C", opts = {}) {
   const daytimeEntries = getRemainingDayEntriesForToday(forecast, location.timezone);
   const tonightEntries = getNightEntriesForDayIndex(forecast, 0, location.timezone);
   const nowHour = getNowHourInTz(location.timezone);
@@ -1829,10 +1822,15 @@ function buildRemainingTodayAndTonightSection(location, forecast, unit = "C") {
       describeDetailedPeriodIntro(daytimeEntries, location.timezone, false)
     ];
 
+    const precipLines = buildPrecipSummaryLines(daytimeEntries, location.timezone, {
+      includeTiming: !!opts.includePrecipTiming
+    });
+
     const wind = describeWindLine(daytimeEntries, location.timezone, "day", unit);
     const high = describeDayTemperatureLine(forecast, 0, unit);
     const windChill = describeDayWindChill(daytimeEntries, unit);
 
+    if (opts.includePrecipAmounts) dayParts.push(...precipLines);
     if (wind) dayParts.push(wind);
     if (high) dayParts.push(high);
     if (windChill) dayParts.push(windChill);
@@ -1841,11 +1839,11 @@ function buildRemainingTodayAndTonightSection(location, forecast, unit = "C") {
   }
 
   if (tonightEntries.length) {
-    parts.push(buildDetailedNightOnlySection(location, forecast, 0, "Tonight", unit));
+    parts.push(buildDetailedNightOnlySection(location, forecast, 0, "Tonight", unit, opts));
   }
 
   if (!parts.length) {
-    return buildRestOfTodaySection(location, forecast, unit);
+    return buildRestOfTodaySection(location, forecast, unit, opts);
   }
 
   return parts.join(" ");
@@ -1942,28 +1940,40 @@ function dailyForecastSpeech(location, forecast, index, unit = "C") {
   return `${daySection} ${nightSection}`.trim();
 }
 
-function buildAll7DayEntry(location, forecast, index, includeNight = true, todayMode = "full", unit = "C") {
+function buildAll7DayEntry(
+  location,
+  forecast,
+  index,
+  includeNight = true,
+  todayMode = "full",
+  unit = "C"
+) {
   const d = forecast.daily || {};
   const dateStr = d.time?.[index];
   const dayLabel = index === 0 ? "Today" : dayName(dateStr, location.timezone);
   const nightLabel = index === 0 ? "Tonight" : `${dayName(dateStr, location.timezone)} night`;
   const parts = [];
 
+  const opts = {
+    includePrecipAmounts: true,
+    includePrecipTiming: index <= 1
+  };
+
   if (index === 0 && todayMode === "remaining") {
-    parts.push(buildRemainingTodayAndTonightSection(location, forecast, unit));
+    parts.push(buildRemainingTodayAndTonightSection(location, forecast, unit, opts));
   } else if (index <= 1) {
-    parts.push(buildDetailedDayOnlySection(location, forecast, index, dayLabel, unit));
+    parts.push(buildDetailedDayOnlySection(location, forecast, index, dayLabel, unit, opts));
   } else {
-    parts.push(buildShortDaySection(location, forecast, index, unit));
+    parts.push(buildShortDaySection(location, forecast, index, unit, opts));
   }
 
   if (includeNight) {
     if (index === 0 && todayMode === "remaining") {
       // already included inside buildRemainingTodayAndTonightSection
     } else if (index <= 1) {
-      parts.push(buildDetailedNightOnlySection(location, forecast, index, nightLabel, unit));
+      parts.push(buildDetailedNightOnlySection(location, forecast, index, nightLabel, unit, opts));
     } else {
-      parts.push(buildShortNightSection(location, forecast, index, nightLabel, unit));
+      parts.push(buildShortNightSection(location, forecast, index, nightLabel, unit, opts));
     }
   }
 
@@ -2198,575 +2208,6 @@ async function fetchEnvironmentCanadaCurrent(location) {
   }
 }
 
-function decodeHtmlEntities(text) {
-  return String(text || "")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function normalizeEnvironmentCanadaUrl(href) {
-  if (!href) return "";
-  if (/^https?:\/\//i.test(href)) return href;
-  return `https://weather.gc.ca${href.startsWith("/") ? href : `/${href}`}`;
-}
-
-function getEnvironmentCanadaCacheKey(location) {
-  return `ec-page:${cacheKeyForLocation(location)}`;
-}
-
-function getCachedEnvironmentCanadaPage(location) {
-  const key = getEnvironmentCanadaCacheKey(location);
-  const cached = environmentCanadaPageCache.get(key);
-  if (!cached) return null;
-  if (Date.now() - cached.timestamp > EC_PAGE_CACHE_MS) return null;
-  return cached.data;
-}
-
-function setCachedEnvironmentCanadaPage(location, data) {
-  const key = getEnvironmentCanadaCacheKey(location);
-  environmentCanadaPageCache.set(key, {
-    data,
-    timestamp: Date.now()
-  });
-}
-
-function cleanEcText(text) {
-  return decodeHtmlEntities(
-    String(text || "")
-      .replace(/\s+/g, " ")
-      .replace(/\.\s*\./g, ".")
-      .trim()
-  );
-}
-
-function isEcDayLabel(text) {
-  const t = String(text || "").trim().toLowerCase();
-  return [
-    "today",
-    "tonight",
-    "monday",
-    "monday night",
-    "tuesday",
-    "tuesday night",
-    "wednesday",
-    "wednesday night",
-    "thursday",
-    "thursday night",
-    "friday",
-    "friday night",
-    "saturday",
-    "saturday night",
-    "sunday",
-    "sunday night"
-  ].includes(t);
-}
-
-function extractEcIssuedText($) {
-  const bodyText = cleanEcText($("body").text());
-
-  const patterns = [
-    /Issued by Environment Canada\s+at\s+([^.]*)/i,
-    /Issued at\s+([^.]*)/i,
-    /Forecast issued:\s*([^.]*)/i,
-    /Forecast updated:\s*([^.]*)/i,
-    /Updated at\s+([^.]*)/i
-  ];
-
-  for (const pattern of patterns) {
-    const match = bodyText.match(pattern);
-    if (match && match[1]) {
-      return cleanEcText(match[0]);
-    }
-  }
-
-  const candidate = $("body")
-    .find("*")
-    .toArray()
-    .map((el) => cleanEcText($(el).text()))
-    .find((text) => /issued|updated/i.test(text) && text.length <= 120);
-
-  return candidate || "";
-}
-
-function extractEcDailyPeriods($) {
-  const periods = [];
-  const seen = new Set();
-
-  $("h1, h2, h3, h4, h5, strong, b").each((_, el) => {
-    const label = cleanEcText($(el).text());
-    if (!isEcDayLabel(label) || seen.has(label.toLowerCase())) return;
-
-    let text = "";
-
-    const parentText = cleanEcText($(el).parent().text());
-    if (parentText && parentText.length > label.length + 20) {
-      text = parentText.replace(new RegExp(`^${label}\\s*`, "i"), "").trim();
-    }
-
-    if (!text) {
-      const siblingTexts = [];
-      let next = $(el).parent().next();
-      let count = 0;
-
-      while (next.length && count < 4) {
-        const siblingText = cleanEcText(next.text());
-        if (!siblingText) {
-          next = next.next();
-          count += 1;
-          continue;
-        }
-
-        const firstWords = siblingText.split(".")[0].trim();
-        if (isEcDayLabel(firstWords)) break;
-
-        siblingTexts.push(siblingText);
-        next = next.next();
-        count += 1;
-      }
-
-      text = cleanEcText(siblingTexts.join(" "));
-    }
-
-    if (text) {
-      seen.add(label.toLowerCase());
-      periods.push({
-        label,
-        text
-      });
-    }
-  });
-
-  if (periods.length >= 2) {
-    return periods;
-  }
-
-  const fullText = cleanEcText($("body").text());
-  const labels = [
-    "Today",
-    "Tonight",
-    "Monday",
-    "Monday night",
-    "Tuesday",
-    "Tuesday night",
-    "Wednesday",
-    "Wednesday night",
-    "Thursday",
-    "Thursday night",
-    "Friday",
-    "Friday night",
-    "Saturday",
-    "Saturday night",
-    "Sunday",
-    "Sunday night"
-  ];
-
-  const matches = [];
-  for (const label of labels) {
-    const regex = new RegExp(`\\b${label.replace(" ", "\\s+")}\\b`, "gi");
-    let m;
-    while ((m = regex.exec(fullText)) !== null) {
-      matches.push({
-        label,
-        index: m.index
-      });
-    }
-  }
-
-  matches.sort((a, b) => a.index - b.index);
-
-  const merged = [];
-  const usedIndexes = new Set();
-
-  for (let i = 0; i < matches.length; i++) {
-    if (usedIndexes.has(i)) continue;
-    const current = matches[i];
-    const next = matches[i + 1];
-    const start = current.index;
-    const end = next ? next.index : fullText.length;
-    const block = cleanEcText(fullText.slice(start, end));
-    if (block && block.length > current.label.length + 10) {
-      merged.push({
-        label: current.label,
-        text: cleanEcText(block.replace(new RegExp(`^${current.label}\\s*`, "i"), ""))
-      });
-    }
-  }
-
-  return merged;
-}
-
-function parseEcHourlyTimeToIso(label, baseDate, timezone) {
-  const raw = cleanEcText(label).toUpperCase();
-  const match = raw.match(/(\d{1,2})(?::(\d{2}))?\s*(AM|PM)/i);
-  if (!match) return "";
-
-  let hour = Number(match[1]);
-  const minute = Number(match[2] || 0);
-  const suffix = String(match[3] || "").toUpperCase();
-
-  if (suffix === "PM" && hour < 12) hour += 12;
-  if (suffix === "AM" && hour === 12) hour = 0;
-
-  const [year, month, day] = String(baseDate).split("-").map(Number);
-  if (!year || !month || !day) return "";
-
-  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}T${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
-}
-
-function extractEcHourlyRows($, timezone) {
-  const rows = [];
-  const nowLocal = getCurrentLocalDateParts(timezone || "UTC");
-  const baseDate = nowLocal.date;
-
-  $("table").each((_, table) => {
-    const headers = $(table)
-      .find("thead th")
-      .toArray()
-      .map((th) => cleanEcText($(th).text()).toLowerCase());
-
-    const looksHourly =
-      headers.some((h) => h.includes("hour")) ||
-      headers.some((h) => h.includes("temperature")) ||
-      headers.some((h) => h.includes("condition"));
-
-    if (!looksHourly) return;
-
-    $(table)
-      .find("tbody tr")
-      .each((__, tr) => {
-        const cells = $(tr)
-          .find("td")
-          .toArray()
-          .map((td) => cleanEcText($(td).text()));
-
-        if (cells.length < 3) return;
-
-        const timeText = cells[0] || "";
-        const conditionText = cells[1] || "";
-        const tempText = cells.find((c) => /-?\d+\s*°/.test(c)) || "";
-        const precipText = cells.find((c) => /%/.test(c)) || "";
-        const windText = cells.find((c) => /km\/h|calm/i.test(c)) || "";
-
-        const iso = parseEcHourlyTimeToIso(timeText, baseDate, timezone);
-        const tempMatch = tempText.match(/(-?\d+)/);
-        const precipMatch = precipText.match(/(\d+)/);
-
-        rows.push({
-          timeText,
-          timeIso: iso,
-          conditionText,
-          temperatureC: tempMatch ? Number(tempMatch[1]) : null,
-          precipitationProbability: precipMatch ? Number(precipMatch[1]) : 0,
-          windText
-        });
-      });
-  });
-
-  return rows;
-}
-
-function detectPrecipTypeFromEcText(text) {
-  const t = String(text || "").toLowerCase();
-
-  if (/thunder/.test(t)) return "thunderstorms";
-  if (/freezing rain/.test(t)) return "freezing rain";
-  if (/snow|flurr|ice pellets/.test(t)) return "snow";
-  if (/showers|rain|drizzle/.test(t)) return "rain";
-  return "";
-}
-
-function isEcHourlyPrecipRow(row) {
-  const type = detectPrecipTypeFromEcText(row?.conditionText || "");
-  return !!type || Number(row?.precipitationProbability || 0) >= 50;
-}
-
-function buildEcHourlyTimingSentence(rows, timezone) {
-  const precipRows = rows.filter(isEcHourlyPrecipRow);
-  if (!precipRows.length) return "No significant rain or snow is expected in the next several hours.";
-
-  const first = precipRows[0];
-  const last = precipRows[precipRows.length - 1];
-  const precipType = detectPrecipTypeFromEcText(first.conditionText) || "precipitation";
-
-  const startText = first.timeIso ? formatLocalIsoTimeLabel(first.timeIso) : first.timeText;
-  const endText = last.timeIso
-    ? formatLocalIsoTimeLabel(addHoursToLocalIso(last.timeIso, 1))
-    : last.timeText;
-
-  if (precipType === "snow") {
-    return `Snow is expected from ${startText} until ${endText}.`;
-  }
-
-  if (precipType === "rain") {
-    return `Rain is expected from ${startText} until ${endText}.`;
-  }
-
-  if (precipType === "freezing rain") {
-    return `Freezing rain is expected from ${startText} until ${endText}.`;
-  }
-
-  if (precipType === "thunderstorms") {
-    return `Thunderstorms are expected from ${startText} until ${endText}.`;
-  }
-
-  return `Precipitation is expected from ${startText} until ${endText}.`;
-}
-
-function buildEcHourlyBlocks(rows, hoursToSpeak = 12) {
-  const limited = rows.slice(0, hoursToSpeak);
-  if (!limited.length) return [];
-
-  const blocks = [];
-  let current = {
-    start: limited[0],
-    end: limited[0],
-    rows: [limited[0]]
-  };
-
-  for (let i = 1; i < limited.length; i++) {
-    const a = cleanEcText(current.rows[current.rows.length - 1].conditionText).toLowerCase();
-    const b = cleanEcText(limited[i].conditionText).toLowerCase();
-
-    if (a === b) {
-      current.end = limited[i];
-      current.rows.push(limited[i]);
-    } else {
-      blocks.push(current);
-      current = {
-        start: limited[i],
-        end: limited[i],
-        rows: [limited[i]]
-      };
-    }
-  }
-
-  blocks.push(current);
-  return blocks;
-}
-
-function summarizeEcHourlyBlock(block, unit = "C") {
-  const start = block.start.timeIso
-    ? formatLocalIsoTimeLabel(block.start.timeIso)
-    : block.start.timeText;
-
-  const end = block.end.timeIso
-    ? formatLocalIsoTimeLabel(addHoursToLocalIso(block.end.timeIso, 1))
-    : block.end.timeText;
-
-  const temps = block.rows
-    .map((r) => r.temperatureC)
-    .filter((v) => Number.isFinite(v));
-
-  const avgTempC = temps.length ? average(temps) : null;
-  const avgTempText =
-    avgTempC !== null ? ` around ${Math.round(tempValueForUnit(avgTempC, unit))} degrees` : "";
-
-  const condition = cleanEcText(block.start.conditionText || "forecast");
-
-  return `From ${start} until ${end}, ${condition.toLowerCase()}${avgTempText}.`;
-}
-
-async function fetchEnvironmentCanadaForecastPage(location) {
-  if (!location || location.country !== "CA") return null;
-
-  const cached = getCachedEnvironmentCanadaPage(location);
-  if (cached) return cached;
-
-  const coordText =
-    location.ecCurrentCoords ||
-    `${Number(location.latitude).toFixed(3)},${Number(location.longitude).toFixed(3)}`;
-
-  const landingUrl = `https://weather.gc.ca/en/location/index.html?coords=${encodeURIComponent(coordText)}`;
-
-  try {
-    const landingResponse = await axios.get(landingUrl, {
-      timeout: 10000,
-      headers: {
-        "User-Agent": "weather-line-canada-forecast/1.0"
-      }
-    });
-
-    const landingHtml = String(landingResponse.data || "");
-    const $landing = cheerio.load(landingHtml);
-
-    let dailyUrl = "";
-    let hourlyUrl = "";
-
-    $landing("a").each((_, a) => {
-      const href = String($landing(a).attr("href") || "").trim();
-      const text = cleanEcText($landing(a).text()).toLowerCase();
-
-      if (!dailyUrl && (/city\/pages\//i.test(href) || /forecast/i.test(text))) {
-        dailyUrl = normalizeEnvironmentCanadaUrl(href);
-      }
-
-      if (
-        !hourlyUrl &&
-        (/hourly/i.test(href) || /hourly/i.test(text))
-      ) {
-        hourlyUrl = normalizeEnvironmentCanadaUrl(href);
-      }
-    });
-
-    if (!dailyUrl) {
-      dailyUrl = landingUrl;
-    }
-
-    if (!hourlyUrl) {
-      hourlyUrl = `https://weather.gc.ca/en/forecast/hourly/index.html?coords=${encodeURIComponent(coordText)}`;
-    }
-
-    const [dailyResponse, hourlyResponse] = await Promise.all([
-      axios.get(dailyUrl, {
-        timeout: 10000,
-        headers: { "User-Agent": "weather-line-canada-daily/1.0" }
-      }),
-      axios.get(hourlyUrl, {
-        timeout: 10000,
-        headers: { "User-Agent": "weather-line-canada-hourly/1.0" }
-      }).catch(() => ({ data: "" }))
-    ]);
-
-    const dailyHtml = String(dailyResponse.data || "");
-    const hourlyHtml = String(hourlyResponse.data || "");
-
-    const $daily = cheerio.load(dailyHtml);
-    const $hourly = cheerio.load(hourlyHtml);
-
-    const data = {
-      issuedText: extractEcIssuedText($daily),
-      dailyPeriods: extractEcDailyPeriods($daily),
-      hourlyRows: extractEcHourlyRows($hourly, location.timezone),
-      dailyUrl,
-      hourlyUrl
-    };
-
-    setCachedEnvironmentCanadaPage(location, data);
-    return data;
-  } catch (error) {
-    console.error("Environment Canada forecast page fetch failed:", error.message);
-    return null;
-  }
-}
-
-function buildEcDayPairs(periods) {
-  const pairs = [];
-  const used = new Set();
-
-  for (let i = 0; i < periods.length; i++) {
-    if (used.has(i)) continue;
-    const current = periods[i];
-    const next = periods[i + 1];
-
-    const currentLabel = String(current?.label || "").toLowerCase();
-    const nextLabel = String(next?.label || "").toLowerCase();
-
-    if (currentLabel.includes("night") || currentLabel === "tonight") {
-      continue;
-    }
-
-    let night = null;
-    if (next && (nextLabel.includes("night") || nextLabel === "tonight")) {
-      night = next;
-      used.add(i + 1);
-    }
-
-    pairs.push({
-      day: current,
-      night
-    });
-  }
-
-  if (!pairs.length && periods.length) {
-    for (let i = 0; i < periods.length; i += 2) {
-      pairs.push({
-        day: periods[i] || null,
-        night: periods[i + 1] || null
-      });
-    }
-  }
-
-  return pairs;
-}
-
-function dailyForecastSpeechEC(location, ecPage, index, unit = "C") {
-  const pairs = buildEcDayPairs(ecPage?.dailyPeriods || []);
-  if (!pairs.length || !pairs[index] || !pairs[index].day) return "";
-
-  const pair = pairs[index];
-  const parts = [];
-
-  if (index === 0 && ecPage?.issuedText) {
-    parts.push(`Issued by Environment Canada. ${ecPage.issuedText}.`);
-  }
-
-  parts.push(`${pair.day.label}. ${cleanEcText(pair.day.text)}.`);
-
-  if (pair.night && pair.night.text) {
-    parts.push(`${pair.night.label}. ${cleanEcText(pair.night.text)}.`);
-  }
-
-  return parts.join(" ").replace(/\s+/g, " ").trim();
-}
-
-function sevenDayForecastSpeechEC(location, ecPage, unit = "C") {
-  const pairs = buildEcDayPairs(ecPage?.dailyPeriods || []);
-  if (!pairs.length) return "";
-
-  const parts = [];
-
-  if (ecPage?.issuedText) {
-    parts.push(`Issued by Environment Canada. ${ecPage.issuedText}.`);
-  } else {
-    parts.push("Issued by Environment Canada.");
-  }
-
-  parts.push(`Here is the 7 day forecast for ${placeLabel(location)}.`);
-
-  for (let i = 0; i < Math.min(7, pairs.length); i++) {
-    const pair = pairs[i];
-    if (pair.day?.text) {
-      parts.push(`${pair.day.label}. ${cleanEcText(pair.day.text)}.`);
-    }
-    if (pair.night?.text) {
-      parts.push(`${pair.night.label}. ${cleanEcText(pair.night.text)}.`);
-    }
-  }
-
-  return parts.join(" ").replace(/\s+/g, " ").trim();
-}
-
-function hourlyForecastSpeechEC(location, ecPage, hours = 12, unit = "C") {
-  const rows = Array.isArray(ecPage?.hourlyRows) ? ecPage.hourlyRows : [];
-  if (!rows.length) return "";
-
-  const parts = [];
-
-  if (ecPage?.issuedText) {
-    parts.push(`Issued by Environment Canada. ${ecPage.issuedText}.`);
-  } else {
-    parts.push("Issued by Environment Canada.");
-  }
-
-  parts.push(`Here is the next ${Math.min(hours, rows.length)} hours for ${placeLabel(location)}.`);
-
-  const timingRows = rows.slice(0, 24);
-  parts.push(buildEcHourlyTimingSentence(timingRows, location.timezone));
-
-  const blocks = buildEcHourlyBlocks(rows, hours).slice(0, 4);
-  for (const block of blocks) {
-    parts.push(summarizeEcHourlyBlock(block, unit));
-  }
-
-  return parts.join(" ").replace(/\s+/g, " ").trim();
-}
-
 async function fetchForecast(location) {
   pruneForecastCache();
 
@@ -2992,32 +2433,14 @@ async function buildPlaybackSpeech(location, forecast, playback, unit = "C") {
   }
 
   if (playback.type === "hourly") {
-    if (location?.country === "CA") {
-      const ecPage = await fetchEnvironmentCanadaForecastPage(location);
-      const ecSpeech = hourlyForecastSpeechEC(location, ecPage, playback.hours || 12, unit);
-      if (ecSpeech) return ecSpeech;
-    }
-
     return nextHoursSpeech(location, forecast, playback.hours || 6, unit);
   }
 
   if (playback.type === "daily") {
-    if (location?.country === "CA") {
-      const ecPage = await fetchEnvironmentCanadaForecastPage(location);
-      const ecSpeech = dailyForecastSpeechEC(location, ecPage, playback.index, unit);
-      if (ecSpeech) return ecSpeech;
-    }
-
     return dailyForecastSpeech(location, forecast, playback.index, unit);
   }
 
   if (playback.type === "all7") {
-    if (location?.country === "CA") {
-      const ecPage = await fetchEnvironmentCanadaForecastPage(location);
-      const ecSpeech = sevenDayForecastSpeechEC(location, ecPage, unit);
-      if (ecSpeech) return ecSpeech;
-    }
-
     return sevenDayForecastSpeech(location, forecast, unit);
   }
 
@@ -3068,15 +2491,29 @@ app.post("/voice", async (req, res) => {
 
     console.log("VOICE CallSid:", req.body.CallSid, "From:", req.body.From);
 
+    const gather = twiml.gather({
+      input: "dtmf",
+      action: "/intro-choice",
+      method: "POST",
+      timeout: 8,
+      numDigits: 1,
+      finishOnKey: ""
+    });
+
     if (INTRO_AUDIO_URL) {
-      twiml.play(INTRO_AUDIO_URL);
+      gather.play(INTRO_AUDIO_URL);
     }
 
-    twiml.say(
+    gather.say(
       SAY_OPTIONS,
       `${greeting}, welcome to Weather Line. ` +
         `We are continuously improving our system, with many exciting new features coming in the coming days. ` +
-        `you are welcome to leave comments or ideas for improvement by pressing number 9.`
+        `You are welcome to leave comments or ideas for improvement by pressing 9. ` +
+        `You may also choose your location at any time. ` +
+        `Press 1 for Montreal. ` +
+        `2 for Tosh. ` +
+        `3 for Laurentians. ` +
+        `4 for United States.`
     );
 
     twiml.redirect({ method: "POST" }, "/location-menu-prompt");
@@ -3084,26 +2521,6 @@ app.post("/voice", async (req, res) => {
   } catch (error) {
     console.error("VOICE route error:", error.message);
     console.error("VOICE route details:", error.response?.data || null);
-    say(twiml, "Sorry, an application error occurred. Please try again.");
-    return res.type("text/xml").send(twiml.toString());
-  }
-});
-
-app.post("/main-menu", async (req, res) => {
-  const twiml = new VoiceResponse();
-
-  try {
-    await buildMainMenuResponse(req, twiml);
-
-    const history = getMenuHistory(req);
-    if (!history.length || history[history.length - 1] !== "main-menu") {
-      pushMenuHistory(req, "main-menu");
-    }
-
-    return res.type("text/xml").send(twiml.toString());
-  } catch (error) {
-    console.error("MAIN-MENU route error:", error.message);
-    console.error("MAIN-MENU route details:", error.response?.data || null);
     say(twiml, "Sorry, an application error occurred. Please try again.");
     return res.type("text/xml").send(twiml.toString());
   }
@@ -3238,8 +2655,7 @@ app.post("/menu", async (req, res) => {
     }
 
     if (choice === "2") {
-      const hours = location.country === "CA" ? 12 : 6;
-      setLastPlayback(req, { type: "hourly", hours });
+      setLastPlayback(req, { type: "hourly", hours: 6 });
       const playbackTwiml = await buildStateTwiml(req, "playback", { push: false });
       return res.type("text/xml").send(playbackTwiml.toString());
     }
