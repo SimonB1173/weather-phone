@@ -2198,6 +2198,7 @@ async function fetchEnvironmentCanadaCurrent(location) {
   }
 }
 
+
 function decodeHtmlEntities(text) {
   return String(text || "")
     .replace(/&nbsp;/g, " ")
@@ -2241,12 +2242,21 @@ function cleanEcText(text) {
     String(text || "")
       .replace(/\s+/g, " ")
       .replace(/\.\s*\./g, ".")
+      .replace(/\s+:\s*/g, ": ")
       .trim()
   );
 }
 
+function normalizeEcLabel(text) {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/[:.]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function isEcDayLabel(text) {
-  const t = String(text || "").trim().toLowerCase();
+  const t = normalizeEcLabel(text);
   return [
     "today",
     "tonight",
@@ -2271,16 +2281,16 @@ function extractEcIssuedText($) {
   const bodyText = cleanEcText($("body").text());
 
   const patterns = [
-    /Issued by Environment Canada\s+at\s+([^.]*)/i,
-    /Issued at\s+([^.]*)/i,
-    /Forecast issued:\s*([^.]*)/i,
-    /Forecast updated:\s*([^.]*)/i,
-    /Updated at\s+([^.]*)/i
+    /Issued by Environment Canada[^.]*\./i,
+    /Issued at[^.]*\./i,
+    /Forecast issued[^.]*\./i,
+    /Forecast updated[^.]*\./i,
+    /Updated at[^.]*\./i
   ];
 
   for (const pattern of patterns) {
     const match = bodyText.match(pattern);
-    if (match && match[1]) {
+    if (match && match[0]) {
       return cleanEcText(match[0]);
     }
   }
@@ -2289,140 +2299,130 @@ function extractEcIssuedText($) {
     .find("*")
     .toArray()
     .map((el) => cleanEcText($(el).text()))
-    .find((text) => /issued|updated/i.test(text) && text.length <= 120);
+    .find((text) => /issued|updated/i.test(text) && text.length >= 12 && text.length <= 160);
 
   return candidate || "";
 }
 
 function extractEcDailyPeriods($) {
+  const fullText = cleanEcText($("body").text());
+  if (!fullText) return [];
+
+  const labelRegex =
+    /\b(Tonight|Monday night|Tuesday night|Wednesday night|Thursday night|Friday night|Saturday night|Sunday night|Today|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\b\s*:*/gi;
+
+  const matches = [];
+  let match;
+
+  while ((match = labelRegex.exec(fullText)) !== null) {
+    matches.push({
+      label: cleanEcText(match[1]),
+      index: match.index,
+      length: match[0].length
+    });
+  }
+
+  if (!matches.length) return [];
+
   const periods = [];
   const seen = new Set();
 
-  $("h1, h2, h3, h4, h5, strong, b").each((_, el) => {
-    const label = cleanEcText($(el).text());
-    if (!isEcDayLabel(label) || seen.has(label.toLowerCase())) return;
-
-    let text = "";
-
-    const parentText = cleanEcText($(el).parent().text());
-    if (parentText && parentText.length > label.length + 20) {
-      text = parentText.replace(new RegExp(`^${label}\\s*`, "i"), "").trim();
-    }
-
-    if (!text) {
-      const siblingTexts = [];
-      let next = $(el).parent().next();
-      let count = 0;
-
-      while (next.length && count < 4) {
-        const siblingText = cleanEcText(next.text());
-        if (!siblingText) {
-          next = next.next();
-          count += 1;
-          continue;
-        }
-
-        const firstWords = siblingText.split(".")[0].trim();
-        if (isEcDayLabel(firstWords)) break;
-
-        siblingTexts.push(siblingText);
-        next = next.next();
-        count += 1;
-      }
-
-      text = cleanEcText(siblingTexts.join(" "));
-    }
-
-    if (text) {
-      seen.add(label.toLowerCase());
-      periods.push({
-        label,
-        text
-      });
-    }
-  });
-
-  if (periods.length >= 2) {
-    return periods;
-  }
-
-  const fullText = cleanEcText($("body").text());
-  const labels = [
-    "Today",
-    "Tonight",
-    "Monday",
-    "Monday night",
-    "Tuesday",
-    "Tuesday night",
-    "Wednesday",
-    "Wednesday night",
-    "Thursday",
-    "Thursday night",
-    "Friday",
-    "Friday night",
-    "Saturday",
-    "Saturday night",
-    "Sunday",
-    "Sunday night"
-  ];
-
-  const matches = [];
-  for (const label of labels) {
-    const regex = new RegExp(`\\b${label.replace(" ", "\\s+")}\\b`, "gi");
-    let m;
-    while ((m = regex.exec(fullText)) !== null) {
-      matches.push({
-        label,
-        index: m.index
-      });
-    }
-  }
-
-  matches.sort((a, b) => a.index - b.index);
-
-  const merged = [];
-  const usedIndexes = new Set();
-
   for (let i = 0; i < matches.length; i++) {
-    if (usedIndexes.has(i)) continue;
     const current = matches[i];
     const next = matches[i + 1];
-    const start = current.index;
+    const start = current.index + current.length;
     const end = next ? next.index : fullText.length;
-    const block = cleanEcText(fullText.slice(start, end));
-    if (block && block.length > current.label.length + 10) {
-      merged.push({
-        label: current.label,
-        text: cleanEcText(block.replace(new RegExp(`^${current.label}\\s*`, "i"), ""))
-      });
-    }
+
+    const labelKey = normalizeEcLabel(current.label);
+    if (seen.has(`${labelKey}-${current.index}`)) continue;
+
+    let text = cleanEcText(fullText.slice(start, end));
+    text = text.replace(/^[:.\-\s]+/, "").trim();
+
+    if (!text || text.length < 8) continue;
+
+    periods.push({
+      label: current.label,
+      text
+    });
+
+    seen.add(`${labelKey}-${current.index}`);
   }
 
-  return merged;
+  return periods;
 }
 
-function parseEcHourlyTimeToIso(label, baseDate, timezone) {
-  const raw = cleanEcText(label).toUpperCase();
-  const match = raw.match(/(\d{1,2})(?::(\d{2}))?\s*(AM|PM)/i);
-  if (!match) return "";
+function parseEcHourValue(raw) {
+  const text = cleanEcText(raw).toLowerCase();
 
-  let hour = Number(match[1]);
-  const minute = Number(match[2] || 0);
-  const suffix = String(match[3] || "").toUpperCase();
+  if (!text) return null;
+  if (text === "midnight") return { hour: 0, minute: 0 };
+  if (text === "noon") return { hour: 12, minute: 0 };
 
-  if (suffix === "PM" && hour < 12) hour += 12;
-  if (suffix === "AM" && hour === 12) hour = 0;
+  let match = text.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)$/i);
+  if (match) {
+    let hour = Number(match[1]);
+    const minute = Number(match[2] || 0);
+    const suffix = match[3].toLowerCase();
 
-  const [year, month, day] = String(baseDate).split("-").map(Number);
+    if (suffix === "pm" && hour < 12) hour += 12;
+    if (suffix === "am" && hour === 12) hour = 0;
+
+    return { hour, minute };
+  }
+
+  match = text.match(/^(\d{1,2})(?::(\d{2}))?\s*h$/i);
+  if (match) {
+    return {
+      hour: Number(match[1]),
+      minute: Number(match[2] || 0)
+    };
+  }
+
+  match = text.match(/^(\d{1,2}):(\d{2})$/);
+  if (match) {
+    return {
+      hour: Number(match[1]),
+      minute: Number(match[2])
+    };
+  }
+
+  match = text.match(/^(\d{1,2})$/);
+  if (match) {
+    return {
+      hour: Number(match[1]),
+      minute: 0
+    };
+  }
+
+  return null;
+}
+
+function buildLocalIsoFromParts(dateStr, hour, minute = 0) {
+  const [year, month, day] = String(dateStr || "").split("-").map(Number);
   if (!year || !month || !day) return "";
-
   return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}T${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+}
+
+function addDaysToDateString(dateStr, daysToAdd) {
+  const [year, month, day] = String(dateStr || "").split("-").map(Number);
+  if (!year || !month || !day) return dateStr;
+
+  const dt = new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+  dt.setUTCDate(dt.getUTCDate() + Number(daysToAdd || 0));
+
+  const y = dt.getUTCFullYear();
+  const m = String(dt.getUTCMonth() + 1).padStart(2, "0");
+  const d = String(dt.getUTCDate()).padStart(2, "0");
+
+  return `${y}-${m}-${d}`;
 }
 
 function extractEcHourlyRows($, timezone) {
   const rows = [];
   const nowLocal = getCurrentLocalDateParts(timezone || "UTC");
-  const baseDate = nowLocal.date;
+  let currentDate = nowLocal.date;
+  let previousHour = null;
 
   $("table").each((_, table) => {
     const headers = $(table)
@@ -2433,7 +2433,8 @@ function extractEcHourlyRows($, timezone) {
     const looksHourly =
       headers.some((h) => h.includes("hour")) ||
       headers.some((h) => h.includes("temperature")) ||
-      headers.some((h) => h.includes("condition"));
+      headers.some((h) => h.includes("condition")) ||
+      headers.some((h) => h.includes("weather"));
 
     if (!looksHourly) return;
 
@@ -2445,21 +2446,44 @@ function extractEcHourlyRows($, timezone) {
           .toArray()
           .map((td) => cleanEcText($(td).text()));
 
-        if (cells.length < 3) return;
+        if (cells.length < 2) return;
 
         const timeText = cells[0] || "";
-        const conditionText = cells[1] || "";
+        const parsedTime = parseEcHourValue(timeText);
+        if (!parsedTime) return;
+
+        if (
+          previousHour !== null &&
+          parsedTime.hour < previousHour &&
+          previousHour >= 18 &&
+          parsedTime.hour <= 6
+        ) {
+          currentDate = addDaysToDateString(currentDate, 1);
+        }
+
+        previousHour = parsedTime.hour;
+
+        const conditionText =
+          cells.find((c, idx) => idx > 0 && /sun|cloud|rain|snow|flurr|fog|drizzle|clear|shower|storm|freezing/i.test(c)) ||
+          cells[1] ||
+          "";
+
         const tempText = cells.find((c) => /-?\d+\s*°/.test(c)) || "";
-        const precipText = cells.find((c) => /%/.test(c)) || "";
+        const precipText = cells.find((c) => /\d+\s*%/.test(c)) || "";
         const windText = cells.find((c) => /km\/h|calm/i.test(c)) || "";
 
-        const iso = parseEcHourlyTimeToIso(timeText, baseDate, timezone);
         const tempMatch = tempText.match(/(-?\d+)/);
         const precipMatch = precipText.match(/(\d+)/);
 
+        const timeIso = buildLocalIsoFromParts(
+          currentDate,
+          parsedTime.hour,
+          parsedTime.minute
+        );
+
         rows.push({
           timeText,
-          timeIso: iso,
+          timeIso,
           conditionText,
           temperatureC: tempMatch ? Number(tempMatch[1]) : null,
           precipitationProbability: precipMatch ? Number(precipMatch[1]) : 0,
@@ -2488,7 +2512,9 @@ function isEcHourlyPrecipRow(row) {
 
 function buildEcHourlyTimingSentence(rows, timezone) {
   const precipRows = rows.filter(isEcHourlyPrecipRow);
-  if (!precipRows.length) return "No significant rain or snow is expected in the next several hours.";
+  if (!precipRows.length) {
+    return "No significant rain or snow is expected in the next several hours.";
+  }
 
   const first = precipRows[0];
   const last = precipRows[precipRows.length - 1];
@@ -2516,6 +2542,16 @@ function buildEcHourlyTimingSentence(rows, timezone) {
   }
 
   return `Precipitation is expected from ${startText} until ${endText}.`;
+}
+
+function filterFutureEcRows(rows, timezone) {
+  const nowLocal = getCurrentLocalDateParts(timezone || "UTC");
+  const nowIso = buildLocalIsoFromParts(nowLocal.date, nowLocal.hour, nowLocal.minute);
+
+  return rows.filter((row) => {
+    if (!row.timeIso) return true;
+    return row.timeIso >= nowIso;
+  });
 }
 
 function buildEcHourlyBlocks(rows, hoursToSpeak = 12) {
@@ -2606,10 +2642,7 @@ async function fetchEnvironmentCanadaForecastPage(location) {
         dailyUrl = normalizeEnvironmentCanadaUrl(href);
       }
 
-      if (
-        !hourlyUrl &&
-        (/hourly/i.test(href) || /hourly/i.test(text))
-      ) {
+      if (!hourlyUrl && (/hourly/i.test(href) || /hourly/i.test(text))) {
         hourlyUrl = normalizeEnvironmentCanadaUrl(href);
       }
     });
@@ -2664,8 +2697,8 @@ function buildEcDayPairs(periods) {
     const current = periods[i];
     const next = periods[i + 1];
 
-    const currentLabel = String(current?.label || "").toLowerCase();
-    const nextLabel = String(next?.label || "").toLowerCase();
+    const currentLabel = normalizeEcLabel(current?.label || "");
+    const nextLabel = normalizeEcLabel(next?.label || "");
 
     if (currentLabel.includes("night") || currentLabel === "tonight") {
       continue;
@@ -2702,8 +2735,12 @@ function dailyForecastSpeechEC(location, ecPage, index, unit = "C") {
   const pair = pairs[index];
   const parts = [];
 
-  if (index === 0 && ecPage?.issuedText) {
-    parts.push(`Issued by Environment Canada. ${ecPage.issuedText}.`);
+  if (index === 0) {
+    if (ecPage?.issuedText) {
+      parts.push(`Issued by Environment Canada. ${ecPage.issuedText}`);
+    } else {
+      parts.push("Issued by Environment Canada.");
+    }
   }
 
   parts.push(`${pair.day.label}. ${cleanEcText(pair.day.text)}.`);
@@ -2722,7 +2759,7 @@ function sevenDayForecastSpeechEC(location, ecPage, unit = "C") {
   const parts = [];
 
   if (ecPage?.issuedText) {
-    parts.push(`Issued by Environment Canada. ${ecPage.issuedText}.`);
+    parts.push(`Issued by Environment Canada. ${ecPage.issuedText}`);
   } else {
     parts.push("Issued by Environment Canada.");
   }
@@ -2743,13 +2780,15 @@ function sevenDayForecastSpeechEC(location, ecPage, unit = "C") {
 }
 
 function hourlyForecastSpeechEC(location, ecPage, hours = 12, unit = "C") {
-  const rows = Array.isArray(ecPage?.hourlyRows) ? ecPage.hourlyRows : [];
+  const rawRows = Array.isArray(ecPage?.hourlyRows) ? ecPage.hourlyRows : [];
+  const rows = filterFutureEcRows(rawRows, location.timezone);
+
   if (!rows.length) return "";
 
   const parts = [];
 
   if (ecPage?.issuedText) {
-    parts.push(`Issued by Environment Canada. ${ecPage.issuedText}.`);
+    parts.push(`Issued by Environment Canada. ${ecPage.issuedText}`);
   } else {
     parts.push("Issued by Environment Canada.");
   }
@@ -2956,7 +2995,12 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
     }
 
     const forecast = await fetchForecast(location);
-    const speech = await buildPlaybackSpeech(location, forecast, lastPlayback, getUnitPreference(req));
+    const speech = await buildPlaybackSpeech(
+      location,
+      forecast,
+      lastPlayback,
+      getUnitPreference(req)
+    );
 
     if (!speech) {
       say(twiml, "There is nothing to repeat yet.");
@@ -2976,6 +3020,52 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
   }
 
   return locationMenuTwiml({ allowBack: false, allowVoicemail: true });
+}
+
+async function buildPlaybackSpeech(location, forecast, playback, unit = "C") {
+  if (!playback || !playback.type) return "";
+
+  if (playback.type === "current") {
+    let canadaCurrent = null;
+
+    if (location?.country === "CA") {
+      canadaCurrent = await fetchEnvironmentCanadaCurrent(location);
+    }
+
+    return currentWeatherSpeech(location, forecast, unit, canadaCurrent);
+  }
+
+  if (playback.type === "hourly") {
+    if (location?.country === "CA") {
+      const ecPage = await fetchEnvironmentCanadaForecastPage(location);
+      const ecSpeech = hourlyForecastSpeechEC(location, ecPage, playback.hours || 12, unit);
+      if (ecSpeech) return ecSpeech;
+    }
+
+    return nextHoursSpeech(location, forecast, playback.hours || 6, unit);
+  }
+
+  if (playback.type === "daily") {
+    if (location?.country === "CA") {
+      const ecPage = await fetchEnvironmentCanadaForecastPage(location);
+      const ecSpeech = dailyForecastSpeechEC(location, ecPage, playback.index, unit);
+      if (ecSpeech) return ecSpeech;
+    }
+
+    return dailyForecastSpeech(location, forecast, playback.index, unit);
+  }
+
+  if (playback.type === "all7") {
+    if (location?.country === "CA") {
+      const ecPage = await fetchEnvironmentCanadaForecastPage(location);
+      const ecSpeech = sevenDayForecastSpeechEC(location, ecPage, unit);
+      if (ecSpeech) return ecSpeech;
+    }
+
+    return sevenDayForecastSpeech(location, forecast, unit);
+  }
+
+  return "";
 }
 
 async function buildPlaybackSpeech(location, forecast, playback, unit = "C") {
