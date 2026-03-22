@@ -3133,38 +3133,36 @@ async function buildPlaybackSpeech(location, forecast, playback, unit = "C") {
   }
 
   if (playback.type === "daily") {
-  if (location?.country === "CA") {
-    const ecPage = await fetchEnvironmentCanadaForecastPage(location);
-    const ecSpeech = dailyForecastSpeechEC(location, ecPage, playback.index, unit);
-    if (ecSpeech) return ecSpeech;
+    if (location?.country === "CA") {
+      const ecPage = await fetchEnvironmentCanadaForecastPage(location);
+      const ecSpeech = dailyForecastSpeechEC(location, ecPage, playback.index, unit);
+      if (ecSpeech) return ecSpeech;
 
-    return `Issued by Environment Canada. I could not read the detailed forecast page correctly for ${placeLabel(location)}.`;
+      return `Issued by Environment Canada. I could not read the detailed forecast page correctly for ${placeLabel(location)}.`;
+    }
+
+    if (!forecast) {
+      forecast = await fetchForecast(location);
+    }
+    return dailyForecastSpeech(location, forecast, playback.index, unit);
   }
 
-  if (!forecast) {
-    forecast = await fetchForecast(location);
-  }
-  return dailyForecastSpeech(location, forecast, playback.index, unit);
-}
+  if (playback.type === "all7") {
+    if (location?.country === "CA") {
+      const ecPage = await fetchEnvironmentCanadaForecastPage(location);
+      const ecSpeech = sevenDayForecastSpeechEC(location, ecPage, unit);
+      if (ecSpeech) return ecSpeech;
 
-if (playback.type === "all7") {
-  if (location?.country === "CA") {
-    const ecPage = await fetchEnvironmentCanadaForecastPage(location);
-    const ecSpeech = sevenDayForecastSpeechEC(location, ecPage, unit);
-    console.log("EC issuedText:", ecPage?.issuedText);
-    console.log("EC dailyPeriods:", JSON.stringify(ecPage?.dailyPeriods || [], null, 2));
-    if (ecSpeech) return ecSpeech;
+      return `Issued by Environment Canada. I could not read the full seven day forecast page correctly for ${placeLabel(location)}.`;
+    }
 
-    return `Issued by Environment Canada. I could not read the full seven day forecast page correctly for ${placeLabel(location)}.`;
+    if (!forecast) {
+      forecast = await fetchForecast(location);
+    }
+    return sevenDayForecastSpeech(location, forecast, unit);
   }
 
-  if (!forecast) {
-    forecast = await fetchForecast(location);
-  }
-  return sevenDayForecastSpeech(location, forecast, unit);
- }
-
- return "";
+  return "";
 }
 
 async function goBackOneMenu(req) {
