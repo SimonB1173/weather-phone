@@ -715,9 +715,16 @@ function exchangeAmountPromptTwiml(req, selection) {
     finishOnKey: "#"
   });
 
+  const fromCurrencyText =
+    selection.from === "USD"
+      ? "U S dollars"
+      : selection.from === "CAD"
+      ? "Canadian dollars"
+      : currencySpeech(selection.from);
+
   say(
     gather,
-    `Exchange rate as of ${selection.asOfTime} is ${Number(selection.rate).toFixed(4)}. Enter amount in ${currencySpeech(selection.from)}, then press pound. Press star to go back.`
+    `You chose to convert ${currencySpeech(selection.from)} to ${currencySpeech(selection.to)}. Please enter the amount of ${fromCurrencyText} you would like to exchange, then press pound. Press star to go back.`
   );
 
   twiml.redirect({ method: "POST" }, "/exchange-amount-prompt");
