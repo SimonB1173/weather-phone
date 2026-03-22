@@ -20,6 +20,7 @@ const INTRO_AUDIO_URL = process.env.INTRO_AUDIO_URL || "";
 const forecastCache = new Map();
 const inFlightForecasts = new Map();
 const canadaAlertCache = new Map();
+const exchangeRateCache = new Map();
 
 const temporaryLocationsByCall = new Map();
 const pendingLocationChoiceByCall = new Map();
@@ -27,10 +28,12 @@ const lastPlaybackByCall = new Map();
 const menuStateByCall = new Map();
 const menuHistoryByCall = new Map();
 const unitPreferenceByCall = new Map();
+const exchangeSelectionByCall = new Map();
 
 const FORECAST_CACHE_MS = 10 * 60 * 1000;
 const STALE_FORECAST_MS = 60 * 60 * 1000;
 const ALERT_CACHE_MS = 10 * 60 * 1000;
+const EXCHANGE_CACHE_MS = 10 * 60 * 1000;
 
 const VOICEMAILS_FILE = path.join(__dirname, "voicemails.json");
 
@@ -209,7 +212,15 @@ function getMenuHistory(req) {
 }
 
 function shouldTrackHistoryState(state) {
-  return ["location-menu", "us-location-menu", "main-menu", "forecast-menu"].includes(state);
+  return [
+    "root-menu",
+    "location-menu",
+    "us-location-menu",
+    "main-menu",
+    "forecast-menu",
+    "exchange-menu",
+    "exchange-amount"
+  ].includes(state);
 }
 
 function pushMenuHistory(req, state) {
@@ -249,6 +260,16 @@ function toggleUnitPreference(req) {
   return nextUnit;
 }
 
+function getExchangeSelection(req) {
+  const callKey = getCallKey(req);
+  return exchangeSelectionByCall.get(callKey) || null;
+}
+
+function setExchangeSelection(req, selection) {
+  const callKey = getCallKey(req);
+  exchangeSelectionByCall.set(callKey, selection);
+}
+
 function clearCallState(req) {
   const callKey = getCallKey(req);
   temporaryLocationsByCall.delete(callKey);
@@ -257,6 +278,7 @@ function clearCallState(req) {
   menuStateByCall.delete(callKey);
   menuHistoryByCall.delete(callKey);
   unitPreferenceByCall.delete(callKey);
+  exchangeSelectionByCall.delete(callKey);
 }
 
 function appendVoicemailRecord(record) {
@@ -337,6 +359,32 @@ function setCachedForecast(location, data) {
     timestamp: Date.now()
   });
   return key;
+}
+
+function getExchangeCacheKey(from, to) {
+  return `${String(from || "").toUpperCase()}_${String(to || "").toUpperCase()}`;
+}
+
+function getCachedExchangeRate(from, to) {
+  const key = getExchangeCacheKey(from, to);
+  const cached = exchangeRateCache.get(key);
+  if (!cached) return null;
+
+  const age = Date.now() - cached.timestamp;
+  if (age <= EXCHANGE_CACHE_MS) {
+    return cached.data;
+  }
+
+  exchangeRateCache.delete(key);
+  return null;
+}
+
+function setCachedExchangeRate(from, to, data) {
+  const key = getExchangeCacheKey(from, to);
+  exchangeRateCache.set(key, {
+    data,
+    timestamp: Date.now()
+  });
 }
 
 function parsePlainDate(isoDate) {
@@ -484,6 +532,10 @@ function isBackKey(req) {
   return getDigits(req) === "*";
 }
 
+function parseRootMenuChoice(req) {
+  return getDigits(req);
+}
+
 function parseMainMenuChoice(req) {
   return getDigits(req);
 }
@@ -502,7 +554,6 @@ function parseForecastDayChoice(req) {
 function parseLocationChoice(req) {
   const digit = getDigits(req);
   if (/^[1-4]$/.test(digit)) return digit;
-  if (digit === "9") return "9";
   return "";
 }
 
@@ -510,6 +561,17 @@ function parseUSLocationChoice(req) {
   const digit = getDigits(req);
   if (/^[1-3]$/.test(digit)) return digit;
   return "";
+}
+
+function parseExchangeChoice(req) {
+  const digit = getDigits(req);
+  if (digit === "1") return { from: "USD", to: "CAD" };
+  if (digit === "2") return { from: "CAD", to: "USD" };
+  return null;
+}
+
+function parseAmountDigits(req) {
+  return String(req.body.Digits || "").replace(/[^\d]/g, "").trim();
 }
 
 function cToF(value) {
@@ -548,31 +610,56 @@ function formatForecastTempValue(value, unit = "C") {
   return "zero";
 }
 
+function formatMoneyAmount(value) {
+  const n = Number(value || 0);
+  if (!Number.isFinite(n)) return "0.00";
+  return n.toFixed(2);
+}
+
+function currencySpeech(code) {
+  if (code === "USD") return "U S dollars";
+  if (code === "CAD") return "Canadian dollars";
+  return String(code || "");
+}
+
+function buildRootMenuInto(twiml) {
+  const gather = twiml.gather(gatherOptions("/root-menu", 8, 1));
+
+  say(
+    gather,
+    "Welcome to Weather and Info Line. Press 1 for weather. Press 2 for exchange rate. Press 9 to leave a comment or suggestion."
+  );
+
+  twiml.redirect({ method: "POST" }, "/root-menu-prompt");
+}
+
 function buildMainMenuInto(twiml, activeLocationName) {
   const gather = twiml.gather(gatherOptions("/menu", 8, 1));
 
   say(
     gather,
-    `${activeLocationName}. Press 1 for the 7 day forecast. Press 2 for hourly forecast. Press 3 for current weather.`
+    `${activeLocationName}. Press 1 for the 7 day forecast. Press 2 for hourly forecast. Press 3 for current weather. Press star to go back.`
   );
 
   twiml.redirect({ method: "POST" }, "/main-menu");
 }
 
-function locationMenuTwiml({ allowBack = false, allowVoicemail = false } = {}) {
+function rootMenuTwiml() {
+  const twiml = new VoiceResponse();
+  buildRootMenuInto(twiml);
+  return twiml;
+}
+
+function locationMenuTwiml({ allowBack = true } = {}) {
   const twiml = new VoiceResponse();
   const gather = twiml.gather(gatherOptions("/set-location-choice", 7, 1));
 
   const parts = [
-    "Press 1 for Montreal.",
+    "For weather, press 1 for Montreal.",
     "2 for Tosh.",
     "3 for Laurentians.",
     "4 for United States."
   ];
-
-  if (allowVoicemail) {
-    parts.push("Press 9 to leave a comment or suggestion.");
-  }
 
   if (allowBack) {
     parts.push("Press star for the previous menu.");
@@ -589,14 +676,47 @@ function usLocationMenuTwiml() {
 
   say(
     gather,
-    `For United States, press 1 for Brooklyn. 2 for Monroe. 3 for Monsey. Press star for the previous menu.`
+    "For United States, press 1 for Brooklyn. 2 for Monroe. 3 for Monsey. Press star for the previous menu."
   );
 
   twiml.redirect({ method: "POST" }, "/us-location-menu-prompt");
   return twiml;
 }
 
-function afterActionTwiml(unit = "C") {
+function exchangeMenuTwiml() {
+  const twiml = new VoiceResponse();
+  const gather = twiml.gather(gatherOptions("/set-exchange-choice", 7, 1));
+
+  say(
+    gather,
+    "For exchange rate, press 1 to convert U S dollars to Canadian dollars. Press 2 to convert Canadian dollars to U S dollars. Press star for the previous menu."
+  );
+
+  twiml.redirect({ method: "POST" }, "/exchange-menu-prompt");
+  return twiml;
+}
+
+function exchangeAmountPromptTwiml(req, selection) {
+  const twiml = new VoiceResponse();
+
+  const gather = twiml.gather({
+    input: "dtmf",
+    action: "/exchange-amount",
+    method: "POST",
+    timeout: 8,
+    finishOnKey: "#"
+  });
+
+  say(
+    gather,
+    `You chose to convert ${currencySpeech(selection.from)} to ${currencySpeech(selection.to)}. Please enter the amount in whole dollars, then press pound. Press star to go back.`
+  );
+
+  twiml.redirect({ method: "POST" }, "/exchange-amount-prompt");
+  return twiml;
+}
+
+function afterActionTwiml(playback = null, unit = "C") {
   const twiml = new VoiceResponse();
 
   const gather = twiml.gather({
@@ -608,15 +728,22 @@ function afterActionTwiml(unit = "C") {
     finishOnKey: ""
   });
 
-  const unitText =
-    unit === "F"
-      ? "Press 7 to switch back to Celsius."
-      : "Press 7 to hear it in Fahrenheit.";
+  if (playback?.type === "exchange") {
+    say(
+      gather,
+      "Press star to go back. Press pound to repeat. Press 5 for the main menu."
+    );
+  } else {
+    const unitText =
+      unit === "F"
+        ? "Press 7 to switch back to Celsius."
+        : "Press 7 to hear it in Fahrenheit.";
 
-  say(
-    gather,
-    `Press star to go back. Press pound to repeat. Press 5 to change location. ${unitText}`
-  );
+    say(
+      gather,
+      `Press star to go back. Press pound to repeat. Press 5 to change location. ${unitText}`
+    );
+  }
 
   twiml.hangup();
   return twiml;
@@ -2325,12 +2452,58 @@ async function fetchForecast(location) {
   return requestPromise;
 }
 
+async function fetchExchangeRate(from, to) {
+  const cached = getCachedExchangeRate(from, to);
+  if (cached) return cached;
+
+  const response = await axios.get("https://api.frankfurter.dev/v1/latest", {
+    params: {
+      from,
+      to
+    },
+    timeout: 10000
+  });
+
+  const data = response.data || {};
+  const rate = Number(data?.rates?.[to]);
+
+  if (!Number.isFinite(rate) || rate <= 0) {
+    throw new Error("Invalid exchange rate response");
+  }
+
+  const payload = {
+    from,
+    to,
+    rate,
+    date: String(data.date || "").trim()
+  };
+
+  setCachedExchangeRate(from, to, payload);
+  return payload;
+}
+
+function buildExchangeSpeech(selection, amount, ratePayload) {
+  const amountNumber = Number(amount || 0);
+  const total = amountNumber * Number(ratePayload.rate || 0);
+
+  return [
+    `Exchange rate for ${currencySpeech(selection.from)} to ${currencySpeech(selection.to)}.`,
+    `The current rate is 1 ${selection.from} equals ${ratePayload.rate.toFixed(4)} ${selection.to}.`,
+    `${formatMoneyAmount(amountNumber)} ${selection.from} equals ${formatMoneyAmount(total)} ${selection.to}.`
+  ].join(" ");
+}
+
 function speakWeatherError(twiml, error, fallbackText) {
   if (error.response?.status === 429) {
     say(twiml, "Weather service limit reached for today. Please try again later.");
   } else {
     say(twiml, fallbackText);
   }
+}
+
+async function buildRootMenuResponse(req, twiml) {
+  setMenuState(req, "root-menu");
+  buildRootMenuInto(twiml);
 }
 
 async function buildMainMenuResponse(req, twiml) {
@@ -2356,16 +2529,28 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
 
   setMenuState(req, state);
 
+  if (state === "root-menu") {
+    return rootMenuTwiml();
+  }
+
   if (state === "location-menu") {
-    const hasActiveLocation = !!getActiveLocation(req);
-    return locationMenuTwiml({
-      allowBack: hasActiveLocation,
-      allowVoicemail: !hasActiveLocation
-    });
+    return locationMenuTwiml({ allowBack: true });
   }
 
   if (state === "us-location-menu") {
     return usLocationMenuTwiml();
+  }
+
+  if (state === "exchange-menu") {
+    return exchangeMenuTwiml();
+  }
+
+  if (state === "exchange-amount") {
+    const selection = getExchangeSelection(req);
+    if (!selection) {
+      return exchangeMenuTwiml();
+    }
+    return exchangeAmountPromptTwiml(req, selection);
   }
 
   if (state === "main-menu") {
@@ -2377,7 +2562,7 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
   if (state === "forecast-menu") {
     const location = getActiveLocation(req);
     if (!location) {
-      return locationMenuTwiml({ allowBack: false, allowVoicemail: true });
+      return locationMenuTwiml({ allowBack: true });
     }
 
     const forecast = await fetchForecast(location);
@@ -2390,9 +2575,24 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
 
     const twiml = new VoiceResponse();
 
-    if (!location || !lastPlayback) {
+    if (!lastPlayback) {
       say(twiml, "There is nothing to repeat yet.");
-      twiml.redirect({ method: "POST" }, "/main-menu");
+      twiml.redirect({ method: "POST" }, "/root-menu-prompt");
+      return twiml;
+    }
+
+    if (lastPlayback.type === "exchange") {
+      const selection = lastPlayback.selection;
+      const amount = lastPlayback.amount;
+
+      const ratePayload = await fetchExchangeRate(selection.from, selection.to);
+      const speech = buildExchangeSpeech(selection, amount, ratePayload);
+      return playbackWithStarTwiml(speech);
+    }
+
+    if (!location) {
+      say(twiml, "There is nothing to repeat yet.");
+      twiml.redirect({ method: "POST" }, "/root-menu-prompt");
       return twiml;
     }
 
@@ -2401,7 +2601,7 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
 
     if (!speech) {
       say(twiml, "There is nothing to repeat yet.");
-      twiml.redirect({ method: "POST" }, "/main-menu");
+      twiml.redirect({ method: "POST" }, "/root-menu-prompt");
       return twiml;
     }
 
@@ -2409,14 +2609,14 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
   }
 
   if (state === "after-prompt") {
-    return afterActionTwiml(getUnitPreference(req));
+    return afterActionTwiml(getLastPlayback(req), getUnitPreference(req));
   }
 
   if (state === "voicemail") {
     return voicemailPromptTwiml();
   }
 
-  return locationMenuTwiml({ allowBack: false, allowVoicemail: true });
+  return rootMenuTwiml();
 }
 
 async function buildPlaybackSpeech(location, forecast, playback, unit = "C") {
@@ -2452,17 +2652,17 @@ async function goBackOneMenu(req) {
   const history = getMenuHistory(req);
 
   if (currentState === "playback" || currentState === "after-prompt") {
-    const previousTrackedState = history[history.length - 1] || "location-menu";
+    const previousTrackedState = history[history.length - 1] || "root-menu";
     return buildStateTwiml(req, previousTrackedState, { push: false });
   }
 
   if (history.length <= 1) {
-    return buildStateTwiml(req, "location-menu", { push: false });
+    return buildStateTwiml(req, "root-menu", { push: false });
   }
 
   popMenuHistory(req);
   const updatedHistory = getMenuHistory(req);
-  const previousState = updatedHistory[updatedHistory.length - 1] || "location-menu";
+  const previousState = updatedHistory[updatedHistory.length - 1] || "root-menu";
 
   return buildStateTwiml(req, previousState, { push: false });
 }
@@ -2475,7 +2675,7 @@ app.get("/voice", (req, res) => {
   const twiml = new VoiceResponse();
   say(
     twiml,
-    "Weather Line is running. Please call the phone number to use the interactive weather menu."
+    "Weather Line is running. Please call the phone number to use the interactive menu."
   );
   res.type("text/xml").send(twiml.toString());
 });
@@ -2491,29 +2691,50 @@ app.post("/voice", async (req, res) => {
 
     console.log("VOICE CallSid:", req.body.CallSid, "From:", req.body.From);
 
-    // Locked greeting first
     say(twiml, `${greeting}.`);
-
-    // Interruptible intro + location menu
-    const gather = twiml.gather(gatherOptions("/set-location-choice", 7, 1));
-
-    say(
-      gather,
-      "Welcome to Weather and Info Line. " +
-        "Press 1 for Montreal. " +
-        "2 for Tosh. " +
-        "3 for Laurentians. " +
-        "4 for United States. " +
-        "Press 9 to leave a comment or suggestion."
-    );
-
-    // If no key is pressed, replay the normal location menu prompt
-    twiml.redirect({ method: "POST" }, "/location-menu-prompt");
+    buildRootMenuInto(twiml);
 
     return res.type("text/xml").send(twiml.toString());
   } catch (error) {
     console.error("VOICE route error:", error.message);
     console.error("VOICE route details:", error.response?.data || null);
+    say(twiml, "Sorry, an application error occurred. Please try again.");
+    return res.type("text/xml").send(twiml.toString());
+  }
+});
+
+app.post("/root-menu-prompt", async (req, res) => {
+  const twiml = await buildStateTwiml(req, "root-menu");
+  res.type("text/xml").send(twiml.toString());
+});
+
+app.post("/root-menu", async (req, res) => {
+  const choice = parseRootMenuChoice(req);
+  const twiml = new VoiceResponse();
+
+  console.log("ROOT-MENU choice:", choice, "digits:", getDigits(req));
+
+  try {
+    if (choice === "1") {
+      const menuTwiml = await buildStateTwiml(req, "location-menu");
+      return res.type("text/xml").send(menuTwiml.toString());
+    }
+
+    if (choice === "2") {
+      const exchangeTwiml = await buildStateTwiml(req, "exchange-menu");
+      return res.type("text/xml").send(exchangeTwiml.toString());
+    }
+
+    if (choice === "9") {
+      const voiceTwiml = await buildStateTwiml(req, "voicemail", { push: false });
+      return res.type("text/xml").send(voiceTwiml.toString());
+    }
+
+    say(twiml, "I did not understand that choice.");
+    twiml.redirect({ method: "POST" }, "/root-menu-prompt");
+    return res.type("text/xml").send(twiml.toString());
+  } catch (error) {
+    console.error("ROOT-MENU route error:", error.message);
     say(twiml, "Sorry, an application error occurred. Please try again.");
     return res.type("text/xml").send(twiml.toString());
   }
@@ -2549,28 +2770,27 @@ app.post("/us-location-menu-prompt", async (req, res) => {
   res.type("text/xml").send(twiml.toString());
 });
 
+app.post("/exchange-menu-prompt", async (req, res) => {
+  const twiml = await buildStateTwiml(req, "exchange-menu");
+  res.type("text/xml").send(twiml.toString());
+});
+
+app.post("/exchange-amount-prompt", async (req, res) => {
+  const twiml = await buildStateTwiml(req, "exchange-amount", { push: false });
+  res.type("text/xml").send(twiml.toString());
+});
+
 app.post("/set-location-choice", async (req, res) => {
   const twiml = new VoiceResponse();
-  const hasActiveLocation = !!getActiveLocation(req);
 
   if (isBackKey(req)) {
-    if (hasActiveLocation) {
-      const backTwiml = await goBackOneMenu(req);
-      return res.type("text/xml").send(backTwiml.toString());
-    }
-
-    const menuTwiml = await buildStateTwiml(req, "location-menu", { push: false });
-    return res.type("text/xml").send(menuTwiml.toString());
+    const backTwiml = await goBackOneMenu(req);
+    return res.type("text/xml").send(backTwiml.toString());
   }
 
   const choice = parseLocationChoice(req);
 
   console.log("SET-LOCATION-CHOICE choice:", choice, "digits:", getDigits(req));
-
-  if (choice === "9" && !hasActiveLocation) {
-    const voiceTwiml = await buildStateTwiml(req, "voicemail", { push: false });
-    return res.type("text/xml").send(voiceTwiml.toString());
-  }
 
   if (choice === "4") {
     const usTwiml = await buildStateTwiml(req, "us-location-menu");
@@ -2623,6 +2843,74 @@ app.post("/set-us-location-choice", async (req, res) => {
   return res.type("text/xml").send(twiml.toString());
 });
 
+app.post("/set-exchange-choice", async (req, res) => {
+  const twiml = new VoiceResponse();
+
+  if (isBackKey(req)) {
+    const backTwiml = await goBackOneMenu(req);
+    return res.type("text/xml").send(backTwiml.toString());
+  }
+
+  const selection = parseExchangeChoice(req);
+
+  console.log("SET-EXCHANGE-CHOICE selection:", selection, "digits:", getDigits(req));
+
+  if (!selection) {
+    say(twiml, "I did not understand that exchange choice.");
+    const menuTwiml = await buildStateTwiml(req, "exchange-menu", { push: false });
+    return res.type("text/xml").send(menuTwiml.toString());
+  }
+
+  setExchangeSelection(req, selection);
+
+  const amountTwiml = await buildStateTwiml(req, "exchange-amount");
+  return res.type("text/xml").send(amountTwiml.toString());
+});
+
+app.post("/exchange-amount", async (req, res) => {
+  const twiml = new VoiceResponse();
+
+  try {
+    if (isBackKey(req)) {
+      const backTwiml = await goBackOneMenu(req);
+      return res.type("text/xml").send(backTwiml.toString());
+    }
+
+    const selection = getExchangeSelection(req);
+
+    if (!selection) {
+      const menuTwiml = await buildStateTwiml(req, "exchange-menu");
+      return res.type("text/xml").send(menuTwiml.toString());
+    }
+
+    const amountDigits = parseAmountDigits(req);
+    const amount = Number(amountDigits);
+
+    if (!amountDigits || !Number.isFinite(amount) || amount <= 0) {
+      say(twiml, "I did not understand that amount.");
+      const amountTwiml = await buildStateTwiml(req, "exchange-amount", { push: false });
+      return res.type("text/xml").send(amountTwiml.toString());
+    }
+
+    const ratePayload = await fetchExchangeRate(selection.from, selection.to);
+    const speech = buildExchangeSpeech(selection, amount, ratePayload);
+
+    setLastPlayback(req, {
+      type: "exchange",
+      selection,
+      amount
+    });
+
+    const playbackTwiml = playbackWithStarTwiml(speech);
+    return res.type("text/xml").send(playbackTwiml.toString());
+  } catch (error) {
+    console.error("EXCHANGE-AMOUNT error:", error.message);
+    say(twiml, "Sorry, I could not retrieve the exchange rate right now.");
+    twiml.redirect({ method: "POST" }, "/exchange-menu-prompt");
+    return res.type("text/xml").send(twiml.toString());
+  }
+});
+
 app.post("/forecast-menu", async (req, res) => {
   try {
     if (isBackKey(req)) {
@@ -2652,8 +2940,8 @@ app.post("/menu", async (req, res) => {
   console.log("MENU active location:", location);
 
   if (isBackKey(req)) {
-    twiml.redirect({ method: "POST" }, "/location-menu-prompt");
-    return res.type("text/xml").send(twiml.toString());
+    const backTwiml = await goBackOneMenu(req);
+    return res.type("text/xml").send(backTwiml.toString());
   }
 
   if (!location) {
@@ -2758,6 +3046,7 @@ app.post("/after-prompt", async (req, res) => {
 
 app.post("/after", async (req, res) => {
   const twiml = new VoiceResponse();
+  const playback = getLastPlayback(req);
 
   console.log("AFTER Digits:", getDigits(req));
 
@@ -2769,6 +3058,11 @@ app.post("/after", async (req, res) => {
   const choice = parseAfterChoice(req);
 
   if (choice === "5") {
+    if (playback?.type === "exchange") {
+      const rootTwiml = await buildStateTwiml(req, "root-menu");
+      return res.type("text/xml").send(rootTwiml.toString());
+    }
+
     const locationTwiml = await buildStateTwiml(req, "location-menu");
     return res.type("text/xml").send(locationTwiml.toString());
   }
@@ -2778,7 +3072,7 @@ app.post("/after", async (req, res) => {
     return res.type("text/xml").send(playbackTwiml.toString());
   }
 
-  if (choice === "7") {
+  if (choice === "7" && playback?.type !== "exchange") {
     toggleUnitPreference(req);
     const playbackTwiml = await buildStateTwiml(req, "playback", { push: false });
     return res.type("text/xml").send(playbackTwiml.toString());
