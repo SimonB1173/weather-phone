@@ -2487,40 +2487,33 @@ app.post("/voice", async (req, res) => {
     clearCallState(req);
     setUnitPreference(req, "C");
 
-    const greeting = getGreetingForTime("America/Toronto");
-
     console.log("VOICE CallSid:", req.body.CallSid, "From:", req.body.From);
-
-    const gather = twiml.gather({
-      input: "dtmf",
-      action: "/intro-choice",
-      method: "POST",
-      timeout: 8,
-      numDigits: 1,
-      finishOnKey: ""
-    });
-
-    if (INTRO_AUDIO_URL) {
-      gather.play(INTRO_AUDIO_URL);
-    }
-
-    gather.say(
-      SAY_OPTIONS,
-      `${greeting}, welcome to Weather Line. ` +
-        `We are continuously improving our system, with many exciting new features coming in the coming days. ` +
-        `You are welcome to leave comments or ideas for improvement by pressing 9. ` +
-        `You may also choose your location at any time. ` +
-        `Press 1 for Montreal. ` +
-        `2 for Tosh. ` +
-        `3 for Laurentians. ` +
-        `4 for United States.`
-    );
 
     twiml.redirect({ method: "POST" }, "/location-menu-prompt");
     return res.type("text/xml").send(twiml.toString());
   } catch (error) {
     console.error("VOICE route error:", error.message);
     console.error("VOICE route details:", error.response?.data || null);
+    say(twiml, "Sorry, an application error occurred. Please try again.");
+    return res.type("text/xml").send(twiml.toString());
+  }
+});
+
+app.post("/main-menu", async (req, res) => {
+  const twiml = new VoiceResponse();
+
+  try {
+    await buildMainMenuResponse(req, twiml);
+
+    const history = getMenuHistory(req);
+    if (!history.length || history[history.length - 1] !== "main-menu") {
+      pushMenuHistory(req, "main-menu");
+    }
+
+    return res.type("text/xml").send(twiml.toString());
+  } catch (error) {
+    console.error("MAIN-MENU route error:", error.message);
+    console.error("MAIN-MENU route details:", error.response?.data || null);
     say(twiml, "Sorry, an application error occurred. Please try again.");
     return res.type("text/xml").send(twiml.toString());
   }
