@@ -1782,22 +1782,27 @@ function buildDetailedDaySection(location, forecast, index, unit = "C", opts = {
   return buildDetailedDayOnlySection(location, forecast, index, label, unit, opts);
 }
 
-function buildRestOfTodaySection(location, forecast, unit = "C") {
+function buildRestOfTodaySection(location, forecast, unit = "C", opts = {}) {
   const entries = getRemainingEntriesForToday(forecast, location.timezone);
 
   if (!entries.length) {
-    return buildDetailedNightOnlySection(location, forecast, 0, "Tonight", unit);
+    return buildDetailedNightOnlySection(location, forecast, 0, "Tonight", unit, opts);
   }
 
   const parts = [
-    `Today.`,
+    "Today.",
     describeDetailedPeriodIntro(entries, location.timezone, false)
   ];
+
+  const precipLines = buildPrecipSummaryLines(entries, location.timezone, {
+    includeTiming: !!opts.includePrecipTiming
+  });
 
   const wind = describeWindLine(entries, location.timezone, "day", unit);
   const high = describeDayTemperatureLine(forecast, 0, unit);
   const windChill = describeDayWindChill(entries, unit);
 
+  if (opts.includePrecipAmounts) parts.push(...precipLines);
   if (wind) parts.push(wind);
   if (high) parts.push(high);
   if (windChill) parts.push(windChill);
@@ -1805,7 +1810,7 @@ function buildRestOfTodaySection(location, forecast, unit = "C") {
   return parts.join(" ");
 }
 
-function buildRemainingTodayAndTonightSection(location, forecast, unit = "C") {
+function buildRemainingTodayAndTonightSection(location, forecast, unit = "C", opts = {}) {
   const daytimeEntries = getRemainingDayEntriesForToday(forecast, location.timezone);
   const tonightEntries = getNightEntriesForDayIndex(forecast, 0, location.timezone);
   const nowHour = getNowHourInTz(location.timezone);
@@ -1817,10 +1822,15 @@ function buildRemainingTodayAndTonightSection(location, forecast, unit = "C") {
       describeDetailedPeriodIntro(daytimeEntries, location.timezone, false)
     ];
 
+    const precipLines = buildPrecipSummaryLines(daytimeEntries, location.timezone, {
+      includeTiming: !!opts.includePrecipTiming
+    });
+
     const wind = describeWindLine(daytimeEntries, location.timezone, "day", unit);
     const high = describeDayTemperatureLine(forecast, 0, unit);
     const windChill = describeDayWindChill(daytimeEntries, unit);
 
+    if (opts.includePrecipAmounts) dayParts.push(...precipLines);
     if (wind) dayParts.push(wind);
     if (high) dayParts.push(high);
     if (windChill) dayParts.push(windChill);
@@ -1829,11 +1839,11 @@ function buildRemainingTodayAndTonightSection(location, forecast, unit = "C") {
   }
 
   if (tonightEntries.length) {
-    parts.push(buildDetailedNightOnlySection(location, forecast, 0, "Tonight", unit));
+    parts.push(buildDetailedNightOnlySection(location, forecast, 0, "Tonight", unit, opts));
   }
 
   if (!parts.length) {
-    return buildRestOfTodaySection(location, forecast, unit);
+    return buildRestOfTodaySection(location, forecast, unit, opts);
   }
 
   return parts.join(" ");
@@ -1930,28 +1940,40 @@ function dailyForecastSpeech(location, forecast, index, unit = "C") {
   return `${daySection} ${nightSection}`.trim();
 }
 
-function buildAll7DayEntry(location, forecast, index, includeNight = true, todayMode = "full", unit = "C") {
+function buildAll7DayEntry(
+  location,
+  forecast,
+  index,
+  includeNight = true,
+  todayMode = "full",
+  unit = "C"
+) {
   const d = forecast.daily || {};
   const dateStr = d.time?.[index];
   const dayLabel = index === 0 ? "Today" : dayName(dateStr, location.timezone);
   const nightLabel = index === 0 ? "Tonight" : `${dayName(dateStr, location.timezone)} night`;
   const parts = [];
 
+  const opts = {
+    includePrecipAmounts: true,
+    includePrecipTiming: index <= 1
+  };
+
   if (index === 0 && todayMode === "remaining") {
-    parts.push(buildRemainingTodayAndTonightSection(location, forecast, unit));
+    parts.push(buildRemainingTodayAndTonightSection(location, forecast, unit, opts));
   } else if (index <= 1) {
-    parts.push(buildDetailedDayOnlySection(location, forecast, index, dayLabel, unit));
+    parts.push(buildDetailedDayOnlySection(location, forecast, index, dayLabel, unit, opts));
   } else {
-    parts.push(buildShortDaySection(location, forecast, index, unit));
+    parts.push(buildShortDaySection(location, forecast, index, unit, opts));
   }
 
   if (includeNight) {
     if (index === 0 && todayMode === "remaining") {
       // already included inside buildRemainingTodayAndTonightSection
     } else if (index <= 1) {
-      parts.push(buildDetailedNightOnlySection(location, forecast, index, nightLabel, unit));
+      parts.push(buildDetailedNightOnlySection(location, forecast, index, nightLabel, unit, opts));
     } else {
-      parts.push(buildShortNightSection(location, forecast, index, nightLabel, unit));
+      parts.push(buildShortNightSection(location, forecast, index, nightLabel, unit, opts));
     }
   }
 
@@ -2465,20 +2487,7 @@ app.post("/voice", async (req, res) => {
     clearCallState(req);
     setUnitPreference(req, "C");
 
-    const greeting = getGreetingForTime("America/Toronto");
-
     console.log("VOICE CallSid:", req.body.CallSid, "From:", req.body.From);
-
-    if (INTRO_AUDIO_URL) {
-      twiml.play(INTRO_AUDIO_URL);
-    }
-
-    twiml.say(
-      SAY_OPTIONS,
-      `${greeting}, welcome to Weather Line. ` +
-        `We are continuously improving our system, with many exciting new features coming in the coming days. ` +
-        `you are welcome to leave comments or ideas for improvement by pressing number 9.`
-    );
 
     twiml.redirect({ method: "POST" }, "/location-menu-prompt");
     return res.type("text/xml").send(twiml.toString());
