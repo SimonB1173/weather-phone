@@ -704,7 +704,7 @@ function exchangeMenuTwiml() {
   return twiml;
 }
 
-function exchangeAmountPromptTwiml(req, selection) {
+async function exchangeAmountPromptTwiml(req, selection) {
   const twiml = new VoiceResponse();
 
   const gather = twiml.gather({
@@ -715,17 +715,27 @@ function exchangeAmountPromptTwiml(req, selection) {
     finishOnKey: "#"
   });
 
-  const fromCurrencyText =
-    selection.from === "USD"
-      ? "U S dollars"
-      : selection.from === "CAD"
-      ? "Canadian dollars"
-      : currencySpeech(selection.from);
+  try {
+    const ratePayload = await fetchExchangeRate(selection.from, selection.to);
+    const time = retrievedTimeLabelNow("America/Toronto");
 
-  say(
-    gather,
-    `You chose to convert ${currencySpeech(selection.from)} to ${currencySpeech(selection.to)}. Please enter the amount of ${fromCurrencyText} you would like to exchange, then press pound. Press star to go back.`
-  );
+    const fromCurrencyText =
+      selection.from === "USD"
+        ? "U S dollars"
+        : selection.from === "CAD"
+        ? "Canadian dollars"
+        : currencySpeech(selection.from);
+
+    say(
+      gather,
+      `${selection.from === "USD" ? "U S to Canadian" : "Canadian to U S"} exchange rate as of ${time} is ${ratePayload.rate.toFixed(4)}. Enter amount of ${fromCurrencyText} you want to exchange then press pound. Press star to go back.`
+    );
+  } catch (error) {
+    say(
+      gather,
+      "Sorry, I could not get the exchange rate. Please enter the amount and try again. Press star to go back."
+    );
+  }
 
   twiml.redirect({ method: "POST" }, "/exchange-amount-prompt");
   return twiml;
