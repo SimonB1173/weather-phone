@@ -15,8 +15,6 @@ const SAY_OPTIONS = {
   language: "en-US"
 };
 
-const INTRO_AUDIO_URL = process.env.INTRO_AUDIO_URL || "";
-
 const forecastCache = new Map();
 const inFlightForecasts = new Map();
 const canadaAlertCache = new Map();
@@ -2491,29 +2489,14 @@ app.post("/voice", async (req, res) => {
 
     console.log("VOICE CallSid:", req.body.CallSid, "From:", req.body.From);
 
-    const gather = twiml.gather({
-      input: "dtmf",
-      action: "/intro-choice",
-      method: "POST",
-      timeout: 8,
-      numDigits: 1,
-      finishOnKey: ""
-    });
-
-    if (INTRO_AUDIO_URL) {
-      gather.play(INTRO_AUDIO_URL);
-    }
-
-    gather.say(
+    twiml.say(
       SAY_OPTIONS,
-      `${greeting}, welcome to Weather Line. ` +
-        `We are continuously improving our system, with many exciting new features coming in the coming days. ` +
-        `You are welcome to leave comments or ideas for improvement by pressing 9. ` +
-        `You may also choose your location at any time. ` +
+      `${greeting}, welcome to the weather and info line. ` +
         `Press 1 for Montreal. ` +
-        `2 for Tosh. ` +
-        `3 for Laurentians. ` +
-        `4 for United States.`
+        `Press 2 for Tosh. ` +
+        `Press 3 for Laurentians. ` +
+        `Press 4 for United States. ` +
+        `Press 9 to leave a comment or suggestion.`
     );
 
     twiml.redirect({ method: "POST" }, "/location-menu-prompt");
@@ -2521,14 +2504,10 @@ app.post("/voice", async (req, res) => {
   } catch (error) {
     console.error("VOICE route error:", error.message);
     console.error("VOICE route details:", error.response?.data || null);
+    console.error("VOICE ERROR FULL:", error);
     say(twiml, "Sorry, an application error occurred. Please try again.");
     return res.type("text/xml").send(twiml.toString());
   }
-});
-
-app.post("/location-menu-prompt", async (req, res) => {
-  const twiml = await buildStateTwiml(req, "location-menu");
-  res.type("text/xml").send(twiml.toString());
 });
 
 app.post("/us-location-menu-prompt", async (req, res) => {
