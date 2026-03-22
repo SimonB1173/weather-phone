@@ -3129,12 +3129,16 @@ async function buildPlaybackSpeech(location, forecast, playback, unit = "C") {
     if (!forecast) {
       forecast = await fetchForecast(location);
     }
+
     return nextHoursSpeech(location, forecast, playback.hours || 6, unit);
   }
 
   if (playback.type === "daily") {
     if (location?.country === "CA") {
       const ecPage = await fetchEnvironmentCanadaForecastPage(location);
+      console.log("EC issuedText:", ecPage?.issuedText);
+      console.log("EC dailyPeriods:", JSON.stringify(ecPage?.dailyPeriods || [], null, 2));
+
       const ecSpeech = dailyForecastSpeechEC(location, ecPage, playback.index, unit);
       if (ecSpeech) return ecSpeech;
 
@@ -3144,12 +3148,16 @@ async function buildPlaybackSpeech(location, forecast, playback, unit = "C") {
     if (!forecast) {
       forecast = await fetchForecast(location);
     }
+
     return dailyForecastSpeech(location, forecast, playback.index, unit);
   }
 
   if (playback.type === "all7") {
     if (location?.country === "CA") {
       const ecPage = await fetchEnvironmentCanadaForecastPage(location);
+      console.log("EC issuedText:", ecPage?.issuedText);
+      console.log("EC dailyPeriods:", JSON.stringify(ecPage?.dailyPeriods || [], null, 2));
+
       const ecSpeech = sevenDayForecastSpeechEC(location, ecPage, unit);
       if (ecSpeech) return ecSpeech;
 
@@ -3159,6 +3167,7 @@ async function buildPlaybackSpeech(location, forecast, playback, unit = "C") {
     if (!forecast) {
       forecast = await fetchForecast(location);
     }
+
     return sevenDayForecastSpeech(location, forecast, unit);
   }
 
