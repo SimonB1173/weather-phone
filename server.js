@@ -2651,93 +2651,39 @@ async function fetchEnvironmentCanadaForecastPage(location) {
     const landingHtml = String(landingResponse.data || "");
     const $landing = cheerio.load(landingHtml);
 
-    let dailyUrl = "";
     let hourlyUrl = "";
 
-    const landingLinks = $landing("a")
-  .toArray()
-  .map((a) => {
-    const href = String($landing(a).attr("href") || "").trim();
-    const text = cleanEcText($landing(a).text()).toLowerCase();
-    return { href, text };
-  })
-  .filter((x) => x.href);
+    $landing("a").each((_, a) => {
+      const href = String($landing(a).attr("href") || "").trim();
+      const text = cleanEcText($landing(a).text()).toLowerCase();
 
-const cityPageLinks = landingLinks.filter(
-  (x) =>
-    /\/city\/pages\//i.test(x.href) &&
-    /_metric_e\.html$/i.test(x.href)
-);
+      if (!hourlyUrl && (/hourly/i.test(href) || /hourly/i.test(text))) {
+        hourlyUrl = normalizeEnvironmentCanadaUrl(href);
+      }
+    });
 
-const bestDaily =
-  cityPageLinks.find((x) => !/canada_e\.html$/i.test(x.href)) ||
-  cityPageLinks[0] ||
-  landingLinks.find(
-    (x) =>
-      /\/city\/pages\//i.test(x.href) &&
-      !/canada_e\.html$/i.test(x.href)
-  );
+    if (!hourlyUrl) {
+      hourlyUrl = `https://weather.gc.ca/en/forecast/hourly/index.html?coords=${encodeURIComponent(coordText)}`;
+    }
 
-const bestHourly =
-  landingLinks.find((x) => /\/forecast\/hourly\//i.test(x.href)) ||
-  landingLinks.find((x) => /hourly/i.test(x.href)) ||
-  landingLinks.find((x) => /hourly/i.test(x.text));
+    console.log("EC LANDING URL:", landingUrl);
+    console.log("EC HOURLY URL:", hourlyUrl);
+    console.log("EC LANDING HTML HAS FORECAST:", /Forecast/i.test(landingHtml));
+    console.log("EC LANDING HTML HAS DETAILED FORECAST:", /Detailed Forecast/i.test(landingHtml));
 
-if (bestDaily) {
-  dailyUrl = normalizeEnvironmentCanadaUrl(bestDaily.href);
-}
+    const hourlyResponse = await axios.get(hourlyUrl, {
+      timeout: 10000,
+      headers: { "User-Agent": "weather-line-canada-hourly/1.0" }
+    }).catch(() => ({ data: "" }));
 
-if (bestHourly) {
-  hourlyUrl = normalizeEnvironmentCanadaUrl(bestHourly.href);
-}
-
-  console.log("EC DAILY URL:", dailyUrl);
-  console.log("EC HOURLY URL:", hourlyUrl);
-
-   if (!dailyUrl) {
-  const canonical =
-    $landing('link[rel="canonical"]').attr("href") ||
-    $landing('meta[property="og:url"]').attr("content") ||
-    "";
-
-  if (
-    canonical &&
-    /\/city\/pages\//i.test(canonical) &&
-    !/canada_e\.html$/i.test(canonical)
-  ) {
-    dailyUrl = normalizeEnvironmentCanadaUrl(canonical);
-  } else {
-    dailyUrl = "";
-  }
-}
-
-if (!dailyUrl || /canada_e\.html$/i.test(dailyUrl)) {
-  console.log("EC DAILY URL INVALID:", dailyUrl);
-  return null;
-}
-    const [dailyResponse, hourlyResponse] = await Promise.all([
-      axios.get(dailyUrl, {
-        timeout: 10000,
-        headers: { "User-Agent": "weather-line-canada-daily/1.0" }
-      }),
-      axios.get(hourlyUrl, {
-        timeout: 10000,
-        headers: { "User-Agent": "weather-line-canada-hourly/1.0" }
-      }).catch(() => ({ data: "" }))
-    ]);
-
-    const dailyHtml = String(dailyResponse.data || "");
-    console.log("EC DAILY HTML HAS DETAILED FORECAST:", /Detailed Forecast/i.test(dailyHtml));
     const hourlyHtml = String(hourlyResponse.data || "");
-
-    const $daily = cheerio.load(dailyHtml);
     const $hourly = cheerio.load(hourlyHtml);
 
     const data = {
-      issuedText: extractEcIssuedText($daily),
-      dailyPeriods: extractEcDailyPeriods($daily),
+      issuedText: extractEcIssuedText($landing),
+      dailyPeriods: extractEcDailyPeriods($landing),
       hourlyRows: extractEcHourlyRows($hourly, location.timezone),
-      dailyUrl,
+      dailyUrl: landingUrl,
       hourlyUrl
     };
 
@@ -2754,77 +2700,6 @@ if (!dailyUrl || /canada_e\.html$/i.test(dailyUrl)) {
     console.error("Environment Canada forecast page fetch failed:", error.message);
     return null;
   }
-}
-
-function buildEcDayPairs(periods) {
-  const pairs = [];
-  let i = 0;
-
-  while (i < periods.length) {
-    const current = periods[i];
-    const next = periods[i + 1];
-
-    if (!current) break;
-
-    const currentLabel = normalizeEcLabel(current.label);
-
-    if (currentLabel === "tonight" || currentLabel.endsWith(" night")) {
-      pairs.push({
-        day: currentLabel === "tonight" ? { label: "Today", text: "" } : null,
-        night: current
-      });
-      i += 1;
-      continue;
-    }
-
-    let night = null;
-    if (next) {
-      const nextLabel = normalizeEcLabel(next.label);
-      if (
-        nextLabel === "tonight" ||
-        nextLabel === `${currentLabel} night` ||
-        nextLabel.endsWith(" night")
-      ) {
-        night = next;
-        i += 1;
-      }
-    }
-
-    pairs.push({
-      day: current,
-      night
-    });
-
-    i += 1;
-  }
-
-  return pairs.filter((p) => p.day || p.night);
-}
-
-function dailyForecastSpeechEC(location, ecPage, index, unit = "C") {
-  const pairs = buildEcDayPairs(ecPage?.dailyPeriods || []);
-  if (!pairs.length || !pairs[index] || (!pairs[index].day && !pairs[index].night)) return "";
-
-  const pair = pairs[index];
-  const parts = [];
-
-  if (index === 0) {
-    if (ecPage?.issuedText) {
-      parts.push(`Issued by Environment Canada. ${cleanEcText(ecPage.issuedText)}.`);
-    } else {
-      parts.push("Issued by Environment Canada.");
-    }
-  }
-
-  if (pair.day?.text) {
-    parts.push(`${pair.day.label}. ${cleanEcText(pair.day.text)}.`);
-  }
-
-  if (pair.night?.text) {
-    parts.push(`${pair.night.label}. ${cleanEcText(pair.night.text)}.`);
-  }
-
-  return parts.join(" ").replace(/\s+/g, " ").trim();
 }
 
 function sevenDayForecastSpeechEC(location, ecPage, unit = "C") {
