@@ -485,6 +485,15 @@ function retrievedTimeLabelNow(tz) {
   });
 }
 
+function exchangeAsOfTime(timezone = "America/Toronto") {
+  return new Date().toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+    timeZone: timezone
+  });
+}
+
 function getHourInTz(iso, tz) {
   return getHourFromLocalIso(iso);
 }
@@ -708,7 +717,7 @@ function exchangeAmountPromptTwiml(req, selection) {
 
   say(
     gather,
-    `You chose to convert ${currencySpeech(selection.from)} to ${currencySpeech(selection.to)}. Please enter the amount in whole dollars, then press pound. Press star to go back.`
+    `Exchange rate as of ${selection.asOfTime} is ${Number(selection.rate).toFixed(4)}. Enter amount in ${currencySpeech(selection.from)}, then press pound. Press star to go back.`
   );
 
   twiml.redirect({ method: "POST" }, "/exchange-amount-prompt");
@@ -2481,15 +2490,10 @@ async function fetchExchangeRate(from, to) {
   return payload;
 }
 
-function buildExchangeSpeech(selection, amount, ratePayload) {
+function buildExchangeTotalSpeech(selection, amount) {
   const amountNumber = Number(amount || 0);
-  const total = amountNumber * Number(ratePayload.rate || 0);
-
-  return [
-    `Exchange rate for ${currencySpeech(selection.from)} to ${currencySpeech(selection.to)}.`,
-    `The current rate is 1 ${selection.from} equals ${ratePayload.rate.toFixed(4)} ${selection.to}.`,
-    `${formatMoneyAmount(amountNumber)} ${selection.from} equals ${formatMoneyAmount(total)} ${selection.to}.`
-  ].join(" ");
+  const total = amountNumber * Number(selection.rate || 0);
+  return `${formatMoneyAmount(amountNumber)} dollars equals ${formatMoneyAmount(total)} ${currencySpeech(selection.to)}.`;
 }
 
 function speakWeatherError(twiml, error, fallbackText) {
@@ -2581,12 +2585,7 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
     }
 
     if (lastPlayback.type === "exchange") {
-      const selection = lastPlayback.selection;
-      const amount = lastPlayback.amount;
-
-      const ratePayload = await fetchExchangeRate(selection.from, selection.to);
-      const speech = buildExchangeSpeech(selection, amount, ratePayload);
-      return playbackWithStarTwiml(speech);
+      return playbackWithStarTwiml(lastPlayback.speech || "");
     }
 
     if (!location) {
@@ -2860,10 +2859,24 @@ app.post("/set-exchange-choice", async (req, res) => {
     return res.type("text/xml").send(menuTwiml.toString());
   }
 
-  setExchangeSelection(req, selection);
+  try {
+    const ratePayload = await fetchExchangeRate(selection.from, selection.to);
 
-  const amountTwiml = await buildStateTwiml(req, "exchange-amount");
-  return res.type("text/xml").send(amountTwiml.toString());
+    setExchangeSelection(req, {
+      from: selection.from,
+      to: selection.to,
+      rate: ratePayload.rate,
+      asOfTime: exchangeAsOfTime("America/Toronto")
+    });
+
+    const amountTwiml = await buildStateTwiml(req, "exchange-amount", { push: false });
+    return res.type("text/xml").send(amountTwiml.toString());
+  } catch (error) {
+    console.error("SET-EXCHANGE-CHOICE error:", error.message);
+    say(twiml, "Sorry, I could not retrieve the exchange rate right now.");
+    twiml.redirect({ method: "POST" }, "/exchange-menu-prompt");
+    return res.type("text/xml").send(twiml.toString());
+  }
 });
 
 app.post("/exchange-amount", async (req, res) => {
@@ -2891,13 +2904,11 @@ app.post("/exchange-amount", async (req, res) => {
       return res.type("text/xml").send(amountTwiml.toString());
     }
 
-    const ratePayload = await fetchExchangeRate(selection.from, selection.to);
-    const speech = buildExchangeSpeech(selection, amount, ratePayload);
+    const speech = buildExchangeTotalSpeech(selection, amount);
 
     setLastPlayback(req, {
       type: "exchange",
-      selection,
-      amount
+      speech
     });
 
     const playbackTwiml = playbackWithStarTwiml(speech);
