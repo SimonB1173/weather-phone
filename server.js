@@ -2663,10 +2663,20 @@ async function fetchEnvironmentCanadaForecastPage(location) {
   })
   .filter((x) => x.href);
 
+const cityPageLinks = landingLinks.filter(
+  (x) =>
+    /\/city\/pages\//i.test(x.href) &&
+    /_metric_e\.html$/i.test(x.href)
+);
+
 const bestDaily =
-  landingLinks.find((x) => /\/city\/pages\/.*_metric_e\.html$/i.test(x.href)) ||
-  landingLinks.find((x) => /\/city\/pages\//i.test(x.href)) ||
-  landingLinks.find((x) => /daily forecast|detailed forecast|forecast/i.test(x.text));
+  cityPageLinks.find((x) => !/canada_e\.html$/i.test(x.href)) ||
+  cityPageLinks[0] ||
+  landingLinks.find(
+    (x) =>
+      /\/city\/pages\//i.test(x.href) &&
+      !/canada_e\.html$/i.test(x.href)
+  );
 
 const bestHourly =
   landingLinks.find((x) => /\/forecast\/hourly\//i.test(x.href)) ||
@@ -2684,22 +2694,27 @@ if (bestHourly) {
   console.log("EC DAILY URL:", dailyUrl);
   console.log("EC HOURLY URL:", hourlyUrl);
 
-    if (!dailyUrl) {
+   if (!dailyUrl) {
   const canonical =
     $landing('link[rel="canonical"]').attr("href") ||
     $landing('meta[property="og:url"]').attr("content") ||
     "";
 
-  if (canonical && /\/city\/pages\//i.test(canonical)) {
+  if (
+    canonical &&
+    /\/city\/pages\//i.test(canonical) &&
+    !/canada_e\.html$/i.test(canonical)
+  ) {
     dailyUrl = normalizeEnvironmentCanadaUrl(canonical);
   } else {
-    dailyUrl = landingUrl;
+    dailyUrl = "";
   }
 }
-    if (!hourlyUrl) {
-      hourlyUrl = `https://weather.gc.ca/en/forecast/hourly/index.html?coords=${encodeURIComponent(coordText)}`;
-    }
 
+if (!dailyUrl || /canada_e\.html$/i.test(dailyUrl)) {
+  console.log("EC DAILY URL INVALID:", dailyUrl);
+  return null;
+}
     const [dailyResponse, hourlyResponse] = await Promise.all([
       axios.get(dailyUrl, {
         timeout: 10000,
