@@ -2681,8 +2681,8 @@ if (bestHourly) {
   hourlyUrl = normalizeEnvironmentCanadaUrl(bestHourly.href);
 }
 
-console.log("EC DAILY URL:", dailyUrl);
-console.log("EC HOURLY URL:", hourlyUrl);
+  console.log("EC DAILY URL:", dailyUrl);
+  console.log("EC HOURLY URL:", hourlyUrl);
 
     if (!dailyUrl) {
   const canonical =
