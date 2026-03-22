@@ -2378,52 +2378,6 @@ function extractEcDailyPeriods($) {
   return periods;
 }
 
-  const fullText = cleanEcText($("body").text());
-  if (!fullText) return [];
-
-  const splitRegex =
-    /\b(Tonight|Monday night|Tuesday night|Wednesday night|Thursday night|Friday night|Saturday night|Sunday night|Today|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\b\s*:*/gi;
-
-  const matches = [];
-  let m;
-
-  while ((m = splitRegex.exec(fullText)) !== null) {
-    matches.push({
-      label: cleanEcText(m[1]),
-      index: m.index,
-      length: m[0].length
-    });
-  }
-
-  if (!matches.length) return [];
-
-  const fallbackPeriods = [];
-  const used = new Set();
-
-  for (let i = 0; i < matches.length; i++) {
-    const current = matches[i];
-    const next = matches[i + 1];
-    const start = current.index + current.length;
-    const end = next ? next.index : fullText.length;
-
-    const labelKey = normalizeEcLabel(current.label);
-    if (used.has(labelKey)) continue;
-
-    let text = cleanEcText(fullText.slice(start, end));
-    text = text.replace(/^[:.\-\s]+/, "").trim();
-
-    if (!text || text.length < 8) continue;
-
-    fallbackPeriods.push({
-      label: current.label,
-      text
-    });
-    used.add(labelKey);
-  }
-
-  return fallbackPeriods;
-}
-
 function parseEcHourValue(raw) {
   const text = cleanEcText(raw).toLowerCase();
 
