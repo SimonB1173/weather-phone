@@ -2281,27 +2281,21 @@ function extractEcIssuedText($) {
   const bodyText = cleanEcText($("body").text());
 
   const patterns = [
-    /Issued by Environment Canada[^.]*\./i,
-    /Issued at[^.]*\./i,
-    /Forecast issued[^.]*\./i,
-    /Forecast updated[^.]*\./i,
-    /Updated at[^.]*\./i
+    /Forecast issued:\s*.*?(?=Detailed Forecast|$)/i,
+    /Issued by Environment Canada.*?(?=Detailed Forecast|$)/i,
+    /Issued at.*?(?=Detailed Forecast|$)/i,
+    /Forecast updated:\s*.*?(?=Detailed Forecast|$)/i,
+    /Updated at.*?(?=Detailed Forecast|$)/i
   ];
 
   for (const pattern of patterns) {
     const match = bodyText.match(pattern);
     if (match && match[0]) {
-      return cleanEcText(match[0]);
+      return cleanEcText(match[0]).slice(0, 180);
     }
   }
 
-  const candidate = $("body")
-    .find("*")
-    .toArray()
-    .map((el) => cleanEcText($(el).text()))
-    .find((text) => /issued|updated/i.test(text) && text.length >= 12 && text.length <= 160);
-
-  return candidate || "";
+  return "";
 }
 
 function extractEcDailyPeriods($) {
@@ -2660,23 +2654,48 @@ async function fetchEnvironmentCanadaForecastPage(location) {
     let dailyUrl = "";
     let hourlyUrl = "";
 
-    $landing("a").each((_, a) => {
-      const href = String($landing(a).attr("href") || "").trim();
-      const text = cleanEcText($landing(a).text()).toLowerCase();
+    const landingLinks = $landing("a")
+  .toArray()
+  .map((a) => {
+    const href = String($landing(a).attr("href") || "").trim();
+    const text = cleanEcText($landing(a).text()).toLowerCase();
+    return { href, text };
+  })
+  .filter((x) => x.href);
 
-      if (!dailyUrl && (/city\/pages\//i.test(href) || /forecast/i.test(text))) {
-        dailyUrl = normalizeEnvironmentCanadaUrl(href);
-      }
+const bestDaily =
+  landingLinks.find((x) => /\/city\/pages\/.*_metric_e\.html$/i.test(x.href)) ||
+  landingLinks.find((x) => /\/city\/pages\//i.test(x.href)) ||
+  landingLinks.find((x) => /daily forecast|detailed forecast|forecast/i.test(x.text));
 
-      if (!hourlyUrl && (/hourly/i.test(href) || /hourly/i.test(text))) {
-        hourlyUrl = normalizeEnvironmentCanadaUrl(href);
-      }
-    });
+const bestHourly =
+  landingLinks.find((x) => /\/forecast\/hourly\//i.test(x.href)) ||
+  landingLinks.find((x) => /hourly/i.test(x.href)) ||
+  landingLinks.find((x) => /hourly/i.test(x.text));
+
+if (bestDaily) {
+  dailyUrl = normalizeEnvironmentCanadaUrl(bestDaily.href);
+}
+
+if (bestHourly) {
+  hourlyUrl = normalizeEnvironmentCanadaUrl(bestHourly.href);
+}
+
+console.log("EC DAILY URL:", dailyUrl);
+console.log("EC HOURLY URL:", hourlyUrl);
 
     if (!dailyUrl) {
-      dailyUrl = landingUrl;
-    }
+  const canonical =
+    $landing('link[rel="canonical"]').attr("href") ||
+    $landing('meta[property="og:url"]').attr("content") ||
+    "";
 
+  if (canonical && /\/city\/pages\//i.test(canonical)) {
+    dailyUrl = normalizeEnvironmentCanadaUrl(canonical);
+  } else {
+    dailyUrl = landingUrl;
+  }
+}
     if (!hourlyUrl) {
       hourlyUrl = `https://weather.gc.ca/en/forecast/hourly/index.html?coords=${encodeURIComponent(coordText)}`;
     }
@@ -2693,6 +2712,7 @@ async function fetchEnvironmentCanadaForecastPage(location) {
     ]);
 
     const dailyHtml = String(dailyResponse.data || "");
+    console.log("EC DAILY HTML HAS DETAILED FORECAST:", /Detailed Forecast/i.test(dailyHtml));
     const hourlyHtml = String(hourlyResponse.data || "");
 
     const $daily = cheerio.load(dailyHtml);
@@ -2705,6 +2725,13 @@ async function fetchEnvironmentCanadaForecastPage(location) {
       dailyUrl,
       hourlyUrl
     };
+
+    console.log("EC PAGE PARSED:", {
+      issuedText: data.issuedText,
+      dailyPeriodsCount: data.dailyPeriods.length,
+      dailyUrl: data.dailyUrl,
+      hourlyUrl: data.hourlyUrl
+    });
 
     setCachedEnvironmentCanadaPage(location, data);
     return data;
