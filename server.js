@@ -2499,7 +2499,7 @@ app.post("/voice", async (req, res) => {
 
     say(
       gather,
-      "Welcome to Weather and Info Line. " +
+      "Welcome to the Weather Line. " +
         "Press 1 for Montreal. " +
         "2 for Tosh. " +
         "3 for Laurentians. " +
