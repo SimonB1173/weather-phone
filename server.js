@@ -15,6 +15,8 @@ const SAY_OPTIONS = {
   language: "en-US"
 };
 
+const INTRO_AUDIO_URL = process.env.INTRO_AUDIO_URL || "";
+
 const forecastCache = new Map();
 const inFlightForecasts = new Map();
 const canadaAlertCache = new Map();
@@ -2485,29 +2487,41 @@ app.post("/voice", async (req, res) => {
     clearCallState(req);
     setUnitPreference(req, "C");
 
-    const greeting = getGreetingForTime("America/Toronto");
-
     console.log("VOICE CallSid:", req.body.CallSid, "From:", req.body.From);
-
-    twiml.say(
-      SAY_OPTIONS,
-      `${greeting}, welcome to the weather and info line. ` +
-        `Press 1 for Montreal. ` +
-        `Press 2 for Tosh. ` +
-        `Press 3 for Laurentians. ` +
-        `Press 4 for United States. ` +
-        `Press 9 to leave a comment or suggestion.`
-    );
 
     twiml.redirect({ method: "POST" }, "/location-menu-prompt");
     return res.type("text/xml").send(twiml.toString());
   } catch (error) {
     console.error("VOICE route error:", error.message);
     console.error("VOICE route details:", error.response?.data || null);
-    console.error("VOICE ERROR FULL:", error);
     say(twiml, "Sorry, an application error occurred. Please try again.");
     return res.type("text/xml").send(twiml.toString());
   }
+});
+
+app.post("/main-menu", async (req, res) => {
+  const twiml = new VoiceResponse();
+
+  try {
+    await buildMainMenuResponse(req, twiml);
+
+    const history = getMenuHistory(req);
+    if (!history.length || history[history.length - 1] !== "main-menu") {
+      pushMenuHistory(req, "main-menu");
+    }
+
+    return res.type("text/xml").send(twiml.toString());
+  } catch (error) {
+    console.error("MAIN-MENU route error:", error.message);
+    console.error("MAIN-MENU route details:", error.response?.data || null);
+    say(twiml, "Sorry, an application error occurred. Please try again.");
+    return res.type("text/xml").send(twiml.toString());
+  }
+});
+
+app.post("/location-menu-prompt", async (req, res) => {
+  const twiml = await buildStateTwiml(req, "location-menu");
+  res.type("text/xml").send(twiml.toString());
 });
 
 app.post("/us-location-menu-prompt", async (req, res) => {
