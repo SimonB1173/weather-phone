@@ -1486,52 +1486,48 @@ function chunkEcHourlyToDaily(hourly) {
   };
 }
 
-async function fetchEnvironmentCanadaHourlyForecast(location) {
-  const station = await findNearestClimateStation(location);
-  const now = new Date();
-  const start = new Date(now.getTime() - 2 * 60 * 60 * 1000);
-  const end = new Date(now.getTime() + 8 * 24 * 60 * 60 * 1000);
+async function fetchEnvironmentCanadaHourlyForecast(location, pointId = null) {
+  const point = pointId ? { id: pointId } : await findNearestCityPage(location);
+  const item = await ecApiGet(
+    `https://api.weather.gc.ca/collections/citypageweather-realtime/items/${encodeURIComponent(point.id)}`,
+    { f: "json", lang: "en" }
+  );
 
-  const data = await ecApiGet("https://api.weather.gc.ca/collections/climate-hourly/items", {
-    f: "json",
-    lang: "en",
-    CLIMATE_IDENTIFIER: station.climateId,
-    datetime: `${start.toISOString()}/${end.toISOString()}`,
-    limit: 500
-  });
-
-  const rows = safeArray(data?.features)
-    .map((f) => {
-      const p = f?.properties || {};
-      const localIso = formatEcLocalIso(p.LOCAL_DATE || p.UTC_DATE || "");
-      const temp = safeEcNumber(p.TEMP);
-      const windSpeed = safeEcNumber(p.WIND_SPEED) || 0;
-      const windDirDeg = safeEcNumber(p.WIND_DIRECTION);
-      const weatherDesc = String(p.WEATHER_ENG_DESC || "").toLowerCase();
-      const precipAmount = safeEcNumber(p.PRECIP_AMOUNT) || 0;
-      const snowLike = /snow|flurr|ice pellets|blowing snow/.test(weatherDesc);
-      const rainLike = /rain|drizzle|showers|freezing rain|thunderstorm/.test(weatherDesc);
-      const cloudCoverPseudo =
-        /clear/.test(weatherDesc) ? 5 :
-        /sun|few clouds/.test(weatherDesc) ? 20 :
-        /partly/.test(weatherDesc) ? 45 :
-        /mainly cloudy|mostly cloudy/.test(weatherDesc) ? 70 : 90;
+  const rows = safeArray(item?.properties?.hourlyForecastGroup?.hourlyForecasts)
+    .map((h) => {
+      const timestamp = formatEcLocalIso(h?.timestamp || "");
+      const condition = String(h?.condition?.en || h?.condition || "").toLowerCase();
+      const temp = safeEcNumber(h?.temperature?.value?.en ?? h?.temperature?.value);
+      const lop = safeEcNumber(h?.lop?.value?.en ?? h?.lop?.value) || 0;
+      const uv = safeEcNumber(h?.uv?.index?.value?.en ?? h?.uv?.index?.value) || 0;
+      const windPeriod = safeArray(h?.winds?.periods)?.[0] || null;
+      const windSpeed = safeEcNumber(windPeriod?.speed?.value?.en ?? windPeriod?.speed?.value) || 0;
+      const windGust = safeEcNumber(windPeriod?.gust?.value?.en ?? windPeriod?.gust?.value) || windSpeed;
+      const windBearing = safeEcNumber(windPeriod?.bearing?.value?.en ?? windPeriod?.bearing?.value) || 0;
 
       return {
-        time: localIso,
+        time: timestamp,
         temperature_2m: temp,
-        apparent_temperature: safeEcNumber(p.WINDCHILL) ?? temp,
-        precipitation_probability: precipAmount > 0 ? 100 : 20,
-        rain: rainLike && !snowLike ? precipAmount : 0,
-        showers: /showers/.test(weatherDesc) ? precipAmount : 0,
-        snowfall: snowLike ? precipAmount : 0,
-        cloud_cover: cloudCoverPseudo,
+        apparent_temperature: temp,
+        precipitation_probability: lop,
+        rain: /rain|drizzle|showers|thunder/.test(condition) ? (lop >= 60 ? 1 : 0) : 0,
+        showers: /showers/.test(condition) ? (lop >= 60 ? 1 : 0) : 0,
+        snowfall: /snow|flurr|ice pellets|blowing snow/.test(condition) ? (lop >= 60 ? 1 : 0) : 0,
+        cloud_cover: /clear/.test(condition)
+          ? 5
+          : /sun|few clouds/.test(condition)
+            ? 20
+            : /partly/.test(condition)
+              ? 45
+              : /mainly cloudy|mostly cloudy/.test(condition)
+                ? 70
+                : 90,
         wind_speed_10m: windSpeed,
-        wind_gusts_10m: windSpeed,
-        wind_direction_10m: windDirDeg,
-        uv_index: 0,
-        weather_code: mapEcDescriptionToOpenMeteoCode(weatherDesc),
-        weather_desc: weatherDesc
+        wind_gusts_10m: windGust,
+        wind_direction_10m: windBearing,
+        uv_index: uv,
+        weather_code: mapEcDescriptionToOpenMeteoCode(condition),
+        weather_desc: condition
       };
     })
     .filter((x) => x.time && Number.isFinite(Number(x.temperature_2m)))
@@ -1542,7 +1538,7 @@ async function fetchEnvironmentCanadaHourlyForecast(location) {
   }
 
   return {
-    station,
+    station: null,
     rows
   };
 }
@@ -1580,10 +1576,8 @@ async function fetchEnvironmentCanadaCityPage(location) {
 }
 
 async function fetchEnvironmentCanadaBundle(location) {
-  const [cityPage, hourlyBundle] = await Promise.all([
-    fetchEnvironmentCanadaCityPage(location),
-    fetchEnvironmentCanadaHourlyForecast(location)
-  ]);
+  const cityPage = await fetchEnvironmentCanadaCityPage(location);
+  const hourlyBundle = await fetchEnvironmentCanadaHourlyForecast(location, cityPage.point.id);
 
   const currentFromCity = ecNormalizeCurrentFromCityPage(cityPage.item);
   const hourlyRows = hourlyBundle.rows;
