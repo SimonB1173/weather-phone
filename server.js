@@ -1342,59 +1342,46 @@ function ecPeriodSpeech(location, ecData, period, unit = "C") {
 function buildEcDailyGroups(ecData, location) {
   const periods = ecData?.forecastPeriods?.periods || [];
   const tz = location?.timezone || "America/Toronto";
-  const nowLocal = getCurrentLocalDateParts(tz);
-  const today = nowLocal.date;
-  const tomorrow = addDaysToDateText(today, 1);
+  const today = getCurrentLocalDateParts(tz).date;
 
   const groups = [];
-  let cursorDate = today;
+  let currentDate = today;
 
   for (let i = 0; i < periods.length; i++) {
     const period = periods[i];
     const lower = String(period?.periodName || "").trim().toLowerCase();
     const isNight = /night|tonight/.test(lower);
 
-    // If EC still leaves "Tonight" as the first period after the calendar
-    // has already switched to the new day, skip it so button 1 matches "today".
+    // Skip stale leading "Tonight" after midnight rollover
     if (i === 0 && lower === "tonight") {
       continue;
     }
 
-    if (i === 0) {
+    if (!isNight) {
+      // Start a new day group
       groups.push({
-        dateText: today,
-        label: relativeMenuDayLabel(today, tz),
+        dateText: currentDate,
+        label: relativeMenuDayLabel(currentDate, tz),
         periods: [period]
       });
-
-      if (!isNight) {
-        cursorDate = tomorrow;
-      }
-      continue;
-    }
-
-    if (isNight) {
+    } else {
+      // Attach night to the most recent day group
       const lastGroup = groups[groups.length - 1];
 
-      if (lastGroup && lastGroup.dateText === cursorDate) {
+      if (lastGroup) {
         lastGroup.periods.push(period);
       } else {
+        // Safety fallback if EC returns a night period first
         groups.push({
-          dateText: cursorDate,
-          label: relativeMenuDayLabel(cursorDate, tz),
+          dateText: currentDate,
+          label: relativeMenuDayLabel(currentDate, tz),
           periods: [period]
         });
       }
 
-      cursorDate = addDaysToDateText(cursorDate, 1);
-      continue;
+      // After night, move to next calendar day
+      currentDate = addDaysToDateText(currentDate, 1);
     }
-
-    groups.push({
-      dateText: cursorDate,
-      label: relativeMenuDayLabel(cursorDate, tz),
-      periods: [period]
-    });
   }
 
   return groups;
