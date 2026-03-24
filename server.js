@@ -328,7 +328,7 @@ function getHourFromLocalIso(iso) {
 
 function getMinuteFromLocalIso(iso) {
   const match = String(iso || "").match(/T(\d{1,2}):(\d{2})/);
-  return match ? Number(match[2]) : 0;
+  return match ? Number(match[1]) === 24 ? Number(match[2]) : Number(match[2]) : 0;
 }
 
 function formatLocalIsoTimeLabel(iso) {
@@ -365,6 +365,42 @@ function issuedDateLabelToday(tz) {
     day: "numeric",
     year: "numeric",
     timeZone: tz || "UTC"
+  });
+}
+
+function issuedMonthDayLabel(rawTimestamp, timezone) {
+  const text = String(rawTimestamp || "").trim();
+  if (!text) {
+    return new Date().toLocaleDateString("en-US", {
+      month: "long",
+      day: "numeric",
+      timeZone: timezone || "America/Toronto"
+    });
+  }
+
+  const parsed = new Date(text);
+  if (!Number.isNaN(parsed.getTime())) {
+    return parsed.toLocaleDateString("en-US", {
+      month: "long",
+      day: "numeric",
+      timeZone: timezone || "America/Toronto"
+    });
+  }
+
+  const iso = formatEcLocalIso(text);
+  if (iso) {
+    const dateText = getDatePartFromLocalIso(iso);
+    return parsePlainDate(dateText).toLocaleDateString("en-US", {
+      month: "long",
+      day: "numeric",
+      timeZone: timezone || "America/Toronto"
+    });
+  }
+
+  return new Date().toLocaleDateString("en-US", {
+    month: "long",
+    day: "numeric",
+    timeZone: timezone || "America/Toronto"
   });
 }
 
@@ -406,6 +442,45 @@ function getCurrentLocalDateParts(timezone) {
     hour: Number(get("hour") || 0),
     minute: Number(get("minute") || 0)
   };
+}
+
+function getNextTopOfHourLocalIso(timezone) {
+  const nowLocal = getCurrentLocalDateParts(timezone || "UTC");
+  let dateText = nowLocal.date;
+  let hour = nowLocal.hour + 1;
+
+  if (hour >= 24) {
+    hour = 0;
+    dateText = addDaysToDateText(dateText, 1);
+  }
+
+  return `${dateText}T${String(hour).padStart(2, "0")}:00`;
+}
+
+function monthDayLabel(dateText, tz) {
+  return parsePlainDate(dateText).toLocaleDateString("en-US", {
+    month: "long",
+    day: "numeric",
+    timeZone: tz || "UTC"
+  });
+}
+
+function weekdayMonthDayLabel(dateText, tz) {
+  return parsePlainDate(dateText).toLocaleDateString("en-US", {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+    timeZone: tz || "UTC"
+  });
+}
+
+function relativeMenuDayLabel(dateText, tz) {
+  const today = getCurrentLocalDateParts(tz || "UTC").date;
+  const tomorrow = addDaysToDateText(today, 1);
+
+  if (dateText === today) return `Today, ${monthDayLabel(dateText, tz)}`;
+  if (dateText === tomorrow) return `Tomorrow, ${monthDayLabel(dateText, tz)}`;
+  return weekdayMonthDayLabel(dateText, tz);
 }
 
 function getGreetingForTime(timezone) {
@@ -951,7 +1026,7 @@ function formatIssuedTime(rawTimestamp, timezone) {
 function ecIssuedSpeechLine(label, rawTimestamp, timezone) {
   const text = String(rawTimestamp || "").trim();
   if (!text) return `${label}.`;
-  return `${label} at ${formatIssuedTime(text, timezone)}.`;
+  return `${label} at ${formatIssuedTime(text, timezone)} on ${issuedMonthDayLabel(text, timezone)}.`;
 }
 
 function normalizeEcCurrent(cityItem) {
@@ -1249,71 +1324,72 @@ function ecPeriodSpeech(location, ecData, period, unit = "C") {
   return parts.join(" ");
 }
 
-function buildEcDailyGroups(ecData) {
+function buildEcDailyGroups(ecData, location) {
   const periods = ecData?.forecastPeriods?.periods || [];
+  const tz = location?.timezone || "America/Toronto";
+  const today = getCurrentLocalDateParts(tz).date;
   const groups = [];
-  let i = 0;
+  let cursorDate = today;
 
-  while (i < periods.length) {
-    const current = periods[i];
-    const currentName = String(current.periodName || "").trim();
-    const lower = currentName.toLowerCase();
-    const next = periods[i + 1];
-    const nextName = String(next?.periodName || "").trim().toLowerCase();
+  for (let i = 0; i < periods.length; i++) {
+    const period = periods[i];
+    const lower = String(period?.periodName || "").trim().toLowerCase();
+    const isNight = /night|tonight/.test(lower);
 
-    if (i === 0 && lower === "tonight") {
+    if (i === 0) {
+      if (isNight) {
+        groups.push({
+          dateText: today,
+          label: relativeMenuDayLabel(today, tz),
+          periods: [period]
+        });
+        cursorDate = addDaysToDateText(today, 1);
+        continue;
+      }
+
       groups.push({
-        label: "Today",
-        periods: [current]
+        dateText: today,
+        label: relativeMenuDayLabel(today, tz),
+        periods: [period]
       });
-      i += 1;
       continue;
     }
 
-    if (lower.endsWith("night")) {
-      groups.push({
-        label: currentName,
-        periods: [current]
-      });
-      i += 1;
+    if (isNight) {
+      const lastGroup = groups[groups.length - 1];
+
+      if (lastGroup && lastGroup.dateText === cursorDate) {
+        lastGroup.periods.push(period);
+      } else {
+        groups.push({
+          dateText: cursorDate,
+          label: relativeMenuDayLabel(cursorDate, tz),
+          periods: [period]
+        });
+      }
+
+      cursorDate = addDaysToDateText(cursorDate, 1);
       continue;
     }
 
-    const shouldPair = next && (nextName === `${lower} night` || nextName === "night");
-
-    if (shouldPair) {
-      groups.push({
-        label: currentName,
-        periods: [current, next]
-      });
-      i += 2;
-    } else {
-      groups.push({
-        label: currentName,
-        periods: [current]
-      });
-      i += 1;
-    }
+    groups.push({
+      dateText: cursorDate,
+      label: relativeMenuDayLabel(cursorDate, tz),
+      periods: [period]
+    });
   }
 
   return groups;
 }
 
-function ecHourlySpeech(location, ecData, hours = 18, unit = "C") {
+function ecHourlySpeech(location, ecData, hours = 12, unit = "C") {
   const rows = ecData.hourly || [];
-  const nowLocal = getCurrentLocalDateParts(location.timezone || "America/Toronto");
-  const future = rows.filter((row) => {
-    const datePart = getDatePartFromLocalIso(row.time);
-    const hourPart = getHourFromLocalIso(row.time);
-    const minutePart = getMinuteFromLocalIso(row.time);
-    return (
-      datePart > nowLocal.date ||
-      (datePart === nowLocal.date && hourPart > nowLocal.hour) ||
-      (datePart === nowLocal.date && hourPart === nowLocal.hour && minutePart >= nowLocal.minute)
-    );
-  });
+  const tz = location.timezone || "America/Toronto";
+  const nextHourStart = getNextTopOfHourLocalIso(tz);
 
+  const future = rows.filter((row) => String(row.time || "") >= nextHourStart);
   const slice = future.slice(0, hours);
+
   if (!slice.length) return `I could not find hourly forecast data for ${placeLabel(location)}.`;
 
   const compact = slice.map((row) => ({
@@ -1331,18 +1407,25 @@ function ecHourlySpeech(location, ecData, hours = 18, unit = "C") {
     code: row.weather_code
   }));
 
-  const blocks = buildSmartHourlyBlocks(compact, location.timezone || "America/Toronto");
-  const spoken = blocks.slice(0, 6).map((b) => summarizeHourlyBlock(b, location.timezone || "America/Toronto", unit)).join(" ");
+  const blocks = buildSmartHourlyBlocks(compact, tz);
+  const spoken = blocks
+    .slice(0, 6)
+    .map((b) => summarizeHourlyBlock(b, tz, unit))
+    .join(" ");
 
   return [
-    `Hourly forecast for ${placeLabel(location)}.`,
-    ecIssuedSpeechLine("Issued by Environment Canada", ecData.forecastPeriods?.issuedAt || ecData.current?.issuedAt, location.timezone),
+    ecIssuedSpeechLine(
+      "Issued by Environment Canada",
+      ecData.forecastPeriods?.issuedAt || ecData.current?.issuedAt,
+      tz
+    ),
+    `Here is the next ${slice.length} hour forecast for ${placeLabel(location)}.`,
     spoken
   ].join(" ");
 }
 
 function ecSingleForecastSpeech(location, ecData, index, unit = "C") {
-  const groups = buildEcDailyGroups(ecData);
+  const groups = buildEcDailyGroups(ecData, location);
   if (index < 0 || index >= groups.length) {
     return `That forecast day is not available for ${placeLabel(location)}.`;
   }
@@ -1587,7 +1670,7 @@ async function forecastDayPromptTwiml(location, forecast) {
   const gather = twiml.gather(gatherOptions("/forecast-day", 8, 1));
 
   if (location?.country === "CA") {
-    const groups = buildEcDailyGroups(forecast);
+    const groups = buildEcDailyGroups(forecast, location);
     const parts = ["For the full Environment Canada forecast, press 0."];
     for (let i = 0; i < Math.min(9, groups.length); i++) {
       parts.push(`Press ${i + 1} for ${groups[i].label}.`);
@@ -1664,7 +1747,7 @@ async function buildPlaybackSpeech(location, forecast, playback, unit = "C") {
 
   if (location?.country === "CA") {
     if (playback.type === "current") return ecCurrentWeatherSpeech(location, forecast, unit);
-    if (playback.type === "hourly") return ecHourlySpeech(location, forecast, playback.hours || 18, unit);
+    if (playback.type === "hourly") return ecHourlySpeech(location, forecast, playback.hours || 12, unit);
     if (playback.type === "daily") return ecSingleForecastSpeech(location, forecast, playback.index, unit);
     if (playback.type === "all7") return ecAllForecastSpeech(location, forecast, unit);
     return "";
@@ -1852,7 +1935,7 @@ app.post("/menu", async (req, res) => {
     }
 
     if (choice === "2") {
-      setLastPlayback(req, { type: "hourly", hours: location.country === "CA" ? 18 : 6 });
+      setLastPlayback(req, { type: "hourly", hours: location.country === "CA" ? 12 : 6 });
       const playbackTwiml = await buildStateTwiml(req, "playback", { push: false });
       return res.type("text/xml").send(playbackTwiml.toString());
     }
@@ -1908,7 +1991,7 @@ app.post("/forecast-day", async (req, res) => {
     }
 
     if (location.country === "CA") {
-      const groupCount = buildEcDailyGroups(forecast).length;
+      const groupCount = buildEcDailyGroups(forecast, location).length;
       if (selected >= groupCount) {
         say(twiml, "I did not understand the forecast day.");
         const forecastTwiml = await buildStateTwiml(req, "forecast-menu", { push: false });
