@@ -1444,30 +1444,37 @@ function ecPeriodSpeech(location, ecData, period, unit = "C") {
 function buildEcDailyGroups(ecData, location) {
   const periods = ecData?.forecastPeriods?.periods || [];
   const tz = location?.timezone || "America/Toronto";
-  const today = getCurrentLocalDateParts(tz).date;
+  const nowLocal = getCurrentLocalDateParts(tz);
+  const today = nowLocal.date;
+
+  if (!periods.length) return [];
 
   const groups = [];
   let currentDate = today;
+  let startIndex = 0;
 
-  for (let i = 0; i < periods.length; i++) {
-    const period = periods[i];
+  const firstLower = String(periods[0]?.periodName || "").trim().toLowerCase();
+
+  // Key rule:
+  // After midnight and before early morning, if EC still leaves "Tonight"
+  // first, treat it as stale leftover data from the previous day and skip it.
+  if (firstLower === "tonight" && nowLocal.hour < 6) {
+    startIndex = 1;
+  }
+
+  const usablePeriods = periods.slice(startIndex);
+
+  for (let i = 0; i < usablePeriods.length; i++) {
+    const period = usablePeriods[i];
     const lower = String(period?.periodName || "").trim().toLowerCase();
     const isNight = /night|tonight/.test(lower);
 
-    if (i === 0 && lower === "tonight") {
-      continue;
-    }
-
-    if (!isNight) {
-      groups.push({
-        dateText: currentDate,
-        label: relativeMenuDayLabel(currentDate, tz),
-        periods: [period]
-      });
-    } else {
+    if (isNight) {
+      // If the first usable period is Tonight before midnight,
+      // it should become button 1 for today.
       const lastGroup = groups[groups.length - 1];
 
-      if (lastGroup) {
+      if (lastGroup && lastGroup.dateText === currentDate) {
         lastGroup.periods.push(period);
       } else {
         groups.push({
@@ -1477,8 +1484,17 @@ function buildEcDailyGroups(ecData, location) {
         });
       }
 
+      // Move to next day only after attaching the night period
       currentDate = addDaysToDateText(currentDate, 1);
+      continue;
     }
+
+    // Daytime period starts a new group for the current date
+    groups.push({
+      dateText: currentDate,
+      label: relativeMenuDayLabel(currentDate, tz),
+      periods: [period]
+    });
   }
 
   return groups;
