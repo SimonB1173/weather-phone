@@ -387,7 +387,7 @@ function issuedMonthDayLabel(rawTimestamp, timezone) {
     });
   }
 
-  const iso = formatEcLocalIso(text);
+  const iso = formatEcLocalIso(text, timezone || "America/Toronto");
   if (iso) {
     const dateText = getDatePartFromLocalIso(iso);
     return parsePlainDate(dateText).toLocaleDateString("en-US", {
@@ -906,9 +906,33 @@ function safeNumber(value) {
   return Number.isFinite(n) ? n : null;
 }
 
-function formatEcLocalIso(raw) {
+function formatDateToLocalIso(date, timezone) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone || "America/Toronto",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).formatToParts(date);
+
+  const get = (type) => parts.find((p) => p.type === type)?.value;
+
+  return `${get("year")}-${get("month")}-${get("day")}T${get("hour")}:${get("minute")}`;
+}
+
+function formatEcLocalIso(raw, timezone = "America/Toronto") {
   const text = String(raw || "").trim();
   if (!text) return "";
+
+  if (/[zZ]$|[+\-]\d{2}:\d{2}$/.test(text)) {
+    const parsed = new Date(text);
+    if (!Number.isNaN(parsed.getTime())) {
+      return formatDateToLocalIso(parsed, timezone);
+    }
+  }
+
   const normalized = text.replace(" ", "T");
   return normalized.length >= 16 ? normalized.slice(0, 16) : normalized;
 }
@@ -1018,7 +1042,7 @@ function formatIssuedTime(rawTimestamp, timezone) {
       timeZone: timezone || "America/Toronto"
     });
   }
-  const iso = formatEcLocalIso(text);
+  const iso = formatEcLocalIso(text, timezone || "America/Toronto");
   if (iso) return formatLocalIsoTimeLabel(iso);
   return text;
 }
@@ -1047,7 +1071,7 @@ function normalizeEcCurrent(cityItem) {
   };
 }
 
-function normalizeEcHourly(cityItem) {
+function normalizeEcHourly(cityItem, timezone = "America/Toronto") {
   const rows = safeArray(cityItem?.properties?.hourlyForecastGroup?.hourlyForecasts);
   return rows
     .map((row) => {
@@ -1061,7 +1085,8 @@ function normalizeEcHourly(cityItem) {
       const windBearing = safeNumber(windPeriod?.bearing?.value?.en ?? windPeriod?.bearing?.value) || 0;
 
       return {
-        time: formatEcLocalIso(row?.timestamp || ""),
+        rawTime: String(row?.timestamp || "").trim(),
+        time: formatEcLocalIso(row?.timestamp || "", timezone),
         temperature_2m: temp,
         apparent_temperature: temp,
         precipitation_probability: lop,
@@ -1089,13 +1114,8 @@ function normalizeEcForecastPeriods(cityItem) {
     periods: periods.map((p, index) => ({
       index,
       periodName: p?.period?.textForecastName?.en || p?.period?.name?.en || p?.title?.en || `Period ${index + 1}`,
-      abbreviatedSummary:
-        p?.abbreviatedForecast?.textSummary?.en ||
-        "",
-      fullSummary:
-        p?.textSummary?.en ||
-        p?.abbreviatedForecast?.textSummary?.en ||
-        "",
+      abbreviatedSummary: p?.abbreviatedForecast?.textSummary?.en || "",
+      fullSummary: p?.textSummary?.en || p?.abbreviatedForecast?.textSummary?.en || "",
       summary:
         p?.textSummary?.en ||
         p?.abbreviatedForecast?.textSummary?.en ||
@@ -1123,7 +1143,7 @@ async function fetchEnvironmentCanadaData(location) {
     source: "environment-canada-citypage",
     item,
     current: normalizeEcCurrent(item),
-    hourly: normalizeEcHourly(item),
+    hourly: normalizeEcHourly(item, location.timezone || "America/Toronto"),
     forecastPeriods: normalizeEcForecastPeriods(item)
   };
 }
@@ -1316,11 +1336,6 @@ function ecPeriodSpeech(location, ecData, period, unit = "C") {
     }
   }
 
-  const joinedAll = parts.join(" ");
-  if (!containsAccumulationText(joinedAll)) {
-    // nothing extra needed; this just preserves official amount text when it exists
-  }
-
   return parts.join(" ");
 }
 
@@ -1392,7 +1407,7 @@ function ecHourlySpeech(location, ecData, hours = 12, unit = "C") {
   const nextHourMinute = getMinuteFromLocalIso(nextHourStart);
 
   const future = rows.filter((row) => {
-    const rowTime = formatEcLocalIso(row.time || "");
+    const rowTime = String(row.time || "").trim();
     if (!rowTime) return false;
 
     const rowDate = getDatePartFromLocalIso(rowTime);
@@ -1413,7 +1428,7 @@ function ecHourlySpeech(location, ecData, hours = 12, unit = "C") {
   }
 
   const compact = slice.map((row) => ({
-    time: formatEcLocalIso(row.time || ""),
+    time: row.time,
     temp: row.temperature_2m,
     apparentTemp: row.apparent_temperature,
     rainChance: row.precipitation_probability,
