@@ -210,8 +210,7 @@ function shouldTrackHistoryState(state) {
     "us-location-menu",
     "main-menu",
     "forecast-menu",
-    "exchange-menu",
-    "exchange-amount"
+    "exchange-menu"
   ].includes(state);
 }
 
@@ -603,6 +602,15 @@ function currencySpeech(code) {
   return String(code || "");
 }
 
+function exchangeAsOfTime(timezone = "America/Toronto") {
+  return new Date().toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+    timeZone: timezone
+  });
+}
+
 function buildRootMenuInto(twiml) {
   const gather = twiml.gather(gatherOptions("/root-menu", 8, 1));
   say(gather, "Welcome to Weather and Info Line. Press 1 for weather. Press 2 for exchange rate.");
@@ -643,16 +651,19 @@ function usLocationMenuTwiml() {
 function exchangeMenuTwiml() {
   const twiml = new VoiceResponse();
   const gather = twiml.gather(gatherOptions("/set-exchange-choice", 7, 1));
+
   say(
     gather,
-    "For exchange rate, press 1 to convert U S dollars to Canadian dollars. Press 2 to convert Canadian dollars to U S dollars. Press star for the previous menu."
+    "Press 1 to convert U S dollars to Canadian dollars. Press 2 to convert Canadian dollars to U S dollars. Press star for the previous menu."
   );
+
   twiml.redirect({ method: "POST" }, "/exchange-menu-prompt");
   return twiml;
 }
 
 function exchangeAmountPromptTwiml(req, selection) {
   const twiml = new VoiceResponse();
+
   const gather = twiml.gather({
     input: "dtmf",
     action: "/exchange-amount",
@@ -661,17 +672,21 @@ function exchangeAmountPromptTwiml(req, selection) {
     finishOnKey: "#"
   });
 
+  const directionText =
+    selection.from === "USD" ? "U S to Canadian" : "Canadian to U S";
+
   say(
     gather,
-    `You chose to convert ${currencySpeech(selection.from)} to ${currencySpeech(selection.to)}. Please enter the amount in whole dollars, then press pound. Press star to go back.`
+    `${directionText} exchange rate as of ${selection.asOfTime} is ${Number(selection.rate).toFixed(4)}. Enter amount of ${currencySpeech(selection.from)} you want to exchange then press pound. Press star to go back.`
   );
 
   twiml.redirect({ method: "POST" }, "/exchange-amount-prompt");
   return twiml;
 }
 
-function afterActionTwiml(unit = "C") {
+function afterActionTwiml(req) {
   const twiml = new VoiceResponse();
+
   const gather = twiml.gather({
     input: "dtmf",
     action: "/after",
@@ -680,8 +695,17 @@ function afterActionTwiml(unit = "C") {
     numDigits: 1,
     finishOnKey: ""
   });
-  const unitText = unit === "F" ? "Press 7 to switch back to Celsius." : "Press 7 to hear it in Fahrenheit.";
-  say(gather, `Press star to go back. Press pound to repeat. Press 5 for the main menu. ${unitText}`);
+
+  const playback = getLastPlayback(req);
+
+  if (playback?.type === "exchange") {
+    say(gather, "Press star to go back. Press pound to repeat. Press 5 for the main menu.");
+  } else {
+    const unit = getUnitPreference(req);
+    const unitText = unit === "F" ? "Press 7 to switch back to Celsius." : "Press 7 to hear it in Fahrenheit.";
+    say(gather, `Press star to go back. Press pound to repeat. Press 5 for the main menu. ${unitText}`);
+  }
+
   twiml.hangup();
   return twiml;
 }
@@ -1727,15 +1751,10 @@ async function fetchExchangeRate(from, to) {
   return payload;
 }
 
-function buildExchangeSpeech(selection, amount, ratePayload) {
+function buildExchangeTotalSpeech(selection, amount) {
   const amountNumber = Number(amount || 0);
-  const total = amountNumber * Number(ratePayload.rate || 0);
-
-  return [
-    `Exchange rate for ${currencySpeech(selection.from)} to ${currencySpeech(selection.to)}.`,
-    `The current rate is 1 ${selection.from} equals ${ratePayload.rate.toFixed(4)} ${selection.to}.`,
-    `${formatMoneyAmount(amountNumber)} ${selection.from} equals ${formatMoneyAmount(total)} ${selection.to}.`
-  ].join(" ");
+  const total = amountNumber * Number(selection.rate || 0);
+  return `${formatMoneyAmount(amountNumber)} dollars equals ${formatMoneyAmount(total)} ${currencySpeech(selection.to)}.`;
 }
 
 async function fetchForecast(location) {
@@ -1854,12 +1873,11 @@ async function forecastDayPromptTwiml(location, forecast) {
   return twiml;
 }
 
-async function buildPlaybackSpeech(req, location, forecast, playback, unit = "C") {
+async function buildPlaybackSpeech(location, forecast, playback, unit = "C") {
   if (!playback || !playback.type) return "";
 
   if (playback.type === "exchange") {
-    const ratePayload = await fetchExchangeRate(playback.selection.from, playback.selection.to);
-    return buildExchangeSpeech(playback.selection, playback.amount, ratePayload);
+    return playback.speech || "";
   }
 
   if (location?.country === "CA") {
@@ -1883,8 +1901,13 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
   setMenuState(req, state);
 
   if (state === "root-menu") return rootMenuTwiml();
-  if (state === "location-menu") return locationMenuTwiml({ allowBack: true, allowVoicemail: false });
+
+  if (state === "location-menu") {
+    return locationMenuTwiml({ allowBack: true, allowVoicemail: false });
+  }
+
   if (state === "us-location-menu") return usLocationMenuTwiml();
+
   if (state === "exchange-menu") return exchangeMenuTwiml();
 
   if (state === "exchange-amount") {
@@ -1907,7 +1930,6 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
   }
 
   if (state === "playback") {
-    const location = getActiveLocation(req);
     const playback = getLastPlayback(req);
     const twiml = new VoiceResponse();
 
@@ -1918,15 +1940,15 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
     }
 
     if (playback.type === "exchange") {
-      const speech = await buildPlaybackSpeech(req, null, null, playback, getUnitPreference(req));
-      if (!speech) {
+      if (!playback.speech) {
         say(twiml, "There is nothing to repeat yet.");
         twiml.redirect({ method: "POST" }, "/root-menu-prompt");
         return twiml;
       }
-      return playbackWithStarTwiml(speech);
+      return playbackWithStarTwiml(playback.speech);
     }
 
+    const location = getActiveLocation(req);
     if (!location) {
       say(twiml, "Please choose a location first.");
       twiml.redirect({ method: "POST" }, "/location-menu-prompt");
@@ -1934,7 +1956,8 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
     }
 
     const forecast = await fetchForecast(location);
-    const speech = await buildPlaybackSpeech(req, location, forecast, playback, getUnitPreference(req));
+    const speech = await buildPlaybackSpeech(location, forecast, playback, getUnitPreference(req));
+
     if (!speech) {
       say(twiml, "There is nothing to repeat yet.");
       twiml.redirect({ method: "POST" }, "/root-menu-prompt");
@@ -1944,7 +1967,7 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
     return playbackWithStarTwiml(speech);
   }
 
-  if (state === "after-prompt") return afterActionTwiml(getUnitPreference(req));
+  if (state === "after-prompt") return afterActionTwiml(req);
   if (state === "voicemail") return voicemailPromptTwiml();
 
   return rootMenuTwiml();
@@ -2130,9 +2153,24 @@ app.post("/set-exchange-choice", async (req, res) => {
     return res.type("text/xml").send(menuTwiml.toString());
   }
 
-  setExchangeSelection(req, selection);
-  const amountTwiml = await buildStateTwiml(req, "exchange-amount");
-  return res.type("text/xml").send(amountTwiml.toString());
+  try {
+    const ratePayload = await fetchExchangeRate(selection.from, selection.to);
+
+    setExchangeSelection(req, {
+      from: selection.from,
+      to: selection.to,
+      rate: ratePayload.rate,
+      asOfTime: exchangeAsOfTime("America/Toronto")
+    });
+
+    const amountTwiml = await buildStateTwiml(req, "exchange-amount", { push: false });
+    return res.type("text/xml").send(amountTwiml.toString());
+  } catch (error) {
+    console.error("SET-EXCHANGE-CHOICE error:", error.message);
+    say(twiml, "Sorry, I could not retrieve the exchange rate right now.");
+    twiml.redirect({ method: "POST" }, "/exchange-menu-prompt");
+    return res.type("text/xml").send(twiml.toString());
+  }
 });
 
 app.post("/forecast-menu", async (req, res) => {
@@ -2267,6 +2305,7 @@ app.post("/exchange-amount", async (req, res) => {
     }
 
     const selection = getExchangeSelection(req);
+
     if (!selection) {
       const menuTwiml = await buildStateTwiml(req, "exchange-menu");
       return res.type("text/xml").send(menuTwiml.toString());
@@ -2281,13 +2320,11 @@ app.post("/exchange-amount", async (req, res) => {
       return res.type("text/xml").send(amountTwiml.toString());
     }
 
-    const ratePayload = await fetchExchangeRate(selection.from, selection.to);
-    const speech = buildExchangeSpeech(selection, amount, ratePayload);
+    const speech = buildExchangeTotalSpeech(selection, amount);
 
     setLastPlayback(req, {
       type: "exchange",
-      selection,
-      amount
+      speech
     });
 
     const playbackTwiml = playbackWithStarTwiml(speech);
@@ -2324,6 +2361,7 @@ app.post("/after", async (req, res) => {
   }
 
   const choice = parseAfterChoice(req);
+  const playback = getLastPlayback(req);
 
   if (choice === "5") {
     const rootTwiml = await buildStateTwiml(req, "root-menu");
@@ -2335,13 +2373,10 @@ app.post("/after", async (req, res) => {
     return res.type("text/xml").send(playbackTwiml.toString());
   }
 
-  if (choice === "7") {
-    const playback = getLastPlayback(req);
-    if (playback && playback.type !== "exchange") {
-      toggleUnitPreference(req);
-      const playbackTwiml = await buildStateTwiml(req, "playback", { push: false });
-      return res.type("text/xml").send(playbackTwiml.toString());
-    }
+  if (choice === "7" && playback && playback.type !== "exchange") {
+    toggleUnitPreference(req);
+    const playbackTwiml = await buildStateTwiml(req, "playback", { push: false });
+    return res.type("text/xml").send(playbackTwiml.toString());
   }
 
   say(twiml, "I did not understand that choice.");
