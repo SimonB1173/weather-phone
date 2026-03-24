@@ -1342,7 +1342,10 @@ function ecPeriodSpeech(location, ecData, period, unit = "C") {
 function buildEcDailyGroups(ecData, location) {
   const periods = ecData?.forecastPeriods?.periods || [];
   const tz = location?.timezone || "America/Toronto";
-  const today = getCurrentLocalDateParts(tz).date;
+  const nowLocal = getCurrentLocalDateParts(tz);
+  const today = nowLocal.date;
+  const tomorrow = addDaysToDateText(today, 1);
+
   const groups = [];
   let cursorDate = today;
 
@@ -1351,22 +1354,22 @@ function buildEcDailyGroups(ecData, location) {
     const lower = String(period?.periodName || "").trim().toLowerCase();
     const isNight = /night|tonight/.test(lower);
 
-    if (i === 0) {
-      if (isNight) {
-        groups.push({
-          dateText: today,
-          label: relativeMenuDayLabel(today, tz),
-          periods: [period]
-        });
-        cursorDate = addDaysToDateText(today, 1);
-        continue;
-      }
+    // If EC still leaves "Tonight" as the first period after the calendar
+    // has already switched to the new day, skip it so button 1 matches "today".
+    if (i === 0 && lower === "tonight") {
+      continue;
+    }
 
+    if (i === 0) {
       groups.push({
         dateText: today,
         label: relativeMenuDayLabel(today, tz),
         periods: [period]
       });
+
+      if (!isNight) {
+        cursorDate = tomorrow;
+      }
       continue;
     }
 
