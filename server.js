@@ -328,7 +328,7 @@ function getHourFromLocalIso(iso) {
 
 function getMinuteFromLocalIso(iso) {
   const match = String(iso || "").match(/T(\d{1,2}):(\d{2})/);
-  return match ? Number(match[1]) === 24 ? Number(match[2]) : Number(match[2]) : 0;
+  return match ? Number(match[2]) : 0;
 }
 
 function formatLocalIsoTimeLabel(iso) {
@@ -1387,13 +1387,33 @@ function ecHourlySpeech(location, ecData, hours = 12, unit = "C") {
   const tz = location.timezone || "America/Toronto";
   const nextHourStart = getNextTopOfHourLocalIso(tz);
 
-  const future = rows.filter((row) => String(row.time || "") >= nextHourStart);
+  const nextHourDate = getDatePartFromLocalIso(nextHourStart);
+  const nextHourHour = getHourFromLocalIso(nextHourStart);
+  const nextHourMinute = getMinuteFromLocalIso(nextHourStart);
+
+  const future = rows.filter((row) => {
+    const rowTime = formatEcLocalIso(row.time || "");
+    if (!rowTime) return false;
+
+    const rowDate = getDatePartFromLocalIso(rowTime);
+    const rowHour = getHourFromLocalIso(rowTime);
+    const rowMinute = getMinuteFromLocalIso(rowTime);
+
+    return (
+      rowDate > nextHourDate ||
+      (rowDate === nextHourDate && rowHour > nextHourHour) ||
+      (rowDate === nextHourDate && rowHour === nextHourHour && rowMinute >= nextHourMinute)
+    );
+  });
+
   const slice = future.slice(0, hours);
 
-  if (!slice.length) return `I could not find hourly forecast data for ${placeLabel(location)}.`;
+  if (!slice.length) {
+    return `I could not find hourly forecast data for ${placeLabel(location)}.`;
+  }
 
   const compact = slice.map((row) => ({
-    time: row.time,
+    time: formatEcLocalIso(row.time || ""),
     temp: row.temperature_2m,
     apparentTemp: row.apparent_temperature,
     rainChance: row.precipitation_probability,
