@@ -136,6 +136,20 @@ function say(twiml, text) {
   }
 }
 
+function saySlow(twiml, text, rate = "88%") {
+  const cleaned = String(text || "")
+    .replace(/\s+/g, " ")
+    .replace(/\s+([,.!?;:])/g, "$1")
+    .trim();
+
+  if (!cleaned) return;
+
+  twiml.say(
+    { ...SAY_OPTIONS },
+    `<speak><prosody rate="${rate}">${cleaned}</prosody></speak>`
+  );
+}
+
 function getCallKey(req) {
   return String(req.body.CallSid || "unknown").trim();
 }
@@ -740,6 +754,21 @@ function playbackWithStarTwiml(text) {
     finishOnKey: ""
   });
   say(gather, text);
+  twiml.redirect({ method: "POST" }, "/after-prompt");
+  return twiml;
+}
+
+function playbackWithStarTwimlSlow(text) {
+  const twiml = new VoiceResponse();
+  const gather = twiml.gather({
+    input: "dtmf",
+    action: "/during-playback",
+    method: "POST",
+    timeout: 1,
+    numDigits: 1,
+    finishOnKey: ""
+  });
+  saySlow(gather, text, "88%");
   twiml.redirect({ method: "POST" }, "/after-prompt");
   return twiml;
 }
@@ -1388,7 +1417,78 @@ function ecPeriodSpeech(location, ecData, period, unit = "C") {
   const nearTerm = periodShouldGetExtraDetail(period);
 
   if (period.periodName) parts.push(`${period.periodName}.`);
-  if (summary) parts.push(summary);
+
+  if (unit === "C") {
+    if (summary) parts.push(summary);
+
+    const timing = nearTerm ? inferTimingFromHourlyForPeriod(location, ecData, period) : "";
+    if (timing) {
+      const joined = parts.join(" ").toLowerCase();
+      const timingLower = timing.toLowerCase();
+      if (!joined.includes(timingLower)) parts.push(timing);
+    }
+
+    if (period.tempText) {
+      const joined = parts.join(" ").toLowerCase();
+      const tempTextLower = String(period.tempText).toLowerCase();
+      if (!joined.includes(tempTextLower)) parts.push(period.tempText);
+    }
+
+    if (period.windText) {
+      const joined = parts.join(" ").toLowerCase();
+      const windTextLower = String(period.windText).toLowerCase();
+      if (!joined.includes(windTextLower)) parts.push(period.windText);
+    }
+
+    if (period.uvText) {
+      const joined = parts.join(" ").toLowerCase();
+      const uvTextLower = String(period.uvText).toLowerCase();
+      if (!joined.includes(uvTextLower)) parts.push(period.uvText);
+    }
+
+    if (Number.isFinite(period.temperature)) {
+      const joined = ` ${parts.join(" ").toLowerCase()} `;
+      const alreadyHasHighLow = joined.includes(" high ") || joined.includes(" low ");
+      if (!alreadyHasHighLow) {
+        parts.push(`${/night|tonight/i.test(period.periodName) ? "Low" : "High"} ${formatForecastTempValue(period.temperature, unit)}.`);
+      }
+    }
+
+    if (Number.isFinite(period.pop) && period.pop > 0 && period.pop < 100) {
+      const joined = parts.join(" ").toLowerCase();
+      const alreadyHasPop =
+        joined.includes("percent chance") ||
+        joined.includes("chance of precipitation") ||
+        joined.includes("chance of flurries") ||
+        joined.includes("chance of showers") ||
+        joined.includes("chance of rain") ||
+        joined.includes("chance of snow");
+
+      if (!alreadyHasPop) {
+        parts.push(`${Math.round(period.pop)} percent chance of precipitation.`);
+      }
+    }
+
+    return parts.join(" ");
+  }
+
+  if (summary) {
+    let cleanedSummary = String(summary)
+      .replace(/\bhigh\s+minus\s+\d+\.?/gi, "")
+      .replace(/\bhigh\s+plus\s+\d+\.?/gi, "")
+      .replace(/\bhigh\s+\d+\.?/gi, "")
+      .replace(/\blow\s+minus\s+\d+\.?/gi, "")
+      .replace(/\blow\s+plus\s+\d+\.?/gi, "")
+      .replace(/\blow\s+\d+\.?/gi, "")
+      .replace(/\bwind chill [^.]*\.?/gi, "")
+      .replace(/\bwind up to [^.]*km\/h\.?/gi, "")
+      .replace(/\bwind becoming [^.]*km\/h[^.]*\.?/gi, "")
+      .replace(/\b\d+\s*km\/h\b/gi, "")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    if (cleanedSummary) parts.push(cleanedSummary);
+  }
 
   const timing = nearTerm ? inferTimingFromHourlyForPeriod(location, ecData, period) : "";
   if (timing) {
@@ -1397,45 +1497,12 @@ function ecPeriodSpeech(location, ecData, period, unit = "C") {
     if (!joined.includes(timingLower)) parts.push(timing);
   }
 
-  if (period.tempText) {
-    const joined = parts.join(" ").toLowerCase();
-    const tempTextLower = String(period.tempText).toLowerCase();
-    if (!joined.includes(tempTextLower)) parts.push(period.tempText);
-  }
-
-  if (period.windText) {
-    const joined = parts.join(" ").toLowerCase();
-    const windTextLower = String(period.windText).toLowerCase();
-    if (!joined.includes(windTextLower)) parts.push(period.windText);
-  }
-
-  if (period.uvText) {
-    const joined = parts.join(" ").toLowerCase();
-    const uvTextLower = String(period.uvText).toLowerCase();
-    if (!joined.includes(uvTextLower)) parts.push(period.uvText);
-  }
-
   if (Number.isFinite(period.temperature)) {
-    const joined = ` ${parts.join(" ").toLowerCase()} `;
-    const alreadyHasHighLow = joined.includes(" high ") || joined.includes(" low ");
-    if (!alreadyHasHighLow) {
-      parts.push(`${/night|tonight/i.test(period.periodName) ? "Low" : "High"} ${formatForecastTempValue(period.temperature, unit)}.`);
-    }
+    parts.push(`${/night|tonight/i.test(period.periodName) ? "Low" : "High"} ${formatForecastTempValue(period.temperature, unit)}.`);
   }
 
   if (Number.isFinite(period.pop) && period.pop > 0 && period.pop < 100) {
-    const joined = parts.join(" ").toLowerCase();
-    const alreadyHasPop =
-      joined.includes("percent chance") ||
-      joined.includes("chance of precipitation") ||
-      joined.includes("chance of flurries") ||
-      joined.includes("chance of showers") ||
-      joined.includes("chance of rain") ||
-      joined.includes("chance of snow");
-
-    if (!alreadyHasPop) {
-      parts.push(`${Math.round(period.pop)} percent chance of precipitation.`);
-    }
+    parts.push(`${Math.round(period.pop)} percent chance of precipitation.`);
   }
 
   return parts.join(" ");
@@ -1470,8 +1537,6 @@ function buildEcDailyGroups(ecData, location) {
     const isNight = /night|tonight/.test(lower);
 
     if (isNight) {
-      // If the first usable period is Tonight before midnight,
-      // it should become button 1 for today.
       const lastGroup = groups[groups.length - 1];
 
       if (lastGroup && lastGroup.dateText === currentDate) {
@@ -1484,12 +1549,10 @@ function buildEcDailyGroups(ecData, location) {
         });
       }
 
-      // Move to next day only after attaching the night period
       currentDate = addDaysToDateText(currentDate, 1);
       continue;
     }
 
-    // Daytime period starts a new group for the current date
     groups.push({
       dateText: currentDate,
       label: relativeMenuDayLabel(currentDate, tz),
@@ -1978,6 +2041,10 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
       say(twiml, "There is nothing to repeat yet.");
       twiml.redirect({ method: "POST" }, "/root-menu-prompt");
       return twiml;
+    }
+
+    if (playback.type === "all7") {
+      return playbackWithStarTwimlSlow(speech);
     }
 
     return playbackWithStarTwiml(speech);
