@@ -19,6 +19,7 @@ const forecastCache = new Map();
 const inFlightForecasts = new Map();
 const canadaAlertCache = new Map();
 const ecCityPageCache = new Map();
+const exchangeRateCache = new Map();
 
 const temporaryLocationsByCall = new Map();
 const pendingLocationChoiceByCall = new Map();
@@ -26,11 +27,17 @@ const lastPlaybackByCall = new Map();
 const menuStateByCall = new Map();
 const menuHistoryByCall = new Map();
 const unitPreferenceByCall = new Map();
+const exchangeSelectionByCall = new Map();
 
 const FORECAST_CACHE_MS = 10 * 60 * 1000;
 const STALE_FORECAST_MS = 60 * 60 * 1000;
 const ALERT_CACHE_MS = 10 * 60 * 1000;
 const EC_CITYPAGE_CACHE_MS = 10 * 60 * 1000;
+const EXCHANGE_CACHE_MS = 10 * 60 * 1000;
+
+const EC_API_TIMEOUT_MS = 5000;
+const OPEN_METEO_TIMEOUT_MS = 7000;
+const CANADA_OPEN_METEO_FALLBACK_ENABLED = true;
 
 const VOICEMAILS_FILE = path.join(__dirname, "voicemails.json");
 
@@ -201,7 +208,14 @@ function getMenuHistory(req) {
 }
 
 function shouldTrackHistoryState(state) {
-  return ["location-menu", "us-location-menu", "main-menu", "forecast-menu"].includes(state);
+  return [
+    "root-menu",
+    "location-menu",
+    "us-location-menu",
+    "main-menu",
+    "forecast-menu",
+    "exchange-menu"
+  ].includes(state);
 }
 
 function pushMenuHistory(req, state) {
@@ -234,6 +248,14 @@ function toggleUnitPreference(req) {
   return next;
 }
 
+function getExchangeSelection(req) {
+  return exchangeSelectionByCall.get(getCallKey(req)) || null;
+}
+
+function setExchangeSelection(req, selection) {
+  exchangeSelectionByCall.set(getCallKey(req), selection);
+}
+
 function clearCallState(req) {
   const key = getCallKey(req);
   temporaryLocationsByCall.delete(key);
@@ -242,6 +264,7 @@ function clearCallState(req) {
   menuStateByCall.delete(key);
   menuHistoryByCall.delete(key);
   unitPreferenceByCall.delete(key);
+  exchangeSelectionByCall.delete(key);
 }
 
 function appendVoicemailRecord(record) {
@@ -328,7 +351,7 @@ function getHourFromLocalIso(iso) {
 
 function getMinuteFromLocalIso(iso) {
   const match = String(iso || "").match(/T(\d{1,2}):(\d{2})/);
-  return match ? Number(match[2]) : 0;
+  return match ? Number(match[1]) : 0;
 }
 
 function formatLocalIsoTimeLabel(iso) {
@@ -494,6 +517,10 @@ function isBackKey(req) {
   return getDigits(req) === "*";
 }
 
+function parseRootMenuChoice(req) {
+  return getDigits(req);
+}
+
 function parseMainMenuChoice(req) {
   return getDigits(req);
 }
@@ -520,6 +547,17 @@ function parseUSLocationChoice(req) {
   const digit = getDigits(req);
   if (/^[1-3]$/.test(digit)) return digit;
   return "";
+}
+
+function parseExchangeChoice(req) {
+  const digit = getDigits(req);
+  if (digit === "1") return { from: "USD", to: "CAD" };
+  if (digit === "2") return { from: "CAD", to: "USD" };
+  return null;
+}
+
+function parseAmountDigits(req) {
+  return String(req.body.Digits || "").replace(/[^\d]/g, "").trim();
 }
 
 function cToF(value) {
@@ -556,10 +594,43 @@ function formatForecastTempValue(value, unit = "C") {
   return "zero";
 }
 
+function formatMoneyAmount(value) {
+  const n = Number(value || 0);
+  if (!Number.isFinite(n)) return "0.00";
+  return n.toFixed(2);
+}
+
+function currencySpeech(code) {
+  if (code === "USD") return "U S dollars";
+  if (code === "CAD") return "Canadian dollars";
+  return String(code || "");
+}
+
+function exchangeAsOfTime(timezone = "America/Toronto") {
+  return new Date().toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+    timeZone: timezone
+  });
+}
+
+function buildRootMenuInto(twiml) {
+  const gather = twiml.gather(gatherOptions("/root-menu", 8, 1));
+  say(gather, "Welcome to Weather and Info Line. Press 1 for weather. Press 2 for exchange rate.");
+  twiml.redirect({ method: "POST" }, "/root-menu-prompt");
+}
+
 function buildMainMenuInto(twiml, activeLocationName) {
   const gather = twiml.gather(gatherOptions("/menu", 8, 1));
-  say(gather, `${activeLocationName}. Press 1 for the forecast menu. Press 2 for hourly forecast. Press 3 for current weather.`);
+  say(gather, `${activeLocationName}. Press 1 for the forecast menu. Press 2 for hourly forecast. Press 3 for current weather. Press star for the previous menu.`);
   twiml.redirect({ method: "POST" }, "/main-menu");
+}
+
+function rootMenuTwiml() {
+  const twiml = new VoiceResponse();
+  buildRootMenuInto(twiml);
+  return twiml;
 }
 
 function locationMenuTwiml({ allowBack = false, allowVoicemail = false } = {}) {
@@ -581,8 +652,45 @@ function usLocationMenuTwiml() {
   return twiml;
 }
 
-function afterActionTwiml(unit = "C") {
+function exchangeMenuTwiml() {
   const twiml = new VoiceResponse();
+  const gather = twiml.gather(gatherOptions("/set-exchange-choice", 7, 1));
+
+  say(
+    gather,
+    "Press 1 to convert U S dollars to Canadian dollars. Press 2 to convert Canadian dollars to U S dollars. Press star for the previous menu."
+  );
+
+  twiml.redirect({ method: "POST" }, "/exchange-menu-prompt");
+  return twiml;
+}
+
+function exchangeAmountPromptTwiml(req, selection) {
+  const twiml = new VoiceResponse();
+
+  const gather = twiml.gather({
+    input: "dtmf",
+    action: "/exchange-amount",
+    method: "POST",
+    timeout: 8,
+    finishOnKey: "#"
+  });
+
+  const directionText =
+    selection.from === "USD" ? "U S to Canadian" : "Canadian to U S";
+
+  say(
+    gather,
+    `${directionText} exchange rate as of ${selection.asOfTime} is ${Number(selection.rate).toFixed(4)}. Enter amount of ${currencySpeech(selection.from)} you want to exchange then press pound. Press star to go back.`
+  );
+
+  twiml.redirect({ method: "POST" }, "/exchange-amount-prompt");
+  return twiml;
+}
+
+function afterActionTwiml(req) {
+  const twiml = new VoiceResponse();
+
   const gather = twiml.gather({
     input: "dtmf",
     action: "/after",
@@ -591,8 +699,17 @@ function afterActionTwiml(unit = "C") {
     numDigits: 1,
     finishOnKey: ""
   });
-  const unitText = unit === "F" ? "Press 7 to switch back to Celsius." : "Press 7 to hear it in Fahrenheit.";
-  say(gather, `Press star to go back. Press pound to repeat. Press 5 to change location. ${unitText}`);
+
+  const playback = getLastPlayback(req);
+
+  if (playback?.type === "exchange") {
+    say(gather, "Press star to go back. Press pound to repeat. Press 5 for the main menu.");
+  } else {
+    const unit = getUnitPreference(req);
+    const unitText = unit === "F" ? "Press 7 to switch back to Celsius." : "Press 7 to hear it in Fahrenheit.";
+    say(gather, `Press star to go back. Press pound to repeat. Press 5 for the main menu. ${unitText}`);
+  }
+
   twiml.hangup();
   return twiml;
 }
@@ -841,7 +958,7 @@ async function fetchCanadianAlert(location) {
 
   try {
     const response = await axios.get(location.alertFeedUrl, {
-      timeout: 8000,
+      timeout: 5000,
       headers: { "User-Agent": "weather-line-canada/1.0" }
     });
     const xml = String(response.data || "");
@@ -918,7 +1035,6 @@ function formatDateToLocalIso(date, timezone) {
   }).formatToParts(date);
 
   const get = (type) => parts.find((p) => p.type === type)?.value;
-
   return `${get("year")}-${get("month")}-${get("day")}T${get("hour")}:${get("minute")}`;
 }
 
@@ -956,14 +1072,16 @@ function haversineKm(lat1, lon1, lat2, lon2) {
 }
 
 async function ecApiGet(url, params = {}) {
+  const started = Date.now();
   const response = await axios.get(url, {
     params,
-    timeout: 15000,
+    timeout: EC_API_TIMEOUT_MS,
     headers: {
       "User-Agent": "weather-line-ec/3.0",
       Accept: "application/json"
     }
   });
+  console.log("EC API OK", url, "ms=", Date.now() - started);
   return response.data;
 }
 
@@ -993,14 +1111,18 @@ async function findNearestEcCityPagePoint(location) {
 
 async function fetchEnvironmentCanadaCityPage(location) {
   if (!location || location.country !== "CA") return null;
+
   const cacheKey = `ec-citypage:${location.ecCityPageId || cacheKeyForLocation(location)}`;
   const cached = cacheGet(ecCityPageCache, cacheKey, EC_CITYPAGE_CACHE_MS);
   if (cached) return cached;
 
   let pointId = location.ecCityPageId || "";
+
   if (!pointId) {
     const nearest = await findNearestEcCityPagePoint(location);
     pointId = nearest.id;
+    location.ecCityPageId = pointId;
+    console.log("Resolved EC city page point:", location.label, "=>", pointId, "distanceKm=", nearest.distanceKm);
   }
 
   const item = await ecApiGet(
@@ -1137,15 +1259,54 @@ function normalizeEcForecastPeriods(cityItem) {
   };
 }
 
+async function fetchOpenMeteoForecast(location) {
+  const params = {
+    latitude: Number(location.latitude),
+    longitude: Number(location.longitude),
+    apikey: process.env.OPEN_METEO_API_KEY,
+    current: ["temperature_2m", "apparent_temperature", "rain", "showers", "snowfall", "cloud_cover", "wind_speed_10m", "wind_gusts_10m", "wind_direction_10m", "weather_code"].join(","),
+    hourly: ["temperature_2m", "apparent_temperature", "precipitation_probability", "rain", "showers", "snowfall", "cloud_cover", "wind_speed_10m", "wind_gusts_10m", "wind_direction_10m", "uv_index", "weather_code"].join(","),
+    daily: ["weather_code", "temperature_2m_max", "temperature_2m_min", "precipitation_probability_max", "rain_sum", "showers_sum", "snowfall_sum", "wind_speed_10m_max", "wind_gusts_10m_max", "uv_index_max"].join(","),
+    timezone: location.timezone || "America/Toronto",
+    forecast_days: 7,
+    temperature_unit: "celsius",
+    wind_speed_unit: "kmh",
+    precipitation_unit: "mm"
+  };
+
+  const response = await axios.get("https://customer-api.open-meteo.com/v1/forecast", {
+    params,
+    timeout: OPEN_METEO_TIMEOUT_MS
+  });
+
+  const data = response.data;
+  if (!data || !data.current || !data.hourly || !data.daily) {
+    throw new Error("Open-Meteo returned incomplete forecast data");
+  }
+
+  if (!data.hourly.weather_code && data.hourly.weathercode) data.hourly.weather_code = data.hourly.weathercode;
+  if (!data.daily.weather_code && data.daily.weathercode) data.daily.weather_code = data.daily.weathercode;
+
+  data.source = "open-meteo";
+  return data;
+}
+
 async function fetchEnvironmentCanadaData(location) {
+  const started = Date.now();
+  console.log("EC fetch start:", location.label);
+
   const item = await fetchEnvironmentCanadaCityPage(location);
-  return {
+
+  const result = {
     source: "environment-canada-citypage",
     item,
     current: normalizeEcCurrent(item),
     hourly: normalizeEcHourly(item, location.timezone || "America/Toronto"),
     forecastPeriods: normalizeEcForecastPeriods(item)
   };
+
+  console.log("EC fetch done:", location.label, "ms=", Date.now() - started);
+  return result;
 }
 
 function ecCurrentWeatherSpeech(location, ecData, unit = "C") {
@@ -1191,15 +1352,6 @@ function chooseBestEcSummary(period) {
 function periodShouldGetExtraDetail(period) {
   const name = String(period.periodName || "").toLowerCase();
   return /tonight|today/.test(name) || period.index <= 2;
-}
-
-function containsAccumulationText(text) {
-  const s = String(text || "").toLowerCase();
-  return (
-    /\b\d+(\.\d+)?\s*(cm|centimetres|centimeters|mm|millimetres|millimeters)\b/.test(s) ||
-    s.includes("snowfall amount") ||
-    s.includes("rainfall amount")
-  );
 }
 
 function classifyPrecipTypeFromHourlyRow(row) {
@@ -1285,7 +1437,6 @@ function ecPeriodSpeech(location, ecData, period, unit = "C") {
   const nearTerm = periodShouldGetExtraDetail(period);
 
   if (period.periodName) parts.push(`${period.periodName}.`);
-
   if (summary) parts.push(summary);
 
   const timing = nearTerm ? inferTimingFromHourlyForPeriod(location, ecData, period) : "";
@@ -1342,36 +1493,34 @@ function ecPeriodSpeech(location, ecData, period, unit = "C") {
 function buildEcDailyGroups(ecData, location) {
   const periods = ecData?.forecastPeriods?.periods || [];
   const tz = location?.timezone || "America/Toronto";
-  const today = getCurrentLocalDateParts(tz).date;
+  const nowLocal = getCurrentLocalDateParts(tz);
+  const today = nowLocal.date;
+
+  if (!periods.length) return [];
 
   const groups = [];
   let currentDate = today;
+  let startIndex = 0;
 
-  for (let i = 0; i < periods.length; i++) {
-    const period = periods[i];
+  const firstLower = String(periods[0]?.periodName || "").trim().toLowerCase();
+
+  if (firstLower === "tonight" && nowLocal.hour < 6) {
+    startIndex = 1;
+  }
+
+  const usablePeriods = periods.slice(startIndex);
+
+  for (let i = 0; i < usablePeriods.length; i++) {
+    const period = usablePeriods[i];
     const lower = String(period?.periodName || "").trim().toLowerCase();
     const isNight = /night|tonight/.test(lower);
 
-    // Skip stale leading "Tonight" after midnight rollover
-    if (i === 0 && lower === "tonight") {
-      continue;
-    }
-
-    if (!isNight) {
-      // Start a new day group
-      groups.push({
-        dateText: currentDate,
-        label: relativeMenuDayLabel(currentDate, tz),
-        periods: [period]
-      });
-    } else {
-      // Attach night to the most recent day group
+    if (isNight) {
       const lastGroup = groups[groups.length - 1];
 
-      if (lastGroup) {
+      if (lastGroup && lastGroup.dateText === currentDate) {
         lastGroup.periods.push(period);
       } else {
-        // Safety fallback if EC returns a night period first
         groups.push({
           dateText: currentDate,
           label: relativeMenuDayLabel(currentDate, tz),
@@ -1379,9 +1528,15 @@ function buildEcDailyGroups(ecData, location) {
         });
       }
 
-      // After night, move to next calendar day
       currentDate = addDaysToDateText(currentDate, 1);
+      continue;
     }
+
+    groups.push({
+      dateText: currentDate,
+      label: relativeMenuDayLabel(currentDate, tz),
+      periods: [period]
+    });
   }
 
   return groups;
@@ -1603,6 +1758,63 @@ function sevenDayForecastSpeech(location, forecast, unit = "C") {
   return parts.join(" ");
 }
 
+function getExchangeCacheKey(from, to) {
+  return `${String(from || "").toUpperCase()}_${String(to || "").toUpperCase()}`;
+}
+
+function getCachedExchangeRate(from, to) {
+  const key = getExchangeCacheKey(from, to);
+  const cached = exchangeRateCache.get(key);
+  if (!cached) return null;
+
+  const age = Date.now() - cached.timestamp;
+  if (age <= EXCHANGE_CACHE_MS) return cached.data;
+
+  exchangeRateCache.delete(key);
+  return null;
+}
+
+function setCachedExchangeRate(from, to, data) {
+  const key = getExchangeCacheKey(from, to);
+  exchangeRateCache.set(key, {
+    data,
+    timestamp: Date.now()
+  });
+}
+
+async function fetchExchangeRate(from, to) {
+  const cached = getCachedExchangeRate(from, to);
+  if (cached) return cached;
+
+  const response = await axios.get("https://api.frankfurter.dev/v1/latest", {
+    params: { from, to },
+    timeout: 10000
+  });
+
+  const data = response.data || {};
+  const rate = Number(data?.rates?.[to]);
+
+  if (!Number.isFinite(rate) || rate <= 0) {
+    throw new Error("Invalid exchange rate response");
+  }
+
+  const payload = {
+    from,
+    to,
+    rate,
+    date: String(data.date || "").trim()
+  };
+
+  setCachedExchangeRate(from, to, payload);
+  return payload;
+}
+
+function buildExchangeTotalSpeech(selection, amount) {
+  const amountNumber = Number(amount || 0);
+  const total = amountNumber * Number(selection.rate || 0);
+  return `${formatMoneyAmount(amountNumber)} dollars equals ${formatMoneyAmount(total)} ${currencySpeech(selection.to)}.`;
+}
+
 async function fetchForecast(location) {
   pruneForecastCache();
   const cached = getCachedForecast(location);
@@ -1620,34 +1832,26 @@ async function fetchForecast(location) {
   const requestPromise = (async () => {
     try {
       let data;
+
       if (location?.country === "CA") {
-        data = await fetchEnvironmentCanadaData(location);
+        try {
+          data = await fetchEnvironmentCanadaData(location);
+        } catch (ecError) {
+          console.error("Environment Canada fetch failed:", ecError.message);
+
+          if (!CANADA_OPEN_METEO_FALLBACK_ENABLED) {
+            throw ecError;
+          }
+
+          console.log("Falling back to Open-Meteo for Canada:", location.label);
+          data = await fetchOpenMeteoForecast(location);
+        }
       } else {
-        const params = {
-          latitude: Number(location.latitude),
-          longitude: Number(location.longitude),
-          apikey: process.env.OPEN_METEO_API_KEY,
-          current: ["temperature_2m", "apparent_temperature", "rain", "showers", "snowfall", "cloud_cover", "wind_speed_10m", "wind_gusts_10m", "wind_direction_10m", "weather_code"].join(","),
-          hourly: ["temperature_2m", "apparent_temperature", "precipitation_probability", "rain", "showers", "snowfall", "cloud_cover", "wind_speed_10m", "wind_gusts_10m", "wind_direction_10m", "uv_index", "weather_code"].join(","),
-          daily: ["weather_code", "temperature_2m_max", "temperature_2m_min", "precipitation_probability_max", "rain_sum", "showers_sum", "snowfall_sum", "wind_speed_10m_max", "wind_gusts_10m_max", "uv_index_max"].join(","),
-          timezone: location.timezone || "America/Toronto",
-          forecast_days: 7,
-          temperature_unit: "celsius",
-          wind_speed_unit: "kmh",
-          precipitation_unit: "mm"
-        };
-        const response = await axios.get("https://customer-api.open-meteo.com/v1/forecast", {
-          params,
-          timeout: 15000
-        });
-        data = response.data;
-        if (!data || !data.current || !data.hourly || !data.daily) throw new Error("Open-Meteo returned incomplete forecast data");
-        if (!data.hourly.weather_code && data.hourly.weathercode) data.hourly.weather_code = data.hourly.weathercode;
-        if (!data.daily.weather_code && data.daily.weathercode) data.daily.weather_code = data.daily.weathercode;
+        data = await fetchOpenMeteoForecast(location);
       }
 
       const savedKey = setCachedForecast(location, data);
-      console.log(`Fetched fresh forecast for ${savedKey}`);
+      console.log(`Fetched fresh forecast for ${savedKey} from ${data?.source || "unknown-source"}`);
       return data;
     } catch (error) {
       const stale = getCachedForecast(location, { allowStale: true });
@@ -1694,7 +1898,7 @@ async function forecastDayPromptTwiml(location, forecast) {
   const twiml = new VoiceResponse();
   const gather = twiml.gather(gatherOptions("/forecast-day", 8, 1));
 
-  if (location?.country === "CA") {
+  if (location?.country === "CA" && forecast?.source === "environment-canada-citypage") {
     const groups = buildEcDailyGroups(forecast, location);
     const parts = ["For the full Environment Canada forecast, press 0."];
     for (let i = 0; i < Math.min(9, groups.length); i++) {
@@ -1719,58 +1923,16 @@ async function forecastDayPromptTwiml(location, forecast) {
   return twiml;
 }
 
-async function buildStateTwiml(req, state, { push = true } = {}) {
-  if (push && shouldTrackHistoryState(state)) pushMenuHistory(req, state);
-  setMenuState(req, state);
-
-  if (state === "location-menu") return locationMenuTwiml({ allowBack: !!getActiveLocation(req), allowVoicemail: !getActiveLocation(req) });
-  if (state === "us-location-menu") return usLocationMenuTwiml();
-
-  if (state === "main-menu") {
-    const twiml = new VoiceResponse();
-    await buildMainMenuResponse(req, twiml);
-    return twiml;
-  }
-
-  if (state === "forecast-menu") {
-    const location = getActiveLocation(req);
-    if (!location) return locationMenuTwiml({ allowBack: false, allowVoicemail: true });
-    const forecast = await fetchForecast(location);
-    return forecastDayPromptTwiml(location, forecast);
-  }
-
-  if (state === "playback") {
-    const location = getActiveLocation(req);
-    const playback = getLastPlayback(req);
-    const twiml = new VoiceResponse();
-
-    if (!location || !playback) {
-      say(twiml, "There is nothing to repeat yet.");
-      twiml.redirect({ method: "POST" }, "/main-menu");
-      return twiml;
-    }
-
-    const forecast = await fetchForecast(location);
-    const speech = await buildPlaybackSpeech(location, forecast, playback, getUnitPreference(req));
-    if (!speech) {
-      say(twiml, "There is nothing to repeat yet.");
-      twiml.redirect({ method: "POST" }, "/main-menu");
-      return twiml;
-    }
-
-    return playbackWithStarTwiml(speech);
-  }
-
-  if (state === "after-prompt") return afterActionTwiml(getUnitPreference(req));
-  if (state === "voicemail") return voicemailPromptTwiml();
-
-  return locationMenuTwiml({ allowBack: false, allowVoicemail: true });
-}
-
 async function buildPlaybackSpeech(location, forecast, playback, unit = "C") {
   if (!playback || !playback.type) return "";
 
-  if (location?.country === "CA") {
+  if (playback.type === "exchange") {
+    return playback.speech || "";
+  }
+
+  const useEc = location?.country === "CA" && forecast?.source === "environment-canada-citypage";
+
+  if (useEc) {
     if (playback.type === "current") return ecCurrentWeatherSpeech(location, forecast, unit);
     if (playback.type === "hourly") return ecHourlySpeech(location, forecast, playback.hours || 12, unit);
     if (playback.type === "daily") return ecSingleForecastSpeech(location, forecast, playback.index, unit);
@@ -1786,28 +1948,105 @@ async function buildPlaybackSpeech(location, forecast, playback, unit = "C") {
   return "";
 }
 
+async function buildStateTwiml(req, state, { push = true } = {}) {
+  if (push && shouldTrackHistoryState(state)) pushMenuHistory(req, state);
+  setMenuState(req, state);
+
+  if (state === "root-menu") return rootMenuTwiml();
+
+  if (state === "location-menu") {
+    return locationMenuTwiml({ allowBack: true, allowVoicemail: false });
+  }
+
+  if (state === "us-location-menu") return usLocationMenuTwiml();
+
+  if (state === "exchange-menu") return exchangeMenuTwiml();
+
+  if (state === "exchange-amount") {
+    const selection = getExchangeSelection(req);
+    if (!selection) return exchangeMenuTwiml();
+    return exchangeAmountPromptTwiml(req, selection);
+  }
+
+  if (state === "main-menu") {
+    const twiml = new VoiceResponse();
+    await buildMainMenuResponse(req, twiml);
+    return twiml;
+  }
+
+  if (state === "forecast-menu") {
+    const location = getActiveLocation(req);
+    if (!location) return locationMenuTwiml({ allowBack: true, allowVoicemail: false });
+    const forecast = await fetchForecast(location);
+    return forecastDayPromptTwiml(location, forecast);
+  }
+
+  if (state === "playback") {
+    const playback = getLastPlayback(req);
+    const twiml = new VoiceResponse();
+
+    if (!playback) {
+      say(twiml, "There is nothing to repeat yet.");
+      twiml.redirect({ method: "POST" }, "/root-menu-prompt");
+      return twiml;
+    }
+
+    if (playback.type === "exchange") {
+      if (!playback.speech) {
+        say(twiml, "There is nothing to repeat yet.");
+        twiml.redirect({ method: "POST" }, "/root-menu-prompt");
+        return twiml;
+      }
+      return playbackWithStarTwiml(playback.speech);
+    }
+
+    const location = getActiveLocation(req);
+    if (!location) {
+      say(twiml, "Please choose a location first.");
+      twiml.redirect({ method: "POST" }, "/location-menu-prompt");
+      return twiml;
+    }
+
+    const forecast = await fetchForecast(location);
+    const speech = await buildPlaybackSpeech(location, forecast, playback, getUnitPreference(req));
+
+    if (!speech) {
+      say(twiml, "There is nothing to repeat yet.");
+      twiml.redirect({ method: "POST" }, "/root-menu-prompt");
+      return twiml;
+    }
+
+    return playbackWithStarTwiml(speech);
+  }
+
+  if (state === "after-prompt") return afterActionTwiml(req);
+  if (state === "voicemail") return voicemailPromptTwiml();
+
+  return rootMenuTwiml();
+}
+
 async function goBackOneMenu(req) {
   const currentState = getMenuState(req);
   const history = getMenuHistory(req);
 
   if (currentState === "playback" || currentState === "after-prompt") {
-    return buildStateTwiml(req, history[history.length - 1] || "location-menu", { push: false });
+    return buildStateTwiml(req, history[history.length - 1] || "root-menu", { push: false });
   }
 
-  if (history.length <= 1) return buildStateTwiml(req, "location-menu", { push: false });
+  if (history.length <= 1) return buildStateTwiml(req, "root-menu", { push: false });
 
   popMenuHistory(req);
   const updated = getMenuHistory(req);
-  return buildStateTwiml(req, updated[updated.length - 1] || "location-menu", { push: false });
+  return buildStateTwiml(req, updated[updated.length - 1] || "root-menu", { push: false });
 }
 
 app.get("/", (req, res) => {
-  res.send("Weather phone server is running.");
+  res.send("Weather and exchange phone server is running.");
 });
 
 app.get("/voice", (req, res) => {
   const twiml = new VoiceResponse();
-  say(twiml, "Weather Line is running. Please call the phone number to use the interactive weather menu.");
+  say(twiml, "Weather and Info Line is running. Please call the phone number to use the interactive menu.");
   res.type("text/xml").send(twiml.toString());
 });
 
@@ -1817,12 +2056,40 @@ app.post("/voice", async (req, res) => {
     clearCallState(req);
     setUnitPreference(req, "C");
     say(twiml, `${getGreetingForTime("America/Toronto")}.`);
-    const gather = twiml.gather(gatherOptions("/set-location-choice", 7, 1));
-    say(gather, "Welcome to Weather and Info Line. Press 1 for Montreal. 2 for Tosh. 3 for Laurentians. 4 for United States. Press 9 to leave a comment or suggestion.");
-    twiml.redirect({ method: "POST" }, "/location-menu-prompt");
+    buildRootMenuInto(twiml);
     return res.type("text/xml").send(twiml.toString());
   } catch (error) {
     console.error("VOICE route error:", error.message);
+    say(twiml, "Sorry, an application error occurred. Please try again.");
+    return res.type("text/xml").send(twiml.toString());
+  }
+});
+
+app.post("/root-menu-prompt", async (req, res) => {
+  const twiml = await buildStateTwiml(req, "root-menu");
+  res.type("text/xml").send(twiml.toString());
+});
+
+app.post("/root-menu", async (req, res) => {
+  const choice = parseRootMenuChoice(req);
+  const twiml = new VoiceResponse();
+
+  try {
+    if (choice === "1") {
+      const locationTwiml = await buildStateTwiml(req, "location-menu");
+      return res.type("text/xml").send(locationTwiml.toString());
+    }
+
+    if (choice === "2") {
+      const exchangeTwiml = await buildStateTwiml(req, "exchange-menu");
+      return res.type("text/xml").send(exchangeTwiml.toString());
+    }
+
+    say(twiml, "I did not understand that choice.");
+    twiml.redirect({ method: "POST" }, "/root-menu-prompt");
+    return res.type("text/xml").send(twiml.toString());
+  } catch (error) {
+    console.error("ROOT-MENU route error:", error.message);
     say(twiml, "Sorry, an application error occurred. Please try again.");
     return res.type("text/xml").send(twiml.toString());
   }
@@ -1852,23 +2119,28 @@ app.post("/us-location-menu-prompt", async (req, res) => {
   res.type("text/xml").send(twiml.toString());
 });
 
+app.post("/exchange-menu-prompt", async (req, res) => {
+  const twiml = await buildStateTwiml(req, "exchange-menu");
+  res.type("text/xml").send(twiml.toString());
+});
+
+app.post("/exchange-amount-prompt", async (req, res) => {
+  const twiml = await buildStateTwiml(req, "exchange-amount", { push: false });
+  res.type("text/xml").send(twiml.toString());
+});
+
 app.post("/set-location-choice", async (req, res) => {
   const twiml = new VoiceResponse();
-  const hasActiveLocation = !!getActiveLocation(req);
 
   if (isBackKey(req)) {
-    if (hasActiveLocation) {
-      const backTwiml = await goBackOneMenu(req);
-      return res.type("text/xml").send(backTwiml.toString());
-    }
-    const menuTwiml = await buildStateTwiml(req, "location-menu", { push: false });
-    return res.type("text/xml").send(menuTwiml.toString());
+    const backTwiml = await goBackOneMenu(req);
+    return res.type("text/xml").send(backTwiml.toString());
   }
 
   const choice = parseLocationChoice(req);
   console.log("SET-LOCATION-CHOICE choice:", choice, "digits:", getDigits(req));
 
-  if (choice === "9" && !hasActiveLocation) {
+  if (choice === "9") {
     const voiceTwiml = await buildStateTwiml(req, "voicemail", { push: false });
     return res.type("text/xml").send(voiceTwiml.toString());
   }
@@ -1917,6 +2189,42 @@ app.post("/set-us-location-choice", async (req, res) => {
   return res.type("text/xml").send(twiml.toString());
 });
 
+app.post("/set-exchange-choice", async (req, res) => {
+  const twiml = new VoiceResponse();
+
+  if (isBackKey(req)) {
+    const backTwiml = await goBackOneMenu(req);
+    return res.type("text/xml").send(backTwiml.toString());
+  }
+
+  const selection = parseExchangeChoice(req);
+
+  if (!selection) {
+    say(twiml, "I did not understand that exchange choice.");
+    const menuTwiml = await buildStateTwiml(req, "exchange-menu", { push: false });
+    return res.type("text/xml").send(menuTwiml.toString());
+  }
+
+  try {
+    const ratePayload = await fetchExchangeRate(selection.from, selection.to);
+
+    setExchangeSelection(req, {
+      from: selection.from,
+      to: selection.to,
+      rate: ratePayload.rate,
+      asOfTime: exchangeAsOfTime("America/Toronto")
+    });
+
+    const amountTwiml = await buildStateTwiml(req, "exchange-amount", { push: false });
+    return res.type("text/xml").send(amountTwiml.toString());
+  } catch (error) {
+    console.error("SET-EXCHANGE-CHOICE error:", error.message);
+    say(twiml, "Sorry, I could not retrieve the exchange rate right now.");
+    twiml.redirect({ method: "POST" }, "/exchange-menu-prompt");
+    return res.type("text/xml").send(twiml.toString());
+  }
+});
+
 app.post("/forecast-menu", async (req, res) => {
   try {
     if (isBackKey(req)) {
@@ -1944,8 +2252,8 @@ app.post("/menu", async (req, res) => {
   console.log("MENU active location:", location);
 
   if (isBackKey(req)) {
-    twiml.redirect({ method: "POST" }, "/location-menu-prompt");
-    return res.type("text/xml").send(twiml.toString());
+    const backTwiml = await goBackOneMenu(req);
+    return res.type("text/xml").send(backTwiml.toString());
   }
 
   if (!location) {
@@ -2015,7 +2323,9 @@ app.post("/forecast-day", async (req, res) => {
       return res.type("text/xml").send(forecastTwiml.toString());
     }
 
-    if (location.country === "CA") {
+    const useEc = location.country === "CA" && forecast?.source === "environment-canada-citypage";
+
+    if (useEc) {
       const groupCount = buildEcDailyGroups(forecast, location).length;
       if (selected >= groupCount) {
         say(twiml, "I did not understand the forecast day.");
@@ -2035,6 +2345,48 @@ app.post("/forecast-day", async (req, res) => {
     console.error("FORECAST-DAY error:", error.message);
     speakWeatherError(twiml, error, "Sorry, I could not retrieve that forecast.");
     twiml.redirect({ method: "POST" }, "/main-menu");
+    return res.type("text/xml").send(twiml.toString());
+  }
+});
+
+app.post("/exchange-amount", async (req, res) => {
+  const twiml = new VoiceResponse();
+
+  try {
+    if (isBackKey(req)) {
+      const backTwiml = await goBackOneMenu(req);
+      return res.type("text/xml").send(backTwiml.toString());
+    }
+
+    const selection = getExchangeSelection(req);
+
+    if (!selection) {
+      const menuTwiml = await buildStateTwiml(req, "exchange-menu");
+      return res.type("text/xml").send(menuTwiml.toString());
+    }
+
+    const amountDigits = parseAmountDigits(req);
+    const amount = Number(amountDigits);
+
+    if (!amountDigits || !Number.isFinite(amount) || amount <= 0) {
+      say(twiml, "I did not understand that amount.");
+      const amountTwiml = await buildStateTwiml(req, "exchange-amount", { push: false });
+      return res.type("text/xml").send(amountTwiml.toString());
+    }
+
+    const speech = buildExchangeTotalSpeech(selection, amount);
+
+    setLastPlayback(req, {
+      type: "exchange",
+      speech
+    });
+
+    const playbackTwiml = playbackWithStarTwiml(speech);
+    return res.type("text/xml").send(playbackTwiml.toString());
+  } catch (error) {
+    console.error("EXCHANGE-AMOUNT error:", error.message);
+    say(twiml, "Sorry, I could not retrieve the exchange rate right now.");
+    twiml.redirect({ method: "POST" }, "/exchange-menu-prompt");
     return res.type("text/xml").send(twiml.toString());
   }
 });
@@ -2063,10 +2415,11 @@ app.post("/after", async (req, res) => {
   }
 
   const choice = parseAfterChoice(req);
+  const playback = getLastPlayback(req);
 
   if (choice === "5") {
-    const locationTwiml = await buildStateTwiml(req, "location-menu");
-    return res.type("text/xml").send(locationTwiml.toString());
+    const mainTwiml = await buildStateTwiml(req, "main-menu", { push: false });
+    return res.type("text/xml").send(mainTwiml.toString());
   }
 
   if (choice === "#") {
@@ -2074,7 +2427,7 @@ app.post("/after", async (req, res) => {
     return res.type("text/xml").send(playbackTwiml.toString());
   }
 
-  if (choice === "7") {
+  if (choice === "7" && playback && playback.type !== "exchange") {
     toggleUnitPreference(req);
     const playbackTwiml = await buildStateTwiml(req, "playback", { push: false });
     return res.type("text/xml").send(playbackTwiml.toString());
@@ -2138,5 +2491,5 @@ app.post("/call-ended", (req, res) => {
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
-  console.log(`Weather phone server running on port ${port}`);
+  console.log(`Weather and exchange phone server running on port ${port}`);
 });
