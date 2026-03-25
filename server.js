@@ -136,20 +136,6 @@ function say(twiml, text) {
   }
 }
 
-function saySlow(twiml, text, rate = "88%") {
-  const cleaned = String(text || "")
-    .replace(/\s+/g, " ")
-    .replace(/\s+([,.!?;:])/g, "$1")
-    .trim();
-
-  if (!cleaned) return;
-
-  twiml.say(
-    { ...SAY_OPTIONS },
-    `<speak><prosody rate="${rate}">${cleaned}</prosody></speak>`
-  );
-}
-
 function getCallKey(req) {
   return String(req.body.CallSid || "unknown").trim();
 }
@@ -754,21 +740,6 @@ function playbackWithStarTwiml(text) {
     finishOnKey: ""
   });
   say(gather, text);
-  twiml.redirect({ method: "POST" }, "/after-prompt");
-  return twiml;
-}
-
-function playbackWithStarTwimlSlow(text) {
-  const twiml = new VoiceResponse();
-  const gather = twiml.gather({
-    input: "dtmf",
-    action: "/during-playback",
-    method: "POST",
-    timeout: 1,
-    numDigits: 1,
-    finishOnKey: ""
-  });
-  saySlow(gather, text, "88%");
   twiml.redirect({ method: "POST" }, "/after-prompt");
   return twiml;
 }
@@ -1411,6 +1382,7 @@ function inferTimingFromHourlyForPeriod(location, ecData, period) {
   return `${dominantType.charAt(0).toUpperCase() + dominantType.slice(1)} likely starting around ${startText} and easing off near ${endText}.`;
 }
 
+/* ONLY LOGIC CHANGE IS HERE */
 function ecPeriodSpeech(location, ecData, period, unit = "C") {
   const parts = [];
   const summary = chooseBestEcSummary(period);
@@ -1522,9 +1494,6 @@ function buildEcDailyGroups(ecData, location) {
 
   const firstLower = String(periods[0]?.periodName || "").trim().toLowerCase();
 
-  // Key rule:
-  // After midnight and before early morning, if EC still leaves "Tonight"
-  // first, treat it as stale leftover data from the previous day and skip it.
   if (firstLower === "tonight" && nowLocal.hour < 6) {
     startIndex = 1;
   }
@@ -1655,7 +1624,6 @@ function ecAllForecastSpeech(location, ecData, unit = "C") {
 
   for (const period of periods) {
     parts.push(ecPeriodSpeech(location, ecData, period, unit));
-    parts.push("...");
   }
 
   return parts.join(" ");
@@ -1776,13 +1744,12 @@ function sevenDayForecastSpeech(location, forecast, unit = "C") {
     `Retrieved at ${retrievedTimeLabelNow(location.timezone)}.`,
     `Here is the 7 day forecast for ${placeLabel(location)}.`
   ];
-
-  for (let i = 0; i < count; i++) {
-    parts.push(dailyForecastSpeech(location, forecast, i, unit));
-    parts.push("...");
-  }
-
+  for (let i = 0; i < count; i++) parts.push(dailyForecastSpeech(location, forecast, i, unit));
   return parts.join(" ");
+}
+
+function getExchangeCacheKey(from, to) {
+  return `${String(from || "").toUpperCase()}_${String(to || "").toUpperCase()}`;
 }
 
 function getCachedExchangeRate(from, to) {
