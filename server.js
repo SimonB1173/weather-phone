@@ -36,8 +36,8 @@ const EC_CITYPAGE_CACHE_MS = 10 * 60 * 1000;
 const EXCHANGE_CACHE_MS = 10 * 60 * 1000;
 
 const EC_API_TIMEOUT_MS = 5000;
-const OPEN_METEO_TIMEOUT_MS = 7000;
-const CANADA_OPEN_METEO_FALLBACK_ENABLED = true;
+const EC_ALERT_TIMEOUT_MS = 5000;
+const OPEN_METEO_TIMEOUT_MS = 15000;
 
 const VOICEMAILS_FILE = path.join(__dirname, "voicemails.json");
 
@@ -351,7 +351,7 @@ function getHourFromLocalIso(iso) {
 
 function getMinuteFromLocalIso(iso) {
   const match = String(iso || "").match(/T(\d{1,2}):(\d{2})/);
-  return match ? Number(match[1]) : 0;
+  return match ? Number(match[2]) : 0;
 }
 
 function formatLocalIsoTimeLabel(iso) {
@@ -958,7 +958,7 @@ async function fetchCanadianAlert(location) {
 
   try {
     const response = await axios.get(location.alertFeedUrl, {
-      timeout: 5000,
+      timeout: EC_ALERT_TIMEOUT_MS,
       headers: { "User-Agent": "weather-line-canada/1.0" }
     });
     const xml = String(response.data || "");
@@ -1832,26 +1832,14 @@ async function fetchForecast(location) {
   const requestPromise = (async () => {
     try {
       let data;
-
       if (location?.country === "CA") {
-        try {
-          data = await fetchEnvironmentCanadaData(location);
-        } catch (ecError) {
-          console.error("Environment Canada fetch failed:", ecError.message);
-
-          if (!CANADA_OPEN_METEO_FALLBACK_ENABLED) {
-            throw ecError;
-          }
-
-          console.log("Falling back to Open-Meteo for Canada:", location.label);
-          data = await fetchOpenMeteoForecast(location);
-        }
+        data = await fetchEnvironmentCanadaData(location);
       } else {
         data = await fetchOpenMeteoForecast(location);
       }
 
       const savedKey = setCachedForecast(location, data);
-      console.log(`Fetched fresh forecast for ${savedKey} from ${data?.source || "unknown-source"}`);
+      console.log(`Fetched fresh forecast for ${savedKey}`);
       return data;
     } catch (error) {
       const stale = getCachedForecast(location, { allowStale: true });
@@ -1898,7 +1886,7 @@ async function forecastDayPromptTwiml(location, forecast) {
   const twiml = new VoiceResponse();
   const gather = twiml.gather(gatherOptions("/forecast-day", 8, 1));
 
-  if (location?.country === "CA" && forecast?.source === "environment-canada-citypage") {
+  if (location?.country === "CA") {
     const groups = buildEcDailyGroups(forecast, location);
     const parts = ["For the full Environment Canada forecast, press 0."];
     for (let i = 0; i < Math.min(9, groups.length); i++) {
@@ -1930,9 +1918,7 @@ async function buildPlaybackSpeech(location, forecast, playback, unit = "C") {
     return playback.speech || "";
   }
 
-  const useEc = location?.country === "CA" && forecast?.source === "environment-canada-citypage";
-
-  if (useEc) {
+  if (location?.country === "CA") {
     if (playback.type === "current") return ecCurrentWeatherSpeech(location, forecast, unit);
     if (playback.type === "hourly") return ecHourlySpeech(location, forecast, playback.hours || 12, unit);
     if (playback.type === "daily") return ecSingleForecastSpeech(location, forecast, playback.index, unit);
@@ -2323,9 +2309,7 @@ app.post("/forecast-day", async (req, res) => {
       return res.type("text/xml").send(forecastTwiml.toString());
     }
 
-    const useEc = location.country === "CA" && forecast?.source === "environment-canada-citypage";
-
-    if (useEc) {
+    if (location.country === "CA") {
       const groupCount = buildEcDailyGroups(forecast, location).length;
       if (selected >= groupCount) {
         say(twiml, "I did not understand the forecast day.");
