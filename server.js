@@ -1655,6 +1655,7 @@ function ecAllForecastSpeech(location, ecData, unit = "C") {
 
   for (const period of periods) {
     parts.push(ecPeriodSpeech(location, ecData, period, unit));
+    parts.push("...");
   }
 
   return parts.join(" ");
@@ -1775,12 +1776,13 @@ function sevenDayForecastSpeech(location, forecast, unit = "C") {
     `Retrieved at ${retrievedTimeLabelNow(location.timezone)}.`,
     `Here is the 7 day forecast for ${placeLabel(location)}.`
   ];
-  for (let i = 0; i < count; i++) parts.push(dailyForecastSpeech(location, forecast, i, unit));
-  return parts.join(" ");
-}
 
-function getExchangeCacheKey(from, to) {
-  return `${String(from || "").toUpperCase()}_${String(to || "").toUpperCase()}`;
+  for (let i = 0; i < count; i++) {
+    parts.push(dailyForecastSpeech(location, forecast, i, unit));
+    parts.push("...");
+  }
+
+  return parts.join(" ");
 }
 
 function getCachedExchangeRate(from, to) {
@@ -2041,10 +2043,6 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
       say(twiml, "There is nothing to repeat yet.");
       twiml.redirect({ method: "POST" }, "/root-menu-prompt");
       return twiml;
-    }
-
-    if (playback.type === "all7") {
-      return playbackWithStarTwimlSlow(speech);
     }
 
     return playbackWithStarTwiml(speech);
