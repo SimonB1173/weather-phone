@@ -29,10 +29,10 @@ const menuHistoryByCall = new Map();
 const unitPreferenceByCall = new Map();
 const exchangeSelectionByCall = new Map();
 
-const FORECAST_CACHE_MS = 10 * 60 * 1000;
-const STALE_FORECAST_MS = 60 * 60 * 1000;
+const FORECAST_CACHE_MS = 15 * 60 * 1000;
+const STALE_FORECAST_MS = 2 * 60 * 1000;
 const ALERT_CACHE_MS = 10 * 60 * 1000;
-const EC_CITYPAGE_CACHE_MS = 15 * 60 * 1000;
+const EC_CITYPAGE_CACHE_MS = 20 * 60 * 1000;
 const EXCHANGE_CACHE_MS = 10 * 60 * 1000;
 
 const EC_API_TIMEOUT_MS = 5000;
