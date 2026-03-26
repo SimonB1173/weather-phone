@@ -119,7 +119,9 @@ const CHAMPLAIN_LACOLLE = {
   cbpPortNumber: "04071201",
   cbpPortName: "Champlain",
   spokenNameCanada: "Champlain slash Lacolle, entering Canada",
-  spokenNameUs: "Lacolle slash Champlain, entering the United States"
+  spokenNameUs: "Lacolle slash Champlain, entering the United States",
+  staleHours: 24,
+  constructionWarning: "This crossing is under construction until 2027. Expect longer wait times."
 };
 
 function gatherOptions(action, timeout = 8, numDigits = 1) {
@@ -1877,6 +1879,94 @@ function parseCbsaBorderCsv(text) {
     .map((line) => line.split(";;").map((cell) => cell.trim()));
 }
 
+function parseCbsaTimestamp(raw) {
+  const text = String(raw || "").trim();
+  if (!text) return null;
+
+  const m = text.match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})\s+([A-Z]{2,4})$/i);
+  if (!m) {
+    const parsed = new Date(text);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+
+  const [, y, mo, d, h, mi] = m;
+  return new Date(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), 0);
+}
+
+function getHoursOld(dateObj) {
+  if (!dateObj || Number.isNaN(dateObj.getTime())) return null;
+  return (Date.now() - dateObj.getTime()) / (1000 * 60 * 60);
+}
+
+function isStaleCbsaUpdate(rawTimestamp, staleHours = 24) {
+  const parsed = parseCbsaTimestamp(rawTimestamp);
+  const hoursOld = getHoursOld(parsed);
+  if (hoursOld === null) return false;
+  return hoursOld > staleHours;
+}
+
+function formatSpokenCbsaUpdate(rawTimestamp) {
+  const parsed = parseCbsaTimestamp(rawTimestamp);
+  if (!parsed || Number.isNaN(parsed.getTime())) return String(rawTimestamp || "").trim();
+
+  return parsed.toLocaleString("en-US", {
+    month: "long",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true
+  });
+}
+
+function pickPrimaryLane(lanes) {
+  if (!lanes || typeof lanes !== "object") {
+    return {
+      wait: "currently unavailable",
+      updatedAt: "",
+      lanesOpen: ""
+    };
+  }
+
+  const preferredOrder = [
+    "standard_lanes",
+    "NEXUS_SENTRI_lanes",
+    "FAST_lanes",
+    "ready_lanes"
+  ];
+
+  for (const key of preferredOrder) {
+    const lane = lanes[key];
+    if (!lane || typeof lane !== "object") continue;
+
+    const operational = String(lane.operational_status || "").trim();
+    const delayMinutes = String(lane.delay_minutes || "").trim();
+    const updateTime = String(lane.update_time || "").trim();
+    const lanesOpen = String(lane.lanes_open || "").trim();
+
+    if (delayMinutes !== "" && Number.isFinite(Number(delayMinutes))) {
+      return {
+        wait: normalizeBorderWaitText(`${delayMinutes} minutes`),
+        updatedAt: updateTime,
+        lanesOpen
+      };
+    }
+
+    if (operational) {
+      return {
+        wait: normalizeBorderWaitText(operational),
+        updatedAt: updateTime,
+        lanesOpen
+      };
+    }
+  }
+
+  return {
+    wait: "currently unavailable",
+    updatedAt: "",
+    lanesOpen: ""
+  };
+}
+
 async function fetchChamplainLacolleIntoCanada() {
   const cacheKey = "border:into_canada:champlain_lacolle";
   const cached = cacheGet(borderWaitCache, cacheKey, BORDER_CACHE_MS);
@@ -1897,60 +1987,21 @@ async function fetchChamplainLacolleIntoCanada() {
     throw new Error("Champlain/Lacolle Canada-bound wait time not found in CBSA feed");
   }
 
+  const updatedAt = String(match[2] || "").trim();
   const payload = {
     direction: "into_canada",
     locationSpeech: CHAMPLAIN_LACOLLE.spokenNameCanada,
-    updatedAt: String(match[2] || "").trim(),
+    updatedAt,
+    updatedAtSpoken: formatSpokenCbsaUpdate(updatedAt),
+    isStale: isStaleCbsaUpdate(updatedAt, CHAMPLAIN_LACOLLE.staleHours),
     commercialWait: normalizeBorderWaitText(match[3]),
     passengerWait: normalizeBorderWaitText(match[5]),
+    commercialLanesOpen: "",
+    passengerLanesOpen: "",
     source: "cbsa"
   };
 
   return cacheSet(borderWaitCache, cacheKey, payload);
-}
-
-function pickPrimaryLane(lanes) {
-  if (!lanes || typeof lanes !== "object") {
-    return {
-      wait: "currently unavailable",
-      updatedAt: ""
-    };
-  }
-
-  const preferredOrder = [
-    "standard_lanes",
-    "NEXUS_SENTRI_lanes",
-    "FAST_lanes",
-    "ready_lanes"
-  ];
-
-  for (const key of preferredOrder) {
-    const lane = lanes[key];
-    if (!lane || typeof lane !== "object") continue;
-
-    const operational = String(lane.operational_status || "").trim();
-    const delayMinutes = String(lane.delay_minutes || "").trim();
-    const updateTime = String(lane.update_time || "").trim();
-
-    if (delayMinutes !== "" && Number.isFinite(Number(delayMinutes))) {
-      return {
-        wait: normalizeBorderWaitText(`${delayMinutes} minutes`),
-        updatedAt: updateTime
-      };
-    }
-
-    if (operational) {
-      return {
-        wait: normalizeBorderWaitText(operational),
-        updatedAt: updateTime
-      };
-    }
-  }
-
-  return {
-    wait: "currently unavailable",
-    updatedAt: ""
-  };
 }
 
 async function fetchChamplainLacolleIntoUs() {
@@ -1987,8 +2038,12 @@ async function fetchChamplainLacolleIntoUs() {
     direction: "into_us",
     locationSpeech: CHAMPLAIN_LACOLLE.spokenNameUs,
     updatedAt: passenger.updatedAt || commercial.updatedAt || `${port.time || ""}`.trim(),
+    updatedAtSpoken: passenger.updatedAt || commercial.updatedAt || `${port.time || ""}`.trim(),
+    isStale: false,
     commercialWait: commercial.wait,
     passengerWait: passenger.wait,
+    commercialLanesOpen: commercial.lanesOpen,
+    passengerLanesOpen: passenger.lanesOpen,
     source: "cbp"
   };
 
@@ -2007,12 +2062,26 @@ function buildBorderSpeech(result) {
     `Passenger wait time is ${result.passengerWait}.`
   ];
 
+  if (result.passengerLanesOpen && Number.isFinite(Number(result.passengerLanesOpen))) {
+    parts.push(`${result.passengerLanesOpen} passenger lanes open.`);
+  }
+
   if (result.commercialWait && result.commercialWait !== "currently unavailable") {
     parts.push(`Commercial wait time is ${result.commercialWait}.`);
   }
 
-  if (result.updatedAt) {
-    parts.push(`Last updated ${result.updatedAt}.`);
+  if (result.commercialLanesOpen && Number.isFinite(Number(result.commercialLanesOpen))) {
+    parts.push(`${result.commercialLanesOpen} commercial lanes open.`);
+  }
+
+  if (result.direction === "into_canada" && result.isStale) {
+    parts.push("However, the official update has not been refreshed within the last 24 hours.");
+    parts.push(CHAMPLAIN_LACOLLE.constructionWarning);
+    return parts.join(" ");
+  }
+
+  if (result.updatedAtSpoken) {
+    parts.push(`Last updated ${result.updatedAtSpoken}.`);
   }
 
   return parts.join(" ");
