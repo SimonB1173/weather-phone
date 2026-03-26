@@ -668,7 +668,12 @@ function rootMenuTwiml() {
 function locationMenuTwiml({ allowBack = false, allowVoicemail = false } = {}) {
   const twiml = new VoiceResponse();
   const gather = twiml.gather(gatherOptions("/set-location-choice", 7, 1));
-  const parts = ["Press 1 for Montreal.", "2 for Tosh.", "3 for Laurentians.", "4 for United States."];
+  const parts = [
+    "Press 1 for Montreal.",
+    "Press 2 for Tosh.",
+    "Press 3 for Laurentians.",
+    "Press 4 for United States."
+  ];
   if (allowVoicemail) parts.push("Press 9 to leave a comment or suggestion.");
   if (allowBack) parts.push("Press star for the previous menu.");
   say(gather, parts.join(" "));
@@ -2242,7 +2247,7 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
   if (state === "root-menu") return rootMenuTwiml();
 
   if (state === "location-menu") {
-    return locationMenuTwiml({ allowBack: true, allowVoicemail: false });
+    return locationMenuTwiml({ allowBack: true, allowVoicemail: true });
   }
 
   if (state === "us-location-menu") return usLocationMenuTwiml();
@@ -2498,7 +2503,7 @@ app.post("/set-location-choice", async (req, res) => {
   clearPendingLocationChoice(req);
   pushMenuHistory(req, "main-menu");
   setMenuState(req, "main-menu");
-  buildMainMenuInto(twiml, PRESET_LOCATIONS[choice].label);
+  await buildMainMenuResponse(req, twiml);
   return res.type("text/xml").send(twiml.toString());
 });
 
