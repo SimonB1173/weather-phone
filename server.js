@@ -1918,6 +1918,23 @@ function formatSpokenCbsaUpdate(rawTimestamp) {
   });
 }
 
+function trafficLevelFromWait(waitText) {
+  const text = String(waitText || "").trim().toLowerCase();
+
+  if (!text || text === "currently unavailable" || text === "update pending") return "";
+  if (text.includes("no delay")) return "light";
+  if (text.includes("closed") || text.includes("lanes closed")) return "";
+
+  const m = text.match(/(\d+)/);
+  if (!m) return "";
+
+  const minutes = Number(m[1]);
+
+  if (minutes <= 10) return "light";
+  if (minutes <= 25) return "moderate";
+  return "heavy";
+}
+
 function pickPrimaryLane(lanes) {
   if (!lanes || typeof lanes !== "object") {
     return {
@@ -2062,16 +2079,28 @@ function buildBorderSpeech(result) {
     `Passenger wait time is ${result.passengerWait}.`
   ];
 
+  const passengerTraffic = trafficLevelFromWait(result.passengerWait);
+  if (passengerTraffic) {
+    parts.push(`Traffic is ${passengerTraffic}.`);
+  }
+
   if (result.passengerLanesOpen && Number.isFinite(Number(result.passengerLanesOpen))) {
-    parts.push(`${result.passengerLanesOpen} passenger lanes open.`);
+    const n = Number(result.passengerLanesOpen);
+    parts.push(`${result.passengerLanesOpen} passenger ${n === 1 ? "lane is" : "lanes are"} open.`);
   }
 
   if (result.commercialWait && result.commercialWait !== "currently unavailable") {
     parts.push(`Commercial wait time is ${result.commercialWait}.`);
+
+    const commercialTraffic = trafficLevelFromWait(result.commercialWait);
+    if (commercialTraffic) {
+      parts.push(`Commercial traffic is ${commercialTraffic}.`);
+    }
   }
 
   if (result.commercialLanesOpen && Number.isFinite(Number(result.commercialLanesOpen))) {
-    parts.push(`${result.commercialLanesOpen} commercial lanes open.`);
+    const n = Number(result.commercialLanesOpen);
+    parts.push(`${result.commercialLanesOpen} commercial ${n === 1 ? "lane is" : "lanes are"} open.`);
   }
 
   if (result.direction === "into_canada" && result.isStale) {
