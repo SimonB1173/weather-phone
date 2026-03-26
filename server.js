@@ -637,7 +637,7 @@ function buildRootMenuInto(twiml) {
   const gather = twiml.gather(gatherOptions("/root-menu", 8, 1));
   say(
     gather,
-    "Welcome to Weather and Info Line. Press 1 for weather. Press 2 for exchange rate. Press 3 for a future feature. Press 4 for border wait time."
+    "Welcome to Weather and Info Line. Press 1 for weather. Press 2 for exchange rate. Press 4 for border wait time."
   );
   twiml.redirect({ method: "POST" }, "/root-menu-prompt");
 }
@@ -652,7 +652,7 @@ function buildBorderMenuInto(twiml) {
   const gather = twiml.gather(gatherOptions("/border-menu", 8, 1));
   say(
     gather,
-    "Champlain Lacolle border wait time. Press 1 for entering Canada at Champlain Lacolle. Press 2 for entering the United States at Lacolle Champlain. Press star for the previous menu."
+    "Champlain border wait time. Press 1 for entering Canada. Press 2 for entering the United States. Press star for the previous menu."
   );
   twiml.redirect({ method: "POST" }, "/border-menu-prompt");
 }
