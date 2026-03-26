@@ -1882,7 +1882,7 @@ async function fetchChamplainLacolleIntoCanada() {
   const cached = cacheGet(borderWaitCache, cacheKey, BORDER_CACHE_MS);
   if (cached) return cached;
 
-  const response = await axios.get("https://cbsa-asfc.gc.ca/bwt-taf/bwt-eng.csv", {
+  const response = await axios.get("https://www.cbsa-asfc.gc.ca/bwt-taf/bwt-eng.csv", {
     timeout: BORDER_API_TIMEOUT_MS,
     headers: {
       "User-Agent": "weather-and-info-line/1.0",
