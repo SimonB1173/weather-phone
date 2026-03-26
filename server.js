@@ -20,6 +20,7 @@ const inFlightForecasts = new Map();
 const canadaAlertCache = new Map();
 const ecCityPageCache = new Map();
 const exchangeRateCache = new Map();
+const borderWaitCache = new Map();
 
 const temporaryLocationsByCall = new Map();
 const pendingLocationChoiceByCall = new Map();
@@ -34,10 +35,12 @@ const STALE_FORECAST_MS = 2 * 60 * 1000;
 const ALERT_CACHE_MS = 10 * 60 * 1000;
 const EC_CITYPAGE_CACHE_MS = 20 * 60 * 1000;
 const EXCHANGE_CACHE_MS = 10 * 60 * 1000;
+const BORDER_CACHE_MS = 5 * 60 * 1000;
 
 const EC_API_TIMEOUT_MS = 5000;
 const EC_ALERT_TIMEOUT_MS = 5000;
 const OPEN_METEO_TIMEOUT_MS = 15000;
+const BORDER_API_TIMEOUT_MS = 15000;
 
 const VOICEMAILS_FILE = path.join(__dirname, "voicemails.json");
 
@@ -109,6 +112,14 @@ const US_LOCATIONS = {
   "1": PRESET_LOCATIONS["4"],
   "2": PRESET_LOCATIONS["6"],
   "3": PRESET_LOCATIONS["5"]
+};
+
+const CHAMPLAIN_LACOLLE = {
+  cbsaOfficeName: "St-Bernard-de-Lacolle",
+  cbpPortNumber: "04071201",
+  cbpPortName: "Champlain",
+  spokenNameCanada: "Champlain slash Lacolle, entering Canada",
+  spokenNameUs: "Lacolle slash Champlain, entering the United States"
 };
 
 function gatherOptions(action, timeout = 8, numDigits = 1) {
@@ -284,7 +295,7 @@ function updateVoicemailRecord(callSid, updates) {
     }
   }
   if (!found) current.push({ callSid, ...updates });
-  saveJsonFile(VOICEMAILS_FILE, current);
+  saveJsonFile(filePath = VOICEMAILS_FILE, value = current);
 }
 
 function normalizePlaceName(name) {
@@ -556,6 +567,13 @@ function parseExchangeChoice(req) {
   return null;
 }
 
+function parseBorderChoice(req) {
+  const digit = getDigits(req);
+  if (digit === "1") return "into_canada";
+  if (digit === "2") return "into_us";
+  return "";
+}
+
 function parseAmountDigits(req) {
   return String(req.body.Digits || "").replace(/[^\d]/g, "").trim();
 }
@@ -617,7 +635,10 @@ function exchangeAsOfTime(timezone = "America/Toronto") {
 
 function buildRootMenuInto(twiml) {
   const gather = twiml.gather(gatherOptions("/root-menu", 8, 1));
-  say(gather, "Welcome to Weather and Info Line. Press 1 for weather. Press 2 for exchange rate.");
+  say(
+    gather,
+    "Welcome to Weather and Info Line. Press 1 for weather. Press 2 for exchange rate. Press 3 for a future feature. Press 4 for border wait time."
+  );
   twiml.redirect({ method: "POST" }, "/root-menu-prompt");
 }
 
@@ -625,6 +646,15 @@ function buildMainMenuInto(twiml, activeLocationName) {
   const gather = twiml.gather(gatherOptions("/menu", 8, 1));
   say(gather, `${activeLocationName}. Press 1 for the forecast menu. Press 2 for hourly forecast. Press 3 for current weather. Press star for the previous menu.`);
   twiml.redirect({ method: "POST" }, "/main-menu");
+}
+
+function buildBorderMenuInto(twiml) {
+  const gather = twiml.gather(gatherOptions("/border-menu", 8, 1));
+  say(
+    gather,
+    "Champlain Lacolle border wait time. Press 1 for entering Canada at Champlain Lacolle. Press 2 for entering the United States at Lacolle Champlain. Press star for the previous menu."
+  );
+  twiml.redirect({ method: "POST" }, "/border-menu-prompt");
 }
 
 function rootMenuTwiml() {
@@ -665,6 +695,12 @@ function exchangeMenuTwiml() {
   return twiml;
 }
 
+function borderMenuTwiml() {
+  const twiml = new VoiceResponse();
+  buildBorderMenuInto(twiml);
+  return twiml;
+}
+
 function exchangeAmountPromptTwiml(req, selection) {
   const twiml = new VoiceResponse();
 
@@ -702,7 +738,7 @@ function afterActionTwiml(req) {
 
   const playback = getLastPlayback(req);
 
-  if (playback?.type === "exchange") {
+  if (playback?.type === "exchange" || playback?.type === "border") {
     say(gather, "Press star to go back. Press pound to repeat. Press 5 for the main menu.");
   } else {
     const unit = getUnitPreference(req);
@@ -1815,6 +1851,173 @@ function buildExchangeTotalSpeech(selection, amount) {
   return `${formatMoneyAmount(amountNumber)} dollars equals ${formatMoneyAmount(total)} ${currencySpeech(selection.to)}.`;
 }
 
+function normalizeBorderWaitText(value) {
+  const text = String(value || "").trim();
+  if (!text || text === "--") return "currently unavailable";
+
+  const lower = text.toLowerCase();
+
+  if (lower.includes("no delay")) return "no delay";
+  if (lower.includes("update pending")) return "update pending";
+  if (lower.includes("lanes closed")) return "lanes closed";
+  if (lower.includes("closed")) return "closed";
+
+  const minutesMatch = lower.match(/^(\d+)\s*(min|mins|minute|minutes)?$/);
+  if (minutesMatch) return `${minutesMatch[1]} minutes`;
+
+  return text;
+}
+
+function parseCbsaBorderCsv(text) {
+  return String(text || "")
+    .replace(/^\uFEFF/, "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.split(";;").map((cell) => cell.trim()));
+}
+
+async function fetchChamplainLacolleIntoCanada() {
+  const cacheKey = "border:into_canada:champlain_lacolle";
+  const cached = cacheGet(borderWaitCache, cacheKey, BORDER_CACHE_MS);
+  if (cached) return cached;
+
+  const response = await axios.get("https://cbsa-asfc.gc.ca/bwt-taf/bwt-eng.csv", {
+    timeout: BORDER_API_TIMEOUT_MS,
+    headers: {
+      "User-Agent": "weather-and-info-line/1.0",
+      Accept: "text/csv,text/plain,*/*"
+    }
+  });
+
+  const rows = parseCbsaBorderCsv(response.data);
+  const match = rows.find((row) => String(row[0] || "").trim() === CHAMPLAIN_LACOLLE.cbsaOfficeName);
+
+  if (!match) {
+    throw new Error("Champlain/Lacolle Canada-bound wait time not found in CBSA feed");
+  }
+
+  const payload = {
+    direction: "into_canada",
+    locationSpeech: CHAMPLAIN_LACOLLE.spokenNameCanada,
+    updatedAt: String(match[2] || "").trim(),
+    commercialWait: normalizeBorderWaitText(match[3]),
+    passengerWait: normalizeBorderWaitText(match[5]),
+    source: "cbsa"
+  };
+
+  return cacheSet(borderWaitCache, cacheKey, payload);
+}
+
+function pickPrimaryLane(lanes) {
+  if (!lanes || typeof lanes !== "object") {
+    return {
+      wait: "currently unavailable",
+      updatedAt: ""
+    };
+  }
+
+  const preferredOrder = [
+    "standard_lanes",
+    "NEXUS_SENTRI_lanes",
+    "FAST_lanes",
+    "ready_lanes"
+  ];
+
+  for (const key of preferredOrder) {
+    const lane = lanes[key];
+    if (!lane || typeof lane !== "object") continue;
+
+    const operational = String(lane.operational_status || "").trim();
+    const delayMinutes = String(lane.delay_minutes || "").trim();
+    const updateTime = String(lane.update_time || "").trim();
+
+    if (delayMinutes !== "" && Number.isFinite(Number(delayMinutes))) {
+      return {
+        wait: normalizeBorderWaitText(`${delayMinutes} minutes`),
+        updatedAt: updateTime
+      };
+    }
+
+    if (operational) {
+      return {
+        wait: normalizeBorderWaitText(operational),
+        updatedAt: updateTime
+      };
+    }
+  }
+
+  return {
+    wait: "currently unavailable",
+    updatedAt: ""
+  };
+}
+
+async function fetchChamplainLacolleIntoUs() {
+  const cacheKey = "border:into_us:champlain_lacolle";
+  const cached = cacheGet(borderWaitCache, cacheKey, BORDER_CACHE_MS);
+  if (cached) return cached;
+
+  const response = await axios.get("https://bwt.cbp.gov/api/waittimes", {
+    timeout: BORDER_API_TIMEOUT_MS,
+    headers: {
+      "User-Agent": "weather-and-info-line/1.0",
+      Accept: "application/json"
+    }
+  });
+
+  const data = Array.isArray(response.data) ? response.data : [];
+  const port = data.find((item) => {
+    const portNumber = String(item?.port_number || "").trim();
+    const portName = String(item?.port_name || "").trim().toLowerCase();
+    return (
+      portNumber === CHAMPLAIN_LACOLLE.cbpPortNumber ||
+      portName === CHAMPLAIN_LACOLLE.cbpPortName.toLowerCase()
+    );
+  });
+
+  if (!port) {
+    throw new Error("Champlain/Lacolle U.S.-bound wait time not found in CBP API");
+  }
+
+  const passenger = pickPrimaryLane(port.passenger_vehicle_lanes);
+  const commercial = pickPrimaryLane(port.commercial_vehicle_lanes);
+
+  const payload = {
+    direction: "into_us",
+    locationSpeech: CHAMPLAIN_LACOLLE.spokenNameUs,
+    updatedAt: passenger.updatedAt || commercial.updatedAt || `${port.time || ""}`.trim(),
+    commercialWait: commercial.wait,
+    passengerWait: passenger.wait,
+    source: "cbp"
+  };
+
+  return cacheSet(borderWaitCache, cacheKey, payload);
+}
+
+async function fetchBorderWait(direction) {
+  if (direction === "into_canada") return fetchChamplainLacolleIntoCanada();
+  if (direction === "into_us") return fetchChamplainLacolleIntoUs();
+  throw new Error("Invalid border direction");
+}
+
+function buildBorderSpeech(result) {
+  const parts = [
+    `Border wait time for ${result.locationSpeech}.`,
+    `Passenger wait time is ${result.passengerWait}.`
+  ];
+
+  if (result.commercialWait && result.commercialWait !== "currently unavailable") {
+    parts.push(`Commercial wait time is ${result.commercialWait}.`);
+  }
+
+  if (result.updatedAt) {
+    parts.push(`Last updated ${result.updatedAt}.`);
+  }
+
+  return parts.join(" ");
+}
+
 async function fetchForecast(location) {
   pruneForecastCache();
   const cached = getCachedForecast(location);
@@ -1914,7 +2117,7 @@ async function forecastDayPromptTwiml(location, forecast) {
 async function buildPlaybackSpeech(location, forecast, playback, unit = "C") {
   if (!playback || !playback.type) return "";
 
-  if (playback.type === "exchange") {
+  if (playback.type === "exchange" || playback.type === "border") {
     return playback.speech || "";
   }
 
@@ -1977,7 +2180,7 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
       return twiml;
     }
 
-    if (playback.type === "exchange") {
+    if (playback.type === "exchange" || playback.type === "border") {
       if (!playback.speech) {
         say(twiml, "There is nothing to repeat yet.");
         twiml.redirect({ method: "POST" }, "/root-menu-prompt");
@@ -2071,12 +2274,63 @@ app.post("/root-menu", async (req, res) => {
       return res.type("text/xml").send(exchangeTwiml.toString());
     }
 
+    if (choice === "3") {
+      say(twiml, "That feature is not available yet.");
+      twiml.redirect({ method: "POST" }, "/root-menu-prompt");
+      return res.type("text/xml").send(twiml.toString());
+    }
+
+    if (choice === "4") {
+      const borderTwiml = borderMenuTwiml();
+      return res.type("text/xml").send(borderTwiml.toString());
+    }
+
     say(twiml, "I did not understand that choice.");
     twiml.redirect({ method: "POST" }, "/root-menu-prompt");
     return res.type("text/xml").send(twiml.toString());
   } catch (error) {
     console.error("ROOT-MENU route error:", error.message);
     say(twiml, "Sorry, an application error occurred. Please try again.");
+    return res.type("text/xml").send(twiml.toString());
+  }
+});
+
+app.post("/border-menu-prompt", async (req, res) => {
+  const twiml = borderMenuTwiml();
+  res.type("text/xml").send(twiml.toString());
+});
+
+app.post("/border-menu", async (req, res) => {
+  const twiml = new VoiceResponse();
+
+  try {
+    if (isBackKey(req)) {
+      twiml.redirect({ method: "POST" }, "/root-menu-prompt");
+      return res.type("text/xml").send(twiml.toString());
+    }
+
+    const choice = parseBorderChoice(req);
+
+    if (!choice) {
+      say(twiml, "I did not understand that choice.");
+      twiml.redirect({ method: "POST" }, "/border-menu-prompt");
+      return res.type("text/xml").send(twiml.toString());
+    }
+
+    const result = await fetchBorderWait(choice);
+    const speech = buildBorderSpeech(result);
+
+    setLastPlayback(req, {
+      type: "border",
+      speech
+    });
+
+    const playbackTwiml = playbackWithStarTwiml(speech);
+    return res.type("text/xml").send(playbackTwiml.toString());
+  } catch (error) {
+    console.error("BORDER-MENU route error:", error.message);
+    say(twiml, "Sorry, I could not retrieve the border wait time right now.");
+    twiml.redirect({ method: "POST" }, "/border-menu-prompt");
     return res.type("text/xml").send(twiml.toString());
   }
 });
@@ -2376,10 +2630,19 @@ app.post("/exchange-amount", async (req, res) => {
 });
 
 app.post("/during-playback", async (req, res) => {
+  const playback = getLastPlayback(req);
+
   if (isBackKey(req)) {
+    if (playback?.type === "border") {
+      const twiml = new VoiceResponse();
+      twiml.redirect({ method: "POST" }, "/border-menu-prompt");
+      return res.type("text/xml").send(twiml.toString());
+    }
+
     const backTwiml = await goBackOneMenu(req);
     return res.type("text/xml").send(backTwiml.toString());
   }
+
   const afterTwiml = await buildStateTwiml(req, "after-prompt", { push: false });
   res.type("text/xml").send(afterTwiml.toString());
 });
@@ -2391,17 +2654,28 @@ app.post("/after-prompt", async (req, res) => {
 
 app.post("/after", async (req, res) => {
   const twiml = new VoiceResponse();
+  const playback = getLastPlayback(req);
+
   console.log("AFTER Digits:", getDigits(req));
 
   if (isBackKey(req)) {
+    if (playback?.type === "border") {
+      twiml.redirect({ method: "POST" }, "/border-menu-prompt");
+      return res.type("text/xml").send(twiml.toString());
+    }
+
     const backTwiml = await goBackOneMenu(req);
     return res.type("text/xml").send(backTwiml.toString());
   }
 
   const choice = parseAfterChoice(req);
-  const playback = getLastPlayback(req);
 
   if (choice === "5") {
+    if (playback?.type === "border") {
+      const rootTwiml = await buildStateTwiml(req, "root-menu", { push: false });
+      return res.type("text/xml").send(rootTwiml.toString());
+    }
+
     const mainTwiml = await buildStateTwiml(req, "main-menu", { push: false });
     return res.type("text/xml").send(mainTwiml.toString());
   }
@@ -2411,7 +2685,7 @@ app.post("/after", async (req, res) => {
     return res.type("text/xml").send(playbackTwiml.toString());
   }
 
-  if (choice === "7" && playback && playback.type !== "exchange") {
+  if (choice === "7" && playback && playback.type !== "exchange" && playback.type !== "border") {
     toggleUnitPreference(req);
     const playbackTwiml = await buildStateTwiml(req, "playback", { push: false });
     return res.type("text/xml").send(playbackTwiml.toString());
