@@ -2308,7 +2308,7 @@ function buildBorderSpeech(result) {
   }
 
   if (result.direction === "into_canada" && result.isStale) {
-    parts.push("However, the official update has not been refreshed within the last 24 hours.");
+    parts.push("However, the official update has not been refreshed within the last few hours.");
     parts.push(CHAMPLAIN_LACOLLE.constructionWarning);
     return parts.join(" ");
   }
