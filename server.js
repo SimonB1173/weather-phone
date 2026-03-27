@@ -121,7 +121,7 @@ const CHAMPLAIN_LACOLLE = {
   cbpPortName: "Champlain",
   spokenNameCanada: "Champlain border, entering Canada",
   spokenNameUs: "Champlain border, entering the United States",
-  staleHours: 24,
+  staleHours: 5,
   constructionWarning: "This crossing is under construction until 2027. Expect longer wait times."
 };
 
@@ -2072,43 +2072,56 @@ function pickPrimaryLane(lanes) {
     };
   }
 
-  const preferredOrder = [
+  const candidates = [
     "standard_lanes",
     "NEXUS_SENTRI_lanes",
     "FAST_lanes",
     "ready_lanes"
-  ];
+  ]
+    .map((key) => {
+      const lane = lanes[key];
+      if (!lane || typeof lane !== "object") return null;
 
-  for (const key of preferredOrder) {
-    const lane = lanes[key];
-    if (!lane || typeof lane !== "object") continue;
+      const operational = String(lane.operational_status || "").trim();
+      const delayMinutes = String(lane.delay_minutes || "").trim();
+      const updateTime = String(lane.update_time || "").trim();
+      const lanesOpen = String(lane.lanes_open || "").trim();
 
-    const operational = String(lane.operational_status || "").trim();
-    const delayMinutes = String(lane.delay_minutes || "").trim();
-    const updateTime = String(lane.update_time || "").trim();
-    const lanesOpen = String(lane.lanes_open || "").trim();
+      let wait = "currently unavailable";
 
-    if (delayMinutes !== "" && Number.isFinite(Number(delayMinutes))) {
+      if (delayMinutes !== "" && Number.isFinite(Number(delayMinutes))) {
+        wait = normalizeBorderWaitText(`${delayMinutes} minutes`);
+      } else if (operational) {
+        wait = normalizeBorderWaitText(operational);
+      }
+
+      const parsedTime = Date.parse(updateTime);
+
       return {
-        wait: normalizeBorderWaitText(`${delayMinutes} minutes`),
+        key,
+        wait,
         updatedAt: updateTime,
-        lanesOpen
+        lanesOpen,
+        parsedTime: Number.isNaN(parsedTime) ? 0 : parsedTime
       };
-    }
+    })
+    .filter(Boolean)
+    .filter((x) => x.wait !== "currently unavailable" || x.updatedAt || x.lanesOpen);
 
-    if (operational) {
-      return {
-        wait: normalizeBorderWaitText(operational),
-        updatedAt: updateTime,
-        lanesOpen
-      };
-    }
+  if (!candidates.length) {
+    return {
+      wait: "currently unavailable",
+      updatedAt: "",
+      lanesOpen: ""
+    };
   }
 
+  candidates.sort((a, b) => b.parsedTime - a.parsedTime);
+
   return {
-    wait: "currently unavailable",
-    updatedAt: "",
-    lanesOpen: ""
+    wait: candidates[0].wait,
+    updatedAt: candidates[0].updatedAt,
+    lanesOpen: candidates[0].lanesOpen
   };
 }
 
@@ -2174,10 +2187,8 @@ async function fetchChamplainLacolleIntoUs() {
   const targetPortName = normalize(CHAMPLAIN_LACOLLE.cbpPortName);
 
   let port =
-    data.find((item) => normalize(item?.port_number) === targetPortNumber) ||
-    data.find((item) => normalize(item?.port_name) === targetPortName) ||
-    data.find((item) => normalize(item?.port_name).includes("champlain")) ||
-    data.find((item) => normalize(item?.port_name).includes("lacolle"));
+  data.find((item) => normalize(item?.port_number) === targetPortNumber) ||
+  data.find((item) => normalize(item?.port_name) === targetPortName);
 
   if (!port) {
     console.error("CBP API returned no Champlain match.");
@@ -2208,6 +2219,9 @@ async function fetchChamplainLacolleIntoUs() {
     port_number: port?.port_number,
     port_name: port?.port_name
   });
+
+  console.log("CBP passenger lanes raw:", JSON.stringify(port?.passenger_vehicle_lanes, null, 2));
+  console.log("CBP commercial lanes raw:", JSON.stringify(port?.commercial_vehicle_lanes, null, 2));
 
   const passenger = pickPrimaryLane(port.passenger_vehicle_lanes);
   const commercial = pickPrimaryLane(port.commercial_vehicle_lanes);
