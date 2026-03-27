@@ -119,8 +119,8 @@ const CHAMPLAIN_LACOLLE = {
   cbsaOfficeName: "St-Bernard-de-Lacolle",
   cbpPortNumber: "04071201",
   cbpPortName: "Champlain",
-  spokenNameCanada: "Champlain slash Lacolle, entering Canada",
-  spokenNameUs: "Lacolle slash Champlain, entering the United States",
+  spokenNameCanada: "Champlain border, entering Canada",
+  spokenNameUs: "Champlain border, entering the United States",
   staleHours: 24,
   constructionWarning: "This crossing is under construction until 2027. Expect longer wait times."
 };
@@ -671,7 +671,7 @@ function buildBorderMenuInto(twiml) {
   const gather = twiml.gather(gatherOptions("/border-menu", 8, 1));
   say(
     gather,
-    "Champlain border information. Press 1 for entering Canada. Press 2 for entering the United States. Press star for the previous menu."
+    "Champlain border wait time. Press 1 for entering Canada. Press 2 for entering the United States. Press star for the previous menu."
   );
   twiml.redirect({ method: "POST" }, "/border-menu-prompt");
 }
