@@ -29,6 +29,7 @@ const menuStateByCall = new Map();
 const menuHistoryByCall = new Map();
 const unitPreferenceByCall = new Map();
 const exchangeSelectionByCall = new Map();
+const borderDirectionByCall = new Map();
 
 const FORECAST_CACHE_MS = 15 * 60 * 1000;
 const STALE_FORECAST_MS = 2 * 60 * 1000;
@@ -220,6 +221,14 @@ function getMenuHistory(req) {
   return menuHistoryByCall.get(getCallKey(req)) || [];
 }
 
+function getBorderDirection(req) {
+  return borderDirectionByCall.get(getCallKey(req)) || null;
+}
+
+function setBorderDirection(req, direction) {
+  borderDirectionByCall.set(getCallKey(req), direction);
+}
+
 function shouldTrackHistoryState(state) {
   return [
     "root-menu",
@@ -278,6 +287,7 @@ function clearCallState(req) {
   menuHistoryByCall.delete(key);
   unitPreferenceByCall.delete(key);
   exchangeSelectionByCall.delete(key);
+  borderDirectionByCall.delete(key);
 }
 
 function appendVoicemailRecord(record) {
@@ -569,12 +579,17 @@ function parseExchangeChoice(req) {
   return null;
 }
 
-function parseBorderChoice(req) {
+function parseBorderDirectionChoice(req) {
   const digit = getDigits(req);
-  if (digit === "1") return "official_into_canada";
-  if (digit === "2") return "official_into_us";
-  if (digit === "3") return "live_into_canada";
-  if (digit === "4") return "live_into_us";
+  if (digit === "1") return "canada";
+  if (digit === "2") return "us";
+  return "";
+}
+
+function parseBorderTypeChoice(req) {
+  const digit = getDigits(req);
+  if (digit === "1") return "official";
+  if (digit === "2") return "live";
   return "";
 }
 
@@ -656,9 +671,27 @@ function buildBorderMenuInto(twiml) {
   const gather = twiml.gather(gatherOptions("/border-menu", 8, 1));
   say(
     gather,
-    "Champlain border information. Press 1 for official border wait time entering Canada. Press 2 for official border wait time entering the United States. Press 3 for live traffic approaching Canada. Press 4 for live traffic approaching the United States. Press star for the previous menu."
+    "Champlain border information. Press 1 for entering Canada. Press 2 for entering the United States. Press star for the previous menu."
   );
   twiml.redirect({ method: "POST" }, "/border-menu-prompt");
+}
+
+function buildBorderSubmenuInto(twiml, direction) {
+  const gather = twiml.gather(gatherOptions("/border-submenu", 8, 1));
+
+  if (direction === "canada") {
+    say(
+      gather,
+      "Entering Canada. Press 1 for official border wait time. Press 2 for live traffic. Press star for the previous menu."
+    );
+  } else {
+    say(
+      gather,
+      "Entering the United States. Press 1 for official border wait time. Press 2 for live traffic. Press star for the previous menu."
+    );
+  }
+
+  twiml.redirect({ method: "POST" }, "/border-submenu-prompt");
 }
 
 function rootMenuTwiml() {
@@ -2531,28 +2564,71 @@ app.post("/border-menu", async (req, res) => {
       return res.type("text/xml").send(twiml.toString());
     }
 
-    const choice = parseBorderChoice(req);
+    const direction = parseBorderDirectionChoice(req);
 
-    if (!choice) {
+    if (!direction) {
       say(twiml, "I did not understand that choice.");
       twiml.redirect({ method: "POST" }, "/border-menu-prompt");
       return res.type("text/xml").send(twiml.toString());
     }
 
+    setBorderDirection(req, direction);
+
+    const submenuTwiml = new VoiceResponse();
+    buildBorderSubmenuInto(submenuTwiml, direction);
+
+    return res.type("text/xml").send(submenuTwiml.toString());
+  } catch (error) {
+    console.error(error);
+    say(twiml, "Sorry, I could not retrieve border information.");
+    twiml.redirect({ method: "POST" }, "/border-menu-prompt");
+    return res.type("text/xml").send(twiml.toString());
+  }
+});
+
+app.post("/border-submenu-prompt", async (req, res) => {
+  const twiml = new VoiceResponse();
+  const direction = getBorderDirection(req) || "canada";
+  buildBorderSubmenuInto(twiml, direction);
+  res.type("text/xml").send(twiml.toString());
+});
+
+app.post("/border-submenu", async (req, res) => {
+  const twiml = new VoiceResponse();
+
+  try {
+    if (isBackKey(req)) {
+      twiml.redirect({ method: "POST" }, "/border-menu-prompt");
+      return res.type("text/xml").send(twiml.toString());
+    }
+
+    const direction = getBorderDirection(req);
+    const type = parseBorderTypeChoice(req);
+
+    if (!direction || !type) {
+      say(twiml, "I did not understand that choice.");
+      twiml.redirect({ method: "POST" }, "/border-submenu-prompt");
+      return res.type("text/xml").send(twiml.toString());
+    }
+
+    let choice = "";
+
+    if (direction === "canada" && type === "official") choice = "official_into_canada";
+    if (direction === "canada" && type === "live") choice = "live_into_canada";
+    if (direction === "us" && type === "official") choice = "official_into_us";
+    if (direction === "us" && type === "live") choice = "live_into_us";
+
     const result = await fetchBorderWait(choice);
     const speech = buildBorderSpeech(result);
 
-    setLastPlayback(req, {
-      type: "border",
-      speech
-    });
+    setLastPlayback(req, { type: "border", speech });
 
     const playbackTwiml = playbackWithStarTwiml(speech);
     return res.type("text/xml").send(playbackTwiml.toString());
   } catch (error) {
-    console.error("BORDER-MENU route error:", error.message);
-    say(twiml, "Sorry, I could not retrieve the border information right now.");
-    twiml.redirect({ method: "POST" }, "/border-menu-prompt");
+    console.error(error);
+    say(twiml, "Sorry, I could not retrieve border information.");
+    twiml.redirect({ method: "POST" }, "/border-submenu-prompt");
     return res.type("text/xml").send(twiml.toString());
   }
 });
