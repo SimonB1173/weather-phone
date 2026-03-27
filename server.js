@@ -1914,6 +1914,23 @@ function parseCbsaBorderCsv(text) {
     .map((line) => line.split(";;").map((cell) => cell.trim()));
 }
 
+function decodeXmlText(text) {
+  return String(text || "")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function firstXmlMatch(block, tagName) {
+  const re = new RegExp(`<${tagName}[^>]*>([\\s\\S]*?)<\\/${tagName}>`, "i");
+  const m = String(block || "").match(re);
+  return m ? decodeXmlText(m[1]) : "";
+}
+
 function parseCbsaTimestamp(raw) {
   const text = String(raw || "").trim();
   if (!text) return null;
@@ -2171,122 +2188,95 @@ async function fetchChamplainLacolleIntoUs() {
   const cached = cacheGet(borderWaitCache, cacheKey, BORDER_CACHE_MS);
   if (cached) return cached;
 
-  const detailUrl = `https://bwt.cbp.gov/details/${CHAMPLAIN_LACOLLE.cbpPortNumber}/POV`;
-
-  const response = await axios.get(detailUrl, {
+  const response = await axios.get("https://bwt.cbp.gov/xml/bwt.xml", {
     timeout: BORDER_API_TIMEOUT_MS,
-    maxRedirects: 5,
     headers: {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      "Accept-Language": "en-US,en;q=0.9",
-      "Cache-Control": "no-cache",
-      "Pragma": "no-cache"
+      "User-Agent": "weather-and-info-line/1.0",
+      Accept: "application/xml,text/xml;q=0.9,*/*;q=0.8"
     }
   });
 
-  const html = String(response.data || "");
-  console.log("CBP contains api/waittimes:", html.includes("api/waittimes"));
-  console.log("CBP contains details:", html.includes("04071201"));
-  console.log("CBP contains delay_minutes:", html.includes("delay_minutes"));
-  console.log("CBP contains lanes_open:", html.includes("lanes_open"));
-  console.log("CBP contains update_time:", html.includes("update_time"));
-  const apiMatches = html.match(/https?:\/\/[^"' ]+|\/[^"' ]*(api|details)[^"' ]*/gi) || [];
-  console.log("CBP possible API/script matches:", apiMatches.slice(0, 50));
+  const xml = String(response.data || "");
 
-  console.log("CBP detail URL:", detailUrl);
-  console.log("CBP response status:", response.status);
-  console.log("CBP final URL:", response.request?.res?.responseUrl || detailUrl);
-  console.log("CBP HTML first 1000 chars:", html.slice(0, 1000));
-
-  const currentWaitIndex = html.indexOf("Current Wait");
-  console.log(
-    "CBP HTML around Current Wait:",
-    currentWaitIndex >= 0 ? html.slice(currentWaitIndex, currentWaitIndex + 500) : "Current Wait not found"
-  );
-
-  const waitMatch =
-  html.match(/Current Wait:[\s\S]{0,200}?(\d+)\s*min/i);
-
-  const updateLaneMatch =
-    html.match(/At\s*([\d:]+\s*[ap]m\s*[A-Z]{2,4})\s*,\s*(\d+)\s*lanes?\s*open/i);
-
-  const avgMatch =
-    html.match(/Average Wait:[\s\S]{0,200}?(\d+)\s*min/i);
-
-  let passengerWait = waitMatch ? `${waitMatch[1]} minutes` : "currently unavailable";
-  let updatedAtSpoken = updateLaneMatch ? `At ${updateLaneMatch[1]}` : "currently unavailable";
-  let passengerLanesOpen = updateLaneMatch ? updateLaneMatch[2] : "";
-
-  if (passengerWait === "currently unavailable") {
-    const jsonLikeWait = html.match(/"delay_minutes"\s*:\s*"(\d+)"/i);
-    const jsonLikeLanes = html.match(/"lanes_open"\s*:\s*"(\d+)"/i);
-    const jsonLikeUpdate = html.match(/"update_time"\s*:\s*"([^"]+)"/i);
-
-    if (jsonLikeWait) passengerWait = `${jsonLikeWait[1]} minutes`;
-    if (jsonLikeLanes) passengerLanesOpen = jsonLikeLanes[1];
-    if (jsonLikeUpdate) updatedAtSpoken = jsonLikeUpdate[1];
+  const items = xml.match(/<item\b[\s\S]*?<\/item>/gi) || [];
+  if (!items.length) {
+    throw new Error("CBP XML feed returned no items");
   }
 
-  console.log("Parsed CBP detail page:", {
-    passengerWait,
-    updatedAtSpoken,
-    passengerLanesOpen,
-    averageWait: avgMatch ? `${avgMatch[1]} minutes` : ""
+  const wantedPortNumber = String(CHAMPLAIN_LACOLLE.cbpPortNumber || "").replace(/^0+/, "");
+  const wantedPortName = String(CHAMPLAIN_LACOLLE.cbpPortName || "").trim().toLowerCase();
+
+  const candidates = items.map((item) => {
+    const title = firstXmlMatch(item, "title");
+    const description = firstXmlMatch(item, "description");
+    const pubDate = firstXmlMatch(item, "pubDate");
+    const guid = firstXmlMatch(item, "guid");
+    const link = firstXmlMatch(item, "link");
+
+    const text = [title, description, pubDate, guid, link].join(" ");
+
+    const portNumberMatch = text.match(/\b0*([0-9]{4,8})\b/);
+    const normalizedPortNumber = portNumberMatch ? portNumberMatch[1] : "";
+
+    const currentWaitMatch = text.match(/Current Wait[: ]+(\d+)\s*min/i);
+    const averageWaitMatch = text.match(/Average Wait[: ]+(\d+)\s*min/i);
+    const lanesOpenMatch = text.match(/At\s*([\d:]+\s*[ap]m\s*[A-Z]{2,4})\s*,\s*(\d+)\s*lanes?\s*open/i);
+
+    return {
+      title,
+      description,
+      pubDate,
+      guid,
+      link,
+      text,
+      normalizedPortNumber,
+      currentWait: currentWaitMatch ? `${currentWaitMatch[1]} minutes` : "",
+      averageWait: averageWaitMatch ? `${averageWaitMatch[1]} minutes` : "",
+      updatedAtSpoken: lanesOpenMatch ? `At ${lanesOpenMatch[1]}` : "",
+      passengerLanesOpen: lanesOpenMatch ? lanesOpenMatch[2] : ""
+    };
   });
 
-if (passengerWait === "currently unavailable") {
-  console.log("CBP detail page did not contain rendered wait data. Falling back to bulk API.");
+  let match =
+    candidates.find((x) => x.normalizedPortNumber === wantedPortNumber) ||
+    candidates.find((x) => x.text.toLowerCase().includes(wantedPortName));
 
-  const fallbackResponse = await axios.get("https://bwt.cbp.gov/api/waittimes", {
-    timeout: BORDER_API_TIMEOUT_MS,
-    headers: {
-      "User-Agent": "Mozilla/5.0",
-      "Accept": "application/json"
-    }
-  });
-
-  const data = Array.isArray(fallbackResponse.data) ? fallbackResponse.data : [];
-
-  const normalize = (v) =>
-    String(v || "")
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9]/g, "");
-
-  const targetPortNumber = normalize(CHAMPLAIN_LACOLLE.cbpPortNumber);
-  const targetPortName = normalize(CHAMPLAIN_LACOLLE.cbpPortName);
-
-  const port =
-    data.find((item) => normalize(item?.port_number) === targetPortNumber) ||
-    data.find((item) => normalize(item?.port_name) === targetPortName);
-
-  if (port) {
-    const passenger = pickPrimaryLane(port.passenger_vehicle_lanes);
-
-    passengerWait = passenger.wait || "currently unavailable";
-    updatedAtSpoken = passenger.updatedAt || "currently unavailable";
-    passengerLanesOpen = passenger.lanesOpen || "";
-
-    console.log("CBP bulk API fallback used:", {
-      passengerWait,
-      updatedAtSpoken,
-      passengerLanesOpen
-    });
+  if (!match) {
+    console.error("CBP XML feed did not contain Champlain match");
+    console.error(
+      "Sample XML items:",
+      candidates.slice(0, 10).map((x) => ({
+        title: x.title,
+        pubDate: x.pubDate,
+        guid: x.guid,
+        link: x.link
+      }))
+    );
+    throw new Error("Champlain/Lacolle U.S.-bound wait time not found in CBP XML feed");
   }
-}
+
+  console.log("CBP XML match:", {
+    title: match.title,
+    pubDate: match.pubDate,
+    updatedAtSpoken: match.updatedAtSpoken,
+    passengerLanesOpen: match.passengerLanesOpen,
+    currentWait: match.currentWait,
+    averageWait: match.averageWait
+  });
+
+  const passengerWait = match.currentWait || "currently unavailable";
 
   const payload = {
     direction: "into_us",
     locationSpeech: CHAMPLAIN_LACOLLE.spokenNameUs,
-    updatedAt: updatedAtSpoken,
-    updatedAtSpoken,
+    updatedAt: match.updatedAtSpoken || match.pubDate || "",
+    updatedAtSpoken: match.updatedAtSpoken || match.pubDate || "",
     isStale: false,
     commercialWait: "currently unavailable",
     passengerWait: normalizeBorderWaitText(passengerWait),
     commercialLanesOpen: "",
-    passengerLanesOpen,
-    source: "cbp-detail-page"
+    passengerLanesOpen: match.passengerLanesOpen || "",
+    source: "cbp-xml"
   };
 
   return cacheSet(borderWaitCache, cacheKey, payload);
