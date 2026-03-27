@@ -36,7 +36,7 @@ const STALE_FORECAST_MS = 2 * 60 * 1000;
 const ALERT_CACHE_MS = 10 * 60 * 1000;
 const EC_CITYPAGE_CACHE_MS = 20 * 60 * 1000;
 const EXCHANGE_CACHE_MS = 10 * 60 * 1000;
-const BORDER_CACHE_MS = 5 * 60 * 1000;
+const BORDER_CACHE_MS = 0 * 60 * 1000;
 
 const EC_API_TIMEOUT_MS = 5000;
 const EC_ALERT_TIMEOUT_MS = 5000;
@@ -2164,17 +2164,21 @@ async function fetchChamplainLacolleIntoUs() {
 
   const data = Array.isArray(response.data) ? response.data : [];
   const port = data.find((item) => {
-    const portNumber = String(item?.port_number || "").trim();
-    const portName = String(item?.port_name || "").trim().toLowerCase();
-    return (
-      portNumber === CHAMPLAIN_LACOLLE.cbpPortNumber ||
-      portName === CHAMPLAIN_LACOLLE.cbpPortName.toLowerCase()
-    );
-  });
+  const portNumber = String(item?.port_number || "").trim();
+  return portNumber === CHAMPLAIN_LACOLLE.cbpPortNumber;
+});
 
   if (!port) {
     throw new Error("Champlain/Lacolle U.S.-bound wait time not found in CBP API");
   }
+
+console.log("CBP PORT MATCH:", {
+  port_number: port.port_number,
+  port_name: port.port_name,
+  passenger_vehicle_lanes: port.passenger_vehicle_lanes,
+  commercial_vehicle_lanes: port.commercial_vehicle_lanes,
+  port_time: port.time
+});
 
   const passenger = pickPrimaryLane(port.passenger_vehicle_lanes);
   const commercial = pickPrimaryLane(port.commercial_vehicle_lanes);
