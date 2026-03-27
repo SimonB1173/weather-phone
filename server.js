@@ -2183,22 +2183,23 @@ async function fetchChamplainLacolleIntoUs() {
 
   const html = String(response.data || "");
 
-  // Helpful debug
-  console.log("CBP detail page fetched:", detailUrl);
+  const currentWaitIndex = html.indexOf("Current Wait");
+  console.log(
+    "CBP HTML around Current Wait:",
+    currentWaitIndex >= 0 ? html.slice(currentWaitIndex, currentWaitIndex + 500) : "Current Wait not found"
+  );
 
   const waitMatch =
-    html.match(/Current Wait:\s*<\/[^>]+>\s*([\d]+)\s*min/i) ||
-    html.match(/Current Wait:\s*([\d]+)\s*min/i);
+    html.match(/Current Wait:[\s\S]{0,200}?(\d+)\s*min/i);
 
   const updateLaneMatch =
-    html.match(/At\s*([\d:]+\s*[ap]m\s*[A-Z]{2,4})\s*,\s*([\d]+)\s*lanes?\s*open/i);
+    html.match(/At\s*([\d:]+\s*[ap]m\s*[A-Z]{2,4})\s*,\s*(\d+)\s*lanes?\s*open/i);
 
   const avgMatch =
-    html.match(/Average Wait:\s*<\/[^>]+>\s*([\d]+)\s*min/i) ||
-    html.match(/Average Wait:\s*([\d]+)\s*min/i);
+    html.match(/Average Wait:[\s\S]{0,200}?(\d+)\s*min/i);
 
   const passengerWait = waitMatch ? `${waitMatch[1]} minutes` : "currently unavailable";
-  const updatedAtSpoken = updateLaneMatch ? `At ${updateLaneMatch[1]}` : "";
+  const updatedAtSpoken = updateLaneMatch ? `At ${updateLaneMatch[1]}` : "currently unavailable";
   const passengerLanesOpen = updateLaneMatch ? updateLaneMatch[2] : "";
 
   console.log("Parsed CBP detail page:", {
