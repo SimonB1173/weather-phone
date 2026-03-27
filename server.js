@@ -2163,22 +2163,51 @@ async function fetchChamplainLacolleIntoUs() {
   });
 
   const data = Array.isArray(response.data) ? response.data : [];
-  const port = data.find((item) => {
-  const portNumber = String(item?.port_number || "").trim();
-  return portNumber === CHAMPLAIN_LACOLLE.cbpPortNumber;
-});
+
+  const normalize = (v) =>
+    String(v || "")
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, "");
+
+  const targetPortNumber = normalize(CHAMPLAIN_LACOLLE.cbpPortNumber);
+  const targetPortName = normalize(CHAMPLAIN_LACOLLE.cbpPortName);
+
+  let port =
+    data.find((item) => normalize(item?.port_number) === targetPortNumber) ||
+    data.find((item) => normalize(item?.port_name) === targetPortName) ||
+    data.find((item) => normalize(item?.port_name).includes("champlain")) ||
+    data.find((item) => normalize(item?.port_name).includes("lacolle"));
 
   if (!port) {
-    throw new Error("Champlain/Lacolle U.S.-bound wait time not found in CBP API");
+    console.error("CBP API returned no Champlain match.");
+    console.error(
+      "Sample CBP ports:",
+      data.slice(0, 25).map((item) => ({
+        port_number: item?.port_number,
+        port_name: item?.port_name
+      }))
+    );
+
+    // graceful fallback instead of throwing
+    return {
+      direction: "into_us",
+      locationSpeech: CHAMPLAIN_LACOLLE.spokenNameUs,
+      updatedAt: "",
+      updatedAtSpoken: "",
+      isStale: false,
+      commercialWait: "currently unavailable",
+      passengerWait: "currently unavailable",
+      commercialLanesOpen: "",
+      passengerLanesOpen: "",
+      source: "cbp"
+    };
   }
 
-console.log("CBP PORT MATCH:", {
-  port_number: port.port_number,
-  port_name: port.port_name,
-  passenger_vehicle_lanes: port.passenger_vehicle_lanes,
-  commercial_vehicle_lanes: port.commercial_vehicle_lanes,
-  port_time: port.time
-});
+  console.log("Matched CBP port:", {
+    port_number: port?.port_number,
+    port_name: port?.port_name
+  });
 
   const passenger = pickPrimaryLane(port.passenger_vehicle_lanes);
   const commercial = pickPrimaryLane(port.commercial_vehicle_lanes);
