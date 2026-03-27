@@ -2221,7 +2221,7 @@ const BORDER_TRAFFIC_POINTS = {
 function buildBorderSpeech(result) {
   if (result.direction === "live_into_canada" || result.direction === "live_into_us") {
   const parts = [
-    `Live traffic conditions for ${result.locationSpeech}.`,
+    `Current live traffic conditions for ${result.locationSpeech}.`,
     `Traffic approaching the crossing is ${result.trafficLevel}.`
   ];
 
