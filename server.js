@@ -2072,41 +2072,42 @@ function pickPrimaryLane(lanes) {
     };
   }
 
-  const candidates = [
+  const preferredOrder = [
     "standard_lanes",
     "NEXUS_SENTRI_lanes",
     "FAST_lanes",
     "ready_lanes"
-  ]
-    .map((key) => {
-      const lane = lanes[key];
-      if (!lane || typeof lane !== "object") return null;
+  ];
 
-      const operational = String(lane.operational_status || "").trim();
-      const delayMinutes = String(lane.delay_minutes || "").trim();
-      const updateTime = String(lane.update_time || "").trim();
-      const lanesOpen = String(lane.lanes_open || "").trim();
+  const candidates = [];
 
-      let wait = "currently unavailable";
+  for (const key of preferredOrder) {
+    const lane = lanes[key];
+    if (!lane || typeof lane !== "object") continue;
 
-      if (delayMinutes !== "" && Number.isFinite(Number(delayMinutes))) {
-        wait = normalizeBorderWaitText(`${delayMinutes} minutes`);
-      } else if (operational) {
-        wait = normalizeBorderWaitText(operational);
-      }
+    const operational = String(lane.operational_status || "").trim();
+    const delayMinutes = String(lane.delay_minutes || "").trim();
+    const updateTime = String(lane.update_time || "").trim();
+    const lanesOpen = String(lane.lanes_open || "").trim();
 
-      const parsedTime = Date.parse(updateTime);
+    let wait = "currently unavailable";
 
-      return {
-        key,
-        wait,
-        updatedAt: updateTime,
-        lanesOpen,
-        parsedTime: Number.isNaN(parsedTime) ? 0 : parsedTime
-      };
-    })
-    .filter(Boolean)
-    .filter((x) => x.wait !== "currently unavailable" || x.updatedAt || x.lanesOpen);
+    if (delayMinutes !== "" && Number.isFinite(Number(delayMinutes))) {
+      wait = normalizeBorderWaitText(`${delayMinutes} minutes`);
+    } else if (operational) {
+      wait = normalizeBorderWaitText(operational);
+    }
+
+    const parsedTime = Date.parse(updateTime);
+
+    candidates.push({
+      key,
+      wait,
+      updatedAt: updateTime,
+      lanesOpen,
+      parsedTime: Number.isNaN(parsedTime) ? 0 : parsedTime
+    });
+  }
 
   if (!candidates.length) {
     return {
@@ -2116,7 +2117,10 @@ function pickPrimaryLane(lanes) {
     };
   }
 
-  candidates.sort((a, b) => b.parsedTime - a.parsedTime);
+  candidates.sort((a, b) => {
+    if (b.parsedTime !== a.parsedTime) return b.parsedTime - a.parsedTime;
+    return preferredOrder.indexOf(a.key) - preferredOrder.indexOf(b.key);
+  });
 
   return {
     wait: candidates[0].wait,
