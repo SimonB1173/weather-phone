@@ -2175,13 +2175,22 @@ async function fetchChamplainLacolleIntoUs() {
 
   const response = await axios.get(detailUrl, {
     timeout: BORDER_API_TIMEOUT_MS,
+    maxRedirects: 5,
     headers: {
-      "User-Agent": "weather-and-info-line/1.0",
-      Accept: "text/html,application/xhtml+xml"
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "en-US,en;q=0.9",
+      "Cache-Control": "no-cache",
+      "Pragma": "no-cache"
     }
   });
 
   const html = String(response.data || "");
+
+  console.log("CBP detail URL:", detailUrl);
+  console.log("CBP response status:", response.status);
+  console.log("CBP final URL:", response.request?.res?.responseUrl || detailUrl);
+  console.log("CBP HTML first 1000 chars:", html.slice(0, 1000));
 
   const currentWaitIndex = html.indexOf("Current Wait");
   console.log(
