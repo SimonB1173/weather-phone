@@ -2171,76 +2171,54 @@ async function fetchChamplainLacolleIntoUs() {
   const cached = cacheGet(borderWaitCache, cacheKey, BORDER_CACHE_MS);
   if (cached) return cached;
 
-  const response = await axios.get("https://bwt.cbp.gov/api/waittimes", {
+  const detailUrl = `https://bwt.cbp.gov/details/${CHAMPLAIN_LACOLLE.cbpPortNumber}/POV`;
+
+  const response = await axios.get(detailUrl, {
     timeout: BORDER_API_TIMEOUT_MS,
     headers: {
       "User-Agent": "weather-and-info-line/1.0",
-      Accept: "application/json"
+      Accept: "text/html,application/xhtml+xml"
     }
   });
 
-  const data = Array.isArray(response.data) ? response.data : [];
+  const html = String(response.data || "");
 
-  const normalize = (v) =>
-    String(v || "")
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9]/g, "");
+  // Helpful debug
+  console.log("CBP detail page fetched:", detailUrl);
 
-  const targetPortNumber = normalize(CHAMPLAIN_LACOLLE.cbpPortNumber);
-  const targetPortName = normalize(CHAMPLAIN_LACOLLE.cbpPortName);
+  const waitMatch =
+    html.match(/Current Wait:\s*<\/[^>]+>\s*([\d]+)\s*min/i) ||
+    html.match(/Current Wait:\s*([\d]+)\s*min/i);
 
-  let port =
-  data.find((item) => normalize(item?.port_number) === targetPortNumber) ||
-  data.find((item) => normalize(item?.port_name) === targetPortName);
+  const updateLaneMatch =
+    html.match(/At\s*([\d:]+\s*[ap]m\s*[A-Z]{2,4})\s*,\s*([\d]+)\s*lanes?\s*open/i);
 
-  if (!port) {
-    console.error("CBP API returned no Champlain match.");
-    console.error(
-      "Sample CBP ports:",
-      data.slice(0, 25).map((item) => ({
-        port_number: item?.port_number,
-        port_name: item?.port_name
-      }))
-    );
+  const avgMatch =
+    html.match(/Average Wait:\s*<\/[^>]+>\s*([\d]+)\s*min/i) ||
+    html.match(/Average Wait:\s*([\d]+)\s*min/i);
 
-    // graceful fallback instead of throwing
-    return {
-      direction: "into_us",
-      locationSpeech: CHAMPLAIN_LACOLLE.spokenNameUs,
-      updatedAt: "",
-      updatedAtSpoken: "",
-      isStale: false,
-      commercialWait: "currently unavailable",
-      passengerWait: "currently unavailable",
-      commercialLanesOpen: "",
-      passengerLanesOpen: "",
-      source: "cbp"
-    };
-  }
+  const passengerWait = waitMatch ? `${waitMatch[1]} minutes` : "currently unavailable";
+  const updatedAtSpoken = updateLaneMatch ? `At ${updateLaneMatch[1]}` : "";
+  const passengerLanesOpen = updateLaneMatch ? updateLaneMatch[2] : "";
 
-  console.log("Matched CBP port:", {
-    port_number: port?.port_number,
-    port_name: port?.port_name
+  console.log("Parsed CBP detail page:", {
+    passengerWait,
+    updatedAtSpoken,
+    passengerLanesOpen,
+    averageWait: avgMatch ? `${avgMatch[1]} minutes` : ""
   });
-
-  console.log("CBP passenger lanes raw:", JSON.stringify(port?.passenger_vehicle_lanes, null, 2));
-  console.log("CBP commercial lanes raw:", JSON.stringify(port?.commercial_vehicle_lanes, null, 2));
-
-  const passenger = pickPrimaryLane(port.passenger_vehicle_lanes);
-  const commercial = pickPrimaryLane(port.commercial_vehicle_lanes);
 
   const payload = {
     direction: "into_us",
     locationSpeech: CHAMPLAIN_LACOLLE.spokenNameUs,
-    updatedAt: passenger.updatedAt || commercial.updatedAt || `${port.time || ""}`.trim(),
-    updatedAtSpoken: passenger.updatedAt || commercial.updatedAt || `${port.time || ""}`.trim(),
+    updatedAt: updatedAtSpoken,
+    updatedAtSpoken,
     isStale: false,
-    commercialWait: commercial.wait,
-    passengerWait: passenger.wait,
-    commercialLanesOpen: commercial.lanesOpen,
-    passengerLanesOpen: passenger.lanesOpen,
-    source: "cbp"
+    commercialWait: "currently unavailable",
+    passengerWait: normalizeBorderWaitText(passengerWait),
+    commercialLanesOpen: "",
+    passengerLanesOpen,
+    source: "cbp-detail-page"
   };
 
   return cacheSet(borderWaitCache, cacheKey, payload);
