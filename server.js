@@ -2220,20 +2220,20 @@ const BORDER_TRAFFIC_POINTS = {
 
 function buildBorderSpeech(result) {
   if (result.direction === "live_into_canada" || result.direction === "live_into_us") {
-    const parts = [
-      `Live traffic for ${result.locationSpeech}.`,
-      `Traffic approaching the crossing is ${result.trafficLevel}.`
-    ];
+  const parts = [
+    `Live traffic for ${result.locationSpeech}.`,
+    `Traffic approaching the crossing is ${result.trafficLevel}.`
+  ];
 
-    if (Number.isFinite(Number(result.estimatedCars)) && Number(result.estimatedCars) > 0) {
-      parts.push(`Approximately ${result.estimatedCars} cars are in the queue approaching the crossing.`);
-    } else {
-      parts.push("There does not appear to be a significant queue approaching the crossing.");
-    }
-
-    parts.push("Information is based on live traffic conditions near the crossing, updated in near real time.");
-    return parts.join(" ");
+  if (Number.isFinite(Number(result.estimatedCars)) && Number(result.estimatedCars) > 0) {
+    parts.push(`Estimated traffic approaching the crossing is about ${result.estimatedCars} vehicles based on current route delay.`);
+  } else {
+    parts.push("There does not appear to be a significant queue approaching the crossing.");
   }
+
+  parts.push("Information is based on live traffic conditions near the crossing, updated in near real time.");
+  return parts.join(" ");
+}
 
   const parts = [
     `Border wait time for ${result.locationSpeech}.`,
