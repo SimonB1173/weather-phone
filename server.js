@@ -36,7 +36,7 @@ const STALE_FORECAST_MS = 2 * 60 * 1000;
 const ALERT_CACHE_MS = 10 * 60 * 1000;
 const EC_CITYPAGE_CACHE_MS = 20 * 60 * 1000;
 const EXCHANGE_CACHE_MS = 10 * 60 * 1000;
-const BORDER_CACHE_MS = 0 * 60 * 1000;
+const BORDER_CACHE_MS = 30 * 1000;
 
 const EC_API_TIMEOUT_MS = 5000;
 const EC_ALERT_TIMEOUT_MS = 5000;
@@ -2199,7 +2199,7 @@ async function fetchChamplainLacolleIntoUs() {
   );
 
   const waitMatch =
-    html.match(/Current Wait:[\s\S]{0,200}?(\d+)\s*min/i);
+  html.match(/Current Wait:[\s\S]{0,200}?(\d+)\s*min/i);
 
   const updateLaneMatch =
     html.match(/At\s*([\d:]+\s*[ap]m\s*[A-Z]{2,4})\s*,\s*(\d+)\s*lanes?\s*open/i);
@@ -2207,9 +2207,19 @@ async function fetchChamplainLacolleIntoUs() {
   const avgMatch =
     html.match(/Average Wait:[\s\S]{0,200}?(\d+)\s*min/i);
 
-  const passengerWait = waitMatch ? `${waitMatch[1]} minutes` : "currently unavailable";
-  const updatedAtSpoken = updateLaneMatch ? `At ${updateLaneMatch[1]}` : "currently unavailable";
-  const passengerLanesOpen = updateLaneMatch ? updateLaneMatch[2] : "";
+  let passengerWait = waitMatch ? `${waitMatch[1]} minutes` : "currently unavailable";
+  let updatedAtSpoken = updateLaneMatch ? `At ${updateLaneMatch[1]}` : "currently unavailable";
+  let passengerLanesOpen = updateLaneMatch ? updateLaneMatch[2] : "";
+
+  if (passengerWait === "currently unavailable") {
+    const jsonLikeWait = html.match(/"delay_minutes"\s*:\s*"(\d+)"/i);
+    const jsonLikeLanes = html.match(/"lanes_open"\s*:\s*"(\d+)"/i);
+    const jsonLikeUpdate = html.match(/"update_time"\s*:\s*"([^"]+)"/i);
+
+    if (jsonLikeWait) passengerWait = `${jsonLikeWait[1]} minutes`;
+    if (jsonLikeLanes) passengerLanesOpen = jsonLikeLanes[1];
+    if (jsonLikeUpdate) updatedAtSpoken = jsonLikeUpdate[1];
+  }
 
   console.log("Parsed CBP detail page:", {
     passengerWait,
@@ -2660,7 +2670,11 @@ app.post("/border-submenu", async (req, res) => {
     const result = await fetchBorderWait(choice);
     const speech = buildBorderSpeech(result);
 
-    setLastPlayback(req, { type: "border", speech });
+  setLastPlayback(req, {
+    type: "border",
+    speech,
+    borderDirection: direction
+  });
 
     const playbackTwiml = playbackWithStarTwiml(speech);
     return res.type("text/xml").send(playbackTwiml.toString());
@@ -2970,15 +2984,22 @@ app.post("/during-playback", async (req, res) => {
   const playback = getLastPlayback(req);
 
   if (isBackKey(req)) {
-    if (playback?.type === "border") {
-      const twiml = new VoiceResponse();
+  if (playback?.type === "border") {
+    const twiml = new VoiceResponse();
+
+    if (playback?.borderDirection) {
+      setBorderDirection(req, playback.borderDirection);
+      twiml.redirect({ method: "POST" }, "/border-submenu-prompt");
+    } else {
       twiml.redirect({ method: "POST" }, "/border-menu-prompt");
-      return res.type("text/xml").send(twiml.toString());
     }
 
-    const backTwiml = await goBackOneMenu(req);
-    return res.type("text/xml").send(backTwiml.toString());
+    return res.type("text/xml").send(twiml.toString());
   }
+
+  const backTwiml = await goBackOneMenu(req);
+  return res.type("text/xml").send(backTwiml.toString());
+}
 
   const afterTwiml = await buildStateTwiml(req, "after-prompt", { push: false });
   res.type("text/xml").send(afterTwiml.toString());
@@ -2996,14 +3017,20 @@ app.post("/after", async (req, res) => {
   console.log("AFTER Digits:", getDigits(req));
 
   if (isBackKey(req)) {
-    if (playback?.type === "border") {
+  if (playback?.type === "border") {
+    if (playback?.borderDirection) {
+      setBorderDirection(req, playback.borderDirection);
+      twiml.redirect({ method: "POST" }, "/border-submenu-prompt");
+    } else {
       twiml.redirect({ method: "POST" }, "/border-menu-prompt");
-      return res.type("text/xml").send(twiml.toString());
     }
 
-    const backTwiml = await goBackOneMenu(req);
-    return res.type("text/xml").send(backTwiml.toString());
+    return res.type("text/xml").send(twiml.toString());
   }
+
+  const backTwiml = await goBackOneMenu(req);
+  return res.type("text/xml").send(backTwiml.toString());
+}
 
   const choice = parseAfterChoice(req);
 
