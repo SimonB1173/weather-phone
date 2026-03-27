@@ -2186,6 +2186,13 @@ async function fetchChamplainLacolleIntoUs() {
   });
 
   const html = String(response.data || "");
+  console.log("CBP contains api/waittimes:", html.includes("api/waittimes"));
+  console.log("CBP contains details:", html.includes("04071201"));
+  console.log("CBP contains delay_minutes:", html.includes("delay_minutes"));
+  console.log("CBP contains lanes_open:", html.includes("lanes_open"));
+  console.log("CBP contains update_time:", html.includes("update_time"));
+  const apiMatches = html.match(/https?:\/\/[^"' ]+|\/[^"' ]*(api|details)[^"' ]*/gi) || [];
+  console.log("CBP possible API/script matches:", apiMatches.slice(0, 50));
 
   console.log("CBP detail URL:", detailUrl);
   console.log("CBP response status:", response.status);
@@ -2227,6 +2234,47 @@ async function fetchChamplainLacolleIntoUs() {
     passengerLanesOpen,
     averageWait: avgMatch ? `${avgMatch[1]} minutes` : ""
   });
+
+if (passengerWait === "currently unavailable") {
+  console.log("CBP detail page did not contain rendered wait data. Falling back to bulk API.");
+
+  const fallbackResponse = await axios.get("https://bwt.cbp.gov/api/waittimes", {
+    timeout: BORDER_API_TIMEOUT_MS,
+    headers: {
+      "User-Agent": "Mozilla/5.0",
+      "Accept": "application/json"
+    }
+  });
+
+  const data = Array.isArray(fallbackResponse.data) ? fallbackResponse.data : [];
+
+  const normalize = (v) =>
+    String(v || "")
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, "");
+
+  const targetPortNumber = normalize(CHAMPLAIN_LACOLLE.cbpPortNumber);
+  const targetPortName = normalize(CHAMPLAIN_LACOLLE.cbpPortName);
+
+  const port =
+    data.find((item) => normalize(item?.port_number) === targetPortNumber) ||
+    data.find((item) => normalize(item?.port_name) === targetPortName);
+
+  if (port) {
+    const passenger = pickPrimaryLane(port.passenger_vehicle_lanes);
+
+    passengerWait = passenger.wait || "currently unavailable";
+    updatedAtSpoken = passenger.updatedAt || "currently unavailable";
+    passengerLanesOpen = passenger.lanesOpen || "";
+
+    console.log("CBP bulk API fallback used:", {
+      passengerWait,
+      updatedAtSpoken,
+      passengerLanesOpen
+    });
+  }
+}
 
   const payload = {
     direction: "into_us",
