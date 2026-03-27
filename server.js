@@ -571,8 +571,10 @@ function parseExchangeChoice(req) {
 
 function parseBorderChoice(req) {
   const digit = getDigits(req);
-  if (digit === "1") return "into_canada";
-  if (digit === "2") return "into_us";
+  if (digit === "1") return "official_into_canada";
+  if (digit === "2") return "official_into_us";
+  if (digit === "3") return "live_into_canada";
+  if (digit === "4") return "live_into_us";
   return "";
 }
 
@@ -654,7 +656,7 @@ function buildBorderMenuInto(twiml) {
   const gather = twiml.gather(gatherOptions("/border-menu", 8, 1));
   say(
     gather,
-    "Champlain border wait time. Press 1 for entering Canada. Press 2 for entering the United States. Press star for the previous menu."
+    "Champlain border information. Press 1 for official border wait time entering Canada. Press 2 for official border wait time entering the United States. Press 3 for live traffic approaching Canada. Press 4 for live traffic approaching the United States. Press star for the previous menu."
   );
   twiml.redirect({ method: "POST" }, "/border-menu-prompt");
 }
@@ -668,12 +670,7 @@ function rootMenuTwiml() {
 function locationMenuTwiml({ allowBack = false, allowVoicemail = false } = {}) {
   const twiml = new VoiceResponse();
   const gather = twiml.gather(gatherOptions("/set-location-choice", 7, 1));
-  const parts = [
-    "Press 1 for Montreal.",
-    "Press 2 for Tosh.",
-    "Press 3 for Laurentians.",
-    "Press 4 for United States."
-  ];
+  const parts = ["Press 1 for Montreal.", "2 for Tosh.", "3 for Laurentians.", "4 for United States."];
   if (allowVoicemail) parts.push("Press 9 to leave a comment or suggestion.");
   if (allowBack) parts.push("Press star for the previous menu.");
   say(gather, parts.join(" "));
@@ -1940,6 +1937,99 @@ function trafficLevelFromWait(waitText) {
   return "heavy";
 }
 
+function getTrafficLevel(extraMinutes) {
+  if (!Number.isFinite(Number(extraMinutes)) || Number(extraMinutes) <= 5) return "light";
+  if (Number(extraMinutes) <= 15) return "moderate";
+  return "heavy";
+}
+
+function estimateCarsFromDelay(extraMinutes) {
+  const minutes = Number(extraMinutes || 0);
+  if (!Number.isFinite(minutes) || minutes <= 0) return 0;
+  return Math.max(0, Math.round(minutes * 8));
+}
+
+async function fetchLiveTrafficRoute(origin, destination) {
+  if (!process.env.GOOGLE_MAPS_API_KEY) {
+    throw new Error("GOOGLE_MAPS_API_KEY is missing");
+  }
+
+  const response = await axios.post(
+    "https://routes.googleapis.com/directions/v2:computeRoutes",
+    {
+      origin: {
+        location: {
+          latLng: origin
+        }
+      },
+      destination: {
+        location: {
+          latLng: destination
+        }
+      },
+      travelMode: "DRIVE",
+      routingPreference: "TRAFFIC_AWARE_OPTIMAL",
+      extraComputations: ["TRAFFIC_ON_POLYLINE"]
+    },
+    {
+      timeout: BORDER_API_TIMEOUT_MS,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": process.env.GOOGLE_MAPS_API_KEY,
+        "X-Goog-FieldMask":
+          "routes.duration,routes.staticDuration,routes.polyline.encodedPolyline,routes.travelAdvisory.speedReadingIntervals"
+      }
+    }
+  );
+
+  const route = Array.isArray(response.data?.routes) ? response.data.routes[0] : null;
+  if (!route) {
+    throw new Error("No live traffic route returned from Google Routes API");
+  }
+
+  const durationText = String(route.duration || "0s");
+  const staticDurationText = String(route.staticDuration || durationText);
+
+  const durationSeconds = Number(durationText.replace("s", "")) || 0;
+  const staticDurationSeconds = Number(staticDurationText.replace("s", "")) || durationSeconds;
+
+  const extraMinutes = Math.max(0, Math.round((durationSeconds - staticDurationSeconds) / 60));
+
+  return {
+    extraMinutes,
+    trafficLevel: getTrafficLevel(extraMinutes),
+    estimatedCars: estimateCarsFromDelay(extraMinutes)
+  };
+}
+
+async function fetchLiveTrafficIntoCanada() {
+  const traffic = await fetchLiveTrafficRoute(
+    BORDER_TRAFFIC_POINTS.intoCanada.origin,
+    BORDER_TRAFFIC_POINTS.intoCanada.destination
+  );
+
+  return {
+    direction: "live_into_canada",
+    locationSpeech: CHAMPLAIN_LACOLLE.spokenNameCanada,
+    source: "google-routes",
+    ...traffic
+  };
+}
+
+async function fetchLiveTrafficIntoUs() {
+  const traffic = await fetchLiveTrafficRoute(
+    BORDER_TRAFFIC_POINTS.intoUs.origin,
+    BORDER_TRAFFIC_POINTS.intoUs.destination
+  );
+
+  return {
+    direction: "live_into_us",
+    locationSpeech: CHAMPLAIN_LACOLLE.spokenNameUs,
+    source: "google-routes",
+    ...traffic
+  };
+}
+
 function pickPrimaryLane(lanes) {
   if (!lanes || typeof lanes !== "object") {
     return {
@@ -2073,12 +2163,41 @@ async function fetchChamplainLacolleIntoUs() {
 }
 
 async function fetchBorderWait(direction) {
-  if (direction === "into_canada") return fetchChamplainLacolleIntoCanada();
-  if (direction === "into_us") return fetchChamplainLacolleIntoUs();
+  if (direction === "official_into_canada") return fetchChamplainLacolleIntoCanada();
+  if (direction === "official_into_us") return fetchChamplainLacolleIntoUs();
+  if (direction === "live_into_canada") return fetchLiveTrafficIntoCanada();
+  if (direction === "live_into_us") return fetchLiveTrafficIntoUs();
   throw new Error("Invalid border direction");
 }
 
+const BORDER_TRAFFIC_POINTS = {
+  intoCanada: {
+    origin: { latitude: 44.9625, longitude: -73.4466 },
+    destination: { latitude: 45.0060, longitude: -73.4544 }
+  },
+  intoUs: {
+    origin: { latitude: 45.0475, longitude: -73.4635 },
+    destination: { latitude: 44.9957, longitude: -73.4552 }
+  }
+};
+
 function buildBorderSpeech(result) {
+  if (result.direction === "live_into_canada" || result.direction === "live_into_us") {
+    const parts = [
+      `Live traffic for ${result.locationSpeech}.`,
+      `Traffic approaching the crossing is ${result.trafficLevel}.`
+    ];
+
+    if (Number.isFinite(Number(result.estimatedCars)) && Number(result.estimatedCars) > 0) {
+      parts.push(`Approximately ${result.estimatedCars} cars are in the queue approaching the crossing.`);
+    } else {
+      parts.push("There does not appear to be a significant queue approaching the crossing.");
+    }
+
+    parts.push("Information is based on live traffic conditions near the crossing, updated in near real time.");
+    return parts.join(" ");
+  }
+
   const parts = [
     `Border wait time for ${result.locationSpeech}.`,
     `Passenger wait time is ${result.passengerWait}.`
@@ -2247,7 +2366,7 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
   if (state === "root-menu") return rootMenuTwiml();
 
   if (state === "location-menu") {
-    return locationMenuTwiml({ allowBack: true, allowVoicemail: true });
+    return locationMenuTwiml({ allowBack: true, allowVoicemail: false });
   }
 
   if (state === "us-location-menu") return usLocationMenuTwiml();
@@ -2432,7 +2551,7 @@ app.post("/border-menu", async (req, res) => {
     return res.type("text/xml").send(playbackTwiml.toString());
   } catch (error) {
     console.error("BORDER-MENU route error:", error.message);
-    say(twiml, "Sorry, I could not retrieve the border wait time right now.");
+    say(twiml, "Sorry, I could not retrieve the border information right now.");
     twiml.redirect({ method: "POST" }, "/border-menu-prompt");
     return res.type("text/xml").send(twiml.toString());
   }
@@ -2503,7 +2622,7 @@ app.post("/set-location-choice", async (req, res) => {
   clearPendingLocationChoice(req);
   pushMenuHistory(req, "main-menu");
   setMenuState(req, "main-menu");
-  await buildMainMenuResponse(req, twiml);
+  buildMainMenuInto(twiml, PRESET_LOCATIONS[choice].label);
   return res.type("text/xml").send(twiml.toString());
 });
 
