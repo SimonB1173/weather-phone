@@ -11,7 +11,7 @@ app.use(express.json());
 const VoiceResponse = twilio.twiml.VoiceResponse;
 
 const SAY_OPTIONS = {
-  voice: "Polly.Matthew",
+  voice: "Polly.Matthew-Neural",
   language: "en-US"
 };
 
@@ -136,7 +136,16 @@ function gatherOptions(action, timeout = 8, numDigits = 1) {
   };
 }
 
-function say(twiml, text) {
+function escapeForSsml(text) {
+  return String(text || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function say(twiml, text, options = {}) {
   const cleaned = String(text || "")
     .replace(/\s+/g, " ")
     .replace(/\s+([,.!?;:])/g, "$1")
@@ -144,13 +153,27 @@ function say(twiml, text) {
 
   if (!cleaned) return;
 
+  const {
+    rate = "100%",
+    pitch = "default",
+    volume = "default"
+  } = options;
+
   const parts = cleaned
     .split(/(?<=[.!?])\s+/)
     .map((s) => s.trim())
     .filter(Boolean);
 
   for (const part of parts) {
-    twiml.say(SAY_OPTIONS, part);
+    const ssml = `
+      <speak>
+        <prosody rate="${rate}" pitch="${pitch}" volume="${volume}">
+          ${escapeForSsml(part)}
+        </prosody>
+      </speak>
+    `.replace(/\s+/g, " ").trim();
+
+    twiml.say(SAY_OPTIONS, ssml);
   }
 }
 
@@ -374,7 +397,7 @@ function getHourFromLocalIso(iso) {
 
 function getMinuteFromLocalIso(iso) {
   const match = String(iso || "").match(/T(\d{1,2}):(\d{2})/);
-  return match ? Number(match[2]) : 0;
+  return match ? Number(match[1]) : 0;
 }
 
 function formatLocalIsoTimeLabel(iso) {
@@ -806,7 +829,7 @@ function voicemailPromptTwiml() {
   return twiml;
 }
 
-function playbackWithStarTwiml(text) {
+function playbackWithStarTwiml(text, options = {}) {
   const twiml = new VoiceResponse();
   const gather = twiml.gather({
     input: "dtmf",
@@ -816,7 +839,7 @@ function playbackWithStarTwiml(text) {
     numDigits: 1,
     finishOnKey: ""
   });
-  say(gather, text);
+  say(gather, text, options);
   twiml.redirect({ method: "POST" }, "/after-prompt");
   return twiml;
 }
@@ -1300,9 +1323,9 @@ function normalizeEcHourly(cityItem, timezone = "America/Toronto") {
     .filter((x) => x.time && Number.isFinite(Number(x.temperature_2m)));
 }
 
-function normalizeEcForecastPeriods(cityItem) {
-  const issueTime = cityItem?.properties?.forecastGroup?.timestamp?.en || "";
-  const periods = safeArray(cityItem?.properties?.forecastGroup?.forecasts);
+function normalizeEcForecastPeriods(ecItem) {
+  const issueTime = ecItem?.properties?.forecastGroup?.timestamp?.en || "";
+  const periods = safeArray(ecItem?.properties?.forecastGroup?.forecasts);
 
   return {
     issuedAt: issueTime,
@@ -2349,20 +2372,20 @@ const BORDER_TRAFFIC_POINTS = {
 
 function buildBorderSpeech(result) {
   if (result.direction === "live_into_canada" || result.direction === "live_into_us") {
-  const parts = [
-    `Current live traffic conditions for ${result.locationSpeech}.`,
-    `Traffic approaching the crossing is ${result.trafficLevel}.`
-  ];
+    const parts = [
+      `Current live traffic conditions for ${result.locationSpeech}.`,
+      `Traffic approaching the crossing is ${result.trafficLevel}.`
+    ];
 
-  if (Number.isFinite(Number(result.estimatedCars)) && Number(result.estimatedCars) > 0) {
-    parts.push(`Estimated traffic approaching the crossing is about ${result.estimatedCars} vehicles based on current route delay.`);
-  } else {
-    parts.push("There does not appear to be a significant queue approaching the crossing.");
+    if (Number.isFinite(Number(result.estimatedCars)) && Number(result.estimatedCars) > 0) {
+      parts.push(`Estimated traffic approaching the crossing is about ${result.estimatedCars} vehicles based on current route delay.`);
+    } else {
+      parts.push("There does not appear to be a significant queue approaching the crossing.");
+    }
+
+    parts.push("Information is based on live traffic conditions near the crossing, updated in near real time.");
+    return parts.join(" ");
   }
-
-  parts.push("Information is based on live traffic conditions near the crossing, updated in near real time.");
-  return parts.join(" ");
-}
 
   const parts = [
     `Border wait time for ${result.locationSpeech}.`,
@@ -2574,7 +2597,9 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
         twiml.redirect({ method: "POST" }, "/root-menu-prompt");
         return twiml;
       }
-      return playbackWithStarTwiml(playback.speech);
+      return playbackWithStarTwiml(playback.speech, {
+        rate: playback.speechRate || "100%"
+      });
     }
 
     const location = getActiveLocation(req);
@@ -2593,7 +2618,9 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
       return twiml;
     }
 
-    return playbackWithStarTwiml(speech);
+    return playbackWithStarTwiml(speech, {
+      rate: playback.speechRate || "100%"
+    });
   }
 
   if (state === "after-prompt") return afterActionTwiml(req);
@@ -2754,11 +2781,11 @@ app.post("/border-submenu", async (req, res) => {
     const result = await fetchBorderWait(choice);
     const speech = buildBorderSpeech(result);
 
-  setLastPlayback(req, {
-    type: "border",
-    speech,
-    borderDirection: direction
-  });
+    setLastPlayback(req, {
+      type: "border",
+      speech,
+      borderDirection: direction
+    });
 
     const playbackTwiml = playbackWithStarTwiml(speech);
     return res.type("text/xml").send(playbackTwiml.toString());
@@ -2987,7 +3014,7 @@ app.post("/forecast-day", async (req, res) => {
     const selected = parseForecastDayChoice(req);
 
     if (selected === "all") {
-      setLastPlayback(req, { type: "all7" });
+      setLastPlayback(req, { type: "all7", speechRate: "88%" });
       const playbackTwiml = await buildStateTwiml(req, "playback", { push: false });
       return res.type("text/xml").send(playbackTwiml.toString());
     }
@@ -3068,22 +3095,22 @@ app.post("/during-playback", async (req, res) => {
   const playback = getLastPlayback(req);
 
   if (isBackKey(req)) {
-  if (playback?.type === "border") {
-    const twiml = new VoiceResponse();
+    if (playback?.type === "border") {
+      const twiml = new VoiceResponse();
 
-    if (playback?.borderDirection) {
-      setBorderDirection(req, playback.borderDirection);
-      twiml.redirect({ method: "POST" }, "/border-submenu-prompt");
-    } else {
-      twiml.redirect({ method: "POST" }, "/border-menu-prompt");
+      if (playback?.borderDirection) {
+        setBorderDirection(req, playback.borderDirection);
+        twiml.redirect({ method: "POST" }, "/border-submenu-prompt");
+      } else {
+        twiml.redirect({ method: "POST" }, "/border-menu-prompt");
+      }
+
+      return res.type("text/xml").send(twiml.toString());
     }
 
-    return res.type("text/xml").send(twiml.toString());
+    const backTwiml = await goBackOneMenu(req);
+    return res.type("text/xml").send(backTwiml.toString());
   }
-
-  const backTwiml = await goBackOneMenu(req);
-  return res.type("text/xml").send(backTwiml.toString());
-}
 
   const afterTwiml = await buildStateTwiml(req, "after-prompt", { push: false });
   res.type("text/xml").send(afterTwiml.toString());
@@ -3101,20 +3128,20 @@ app.post("/after", async (req, res) => {
   console.log("AFTER Digits:", getDigits(req));
 
   if (isBackKey(req)) {
-  if (playback?.type === "border") {
-    if (playback?.borderDirection) {
-      setBorderDirection(req, playback.borderDirection);
-      twiml.redirect({ method: "POST" }, "/border-submenu-prompt");
-    } else {
-      twiml.redirect({ method: "POST" }, "/border-menu-prompt");
+    if (playback?.type === "border") {
+      if (playback?.borderDirection) {
+        setBorderDirection(req, playback.borderDirection);
+        twiml.redirect({ method: "POST" }, "/border-submenu-prompt");
+      } else {
+        twiml.redirect({ method: "POST" }, "/border-menu-prompt");
+      }
+
+      return res.type("text/xml").send(twiml.toString());
     }
 
-    return res.type("text/xml").send(twiml.toString());
+    const backTwiml = await goBackOneMenu(req);
+    return res.type("text/xml").send(backTwiml.toString());
   }
-
-  const backTwiml = await goBackOneMenu(req);
-  return res.type("text/xml").send(backTwiml.toString());
-}
 
   const choice = parseAfterChoice(req);
 
