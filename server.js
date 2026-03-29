@@ -170,7 +170,12 @@ function playbackWithStarTwiml(text, options = {}) {
   const rate = options.rate || "100%";
   const voice = xmlEscape(SAY_OPTIONS.voice);
   const language = xmlEscape(SAY_OPTIONS.language);
-  const body = xmlEscape(cleaned);
+  
+  const body = xmlEscape(
+    cleaned
+      .replace(/\.\s+/g, '.<break time="220ms"/> ')
+      .replace(/:\s+/g, ':<break time="180ms"/> ')
+  );
 
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
