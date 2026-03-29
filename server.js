@@ -405,7 +405,7 @@ function getHourFromLocalIso(iso) {
 
 function getMinuteFromLocalIso(iso) {
   const match = String(iso || "").match(/T(\d{1,2}):(\d{2})/);
-  return match ? Number(match[1]) : 0;
+  return match ? Number(match[2]) : 0;
 }
 
 function formatLocalIsoTimeLabel(iso) {
