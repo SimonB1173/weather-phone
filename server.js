@@ -2965,13 +2965,17 @@ app.post("/menu", async (req, res) => {
     if (choice === "2") {
       setLastPlayback(req, { type: "hourly", hours: location.country === "CA" ? 12 : 6 });
       const playbackTwiml = await buildStateTwiml(req, "playback", { push: false });
-      return res.type("text/xml").send(playbackTwiml.toString());
+      return res.type("text/xml").send(
+        typeof playbackTwiml === "string" ? playbackTwiml : playbackTwiml.toString()
+      );
     }
 
     if (choice === "3") {
       setLastPlayback(req, { type: "current" });
       const playbackTwiml = await buildStateTwiml(req, "playback", { push: false });
-      return res.type("text/xml").send(playbackTwiml.toString());
+      return res.type("text/xml").send(
+        typeof playbackTwiml === "string" ? playbackTwiml : playbackTwiml.toString()
+      );
     }
 
     say(twiml, "I did not understand that choice.");
@@ -3009,7 +3013,9 @@ app.post("/forecast-day", async (req, res) => {
     if (selected === "all") {
       setLastPlayback(req, { type: "all7", speechRate: "88%" });
       const playbackTwiml = await buildStateTwiml(req, "playback", { push: false });
-      return res.type("text/xml").send(playbackTwiml.toString());
+      return res.type("text/xml").send(
+        typeof playbackTwiml === "string" ? playbackTwiml : playbackTwiml.toString()
+      );
     }
 
     if (selected < 0) {
@@ -3033,7 +3039,9 @@ app.post("/forecast-day", async (req, res) => {
 
     setLastPlayback(req, { type: "daily", index: selected });
     const playbackTwiml = await buildStateTwiml(req, "playback", { push: false });
-    return res.type("text/xml").send(playbackTwiml.toString());
+    return res.type("text/xml").send(
+      typeof playbackTwiml === "string" ? playbackTwiml : playbackTwiml.toString()
+    );
   } catch (error) {
     console.error("FORECAST-DAY error:", error.message);
     speakWeatherError(twiml, error, "Sorry, I could not retrieve that forecast.");
@@ -3075,7 +3083,7 @@ app.post("/exchange-amount", async (req, res) => {
     });
 
     const playbackTwiml = playbackWithStarTwiml(speech);
-    return res.type("text/xml").send(playbackTwiml.toString());
+    return res.type("text/xml").send(playbackTwiml);
   } catch (error) {
     console.error("EXCHANGE-AMOUNT error:", error.message);
     say(twiml, "Sorry, I could not retrieve the exchange rate right now.");
@@ -3150,13 +3158,17 @@ app.post("/after", async (req, res) => {
 
   if (choice === "#") {
     const playbackTwiml = await buildStateTwiml(req, "playback", { push: false });
-    return res.type("text/xml").send(playbackTwiml.toString());
+    return res.type("text/xml").send(
+      typeof playbackTwiml === "string" ? playbackTwiml : playbackTwiml.toString()
+    );
   }
 
   if (choice === "7" && playback && playback.type !== "exchange" && playback.type !== "border") {
     toggleUnitPreference(req);
     const playbackTwiml = await buildStateTwiml(req, "playback", { push: false });
-    return res.type("text/xml").send(playbackTwiml.toString());
+    return res.type("text/xml").send(
+      typeof playbackTwiml === "string" ? playbackTwiml : playbackTwiml.toString()
+    );
   }
 
   say(twiml, "I did not understand that choice.");
