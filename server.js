@@ -11,7 +11,7 @@ app.use(express.json());
 const VoiceResponse = twilio.twiml.VoiceResponse;
 
 const SAY_OPTIONS = {
-  voice: "Polly.Matthew-Neural",
+  voice: "Polly.Matthew",
   language: "en-US"
 };
 
