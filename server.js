@@ -145,6 +145,22 @@ function xmlEscape(text) {
     .replace(/'/g, "&apos;");
 }
 
+function say(twiml, text) {
+  const cleaned = String(text || "")
+    .replace(/\s+/g, " ")
+    .replace(/\s+([,.!?;:])/g, "$1")
+    .trim();
+
+  if (!cleaned) return;
+
+  twiml.say(
+    {
+      ...SAY_OPTIONS
+    },
+    cleaned
+  );
+}
+
 function playbackWithStarTwiml(text, options = {}) {
   const cleaned = String(text || "")
     .replace(/\s+/g, " ")
@@ -817,21 +833,6 @@ function voicemailPromptTwiml() {
     recordingStatusCallbackEvent: ["completed"]
   });
   say(twiml, "I did not receive a recording.");
-  twiml.redirect({ method: "POST" }, "/after-prompt");
-  return twiml;
-}
-
-function playbackWithStarTwiml(text, options = {}) {
-  const twiml = new VoiceResponse();
-  const gather = twiml.gather({
-    input: "dtmf",
-    action: "/during-playback",
-    method: "POST",
-    timeout: 1,
-    numDigits: 1,
-    finishOnKey: ""
-  });
-  say(gather, text, options);
   twiml.redirect({ method: "POST" }, "/after-prompt");
   return twiml;
 }
@@ -2610,8 +2611,8 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
       return twiml;
     }
 
-    const playbackTwiml = playbackWithStarTwiml(speech);
-    return res.type("text/xml").send(playbackTwiml);
+    return playbackWithStarTwiml(speech, {
+      rate: playback.speechRate || "100%"
     });
   }
 
