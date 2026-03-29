@@ -136,7 +136,7 @@ function gatherOptions(action, timeout = 8, numDigits = 1) {
   };
 }
 
-function escapeForSsml(text) {
+function xmlEscape(text) {
   return String(text || "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
@@ -145,23 +145,28 @@ function escapeForSsml(text) {
     .replace(/'/g, "&apos;");
 }
 
-function say(twiml, text, options = {}) {
+function playbackWithStarTwiml(text, options = {}) {
   const cleaned = String(text || "")
     .replace(/\s+/g, " ")
     .replace(/\s+([,.!?;:])/g, "$1")
     .trim();
 
-  if (!cleaned) return;
-
   const rate = options.rate || "100%";
-  const ssmlText = `<prosody rate="${rate}">${escapeForSsml(cleaned)}</prosody>`;
+  const voice = xmlEscape(SAY_OPTIONS.voice);
+  const language = xmlEscape(SAY_OPTIONS.language);
+  const body = xmlEscape(cleaned);
 
-  twiml.say(
-    {
-      ...SAY_OPTIONS
-    },
-    ssmlText
-  );
+  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Gather input="dtmf" action="/during-playback" method="POST" timeout="1" numDigits="1" finishOnKey="">
+    <Say voice="${voice}" language="${language}">
+      <prosody rate="${rate}">${body}</prosody>
+    </Say>
+  </Gather>
+  <Redirect method="POST">/after-prompt</Redirect>
+</Response>`;
+
+  return twiml;
 }
 
 function getCallKey(req) {
@@ -2605,8 +2610,8 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
       return twiml;
     }
 
-    return playbackWithStarTwiml(speech, {
-      rate: playback.speechRate || "100%"
+    const playbackTwiml = playbackWithStarTwiml(speech);
+    return res.type("text/xml").send(playbackTwiml);
     });
   }
 
@@ -2775,7 +2780,7 @@ app.post("/border-submenu", async (req, res) => {
     });
 
     const playbackTwiml = playbackWithStarTwiml(speech);
-    return res.type("text/xml").send(playbackTwiml.toString());
+    return res.type("text/xml").send(playbackTwiml);
   } catch (error) {
     console.error(error);
     say(twiml, "Sorry, I could not retrieve border information.");
