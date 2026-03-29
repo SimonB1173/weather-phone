@@ -153,28 +153,10 @@ function say(twiml, text, options = {}) {
 
   if (!cleaned) return;
 
-  const {
-    rate = "100%",
-    pitch = "default",
-    volume = "default"
-  } = options;
+  const { rate = "100%" } = options;
+  const ssml = `<prosody rate="${rate}">${escapeForSsml(cleaned)}</prosody>`;
 
-  const parts = cleaned
-    .split(/(?<=[.!?])\s+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-
-  for (const part of parts) {
-    const ssml = `
-      <speak>
-        <prosody rate="${rate}" pitch="${pitch}" volume="${volume}">
-          ${escapeForSsml(part)}
-        </prosody>
-      </speak>
-    `.replace(/\s+/g, " ").trim();
-
-    twiml.say(SAY_OPTIONS, ssml);
-  }
+  twiml.say(SAY_OPTIONS, ssml);
 }
 
 function getCallKey(req) {
