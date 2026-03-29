@@ -136,7 +136,7 @@ function gatherOptions(action, timeout = 8, numDigits = 1) {
   };
 }
 
-function escapeForSsml(text) {
+function xmlEscape(text) {
   return String(text || "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
@@ -153,10 +153,13 @@ function say(twiml, text, options = {}) {
 
   if (!cleaned) return;
 
-  const { rate = "100%" } = options;
-  const ssml = `<prosody rate="${rate}">${escapeForSsml(cleaned)}</prosody>`;
+  const rate = options.rate || "100%";
+  const voice = SAY_OPTIONS.voice;
+  const language = SAY_OPTIONS.language;
 
-  twiml.say(SAY_OPTIONS, ssml);
+  twiml.append(
+    `<Say voice="${xmlEscape(voice)}" language="${xmlEscape(language)}"><prosody rate="${xmlEscape(rate)}">${xmlEscape(cleaned)}</prosody></Say>`
+  );
 }
 
 function getCallKey(req) {
