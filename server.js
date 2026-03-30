@@ -37,6 +37,7 @@ const ALERT_CACHE_MS = 10 * 60 * 1000;
 const EC_CITYPAGE_CACHE_MS = 20 * 60 * 1000;
 const EXCHANGE_CACHE_MS = 10 * 60 * 1000;
 const BORDER_CACHE_MS = 30 * 1000;
+const LIVE_TRAFFIC_CACHE_MS = 30 * 1000;
 
 const EC_API_TIMEOUT_MS = 5000;
 const EC_ALERT_TIMEOUT_MS = 5000;
@@ -2020,79 +2021,87 @@ async function fetchLiveTrafficRoute(origin, destination) {
     throw new Error("GOOGLE_MAPS_API_KEY is missing");
   }
 
-  const response = await axios.post(
-    "https://routes.googleapis.com/directions/v2:computeRoutes",
-    {
-      origin: {
-        location: {
-          latLng: origin
-        }
+  try {
+    const response = await axios.post(
+      "https://routes.googleapis.com/directions/v2:computeRoutes",
+      {
+        origin: {
+          location: {
+            latLng: origin
+          }
+        },
+        destination: {
+          location: {
+            latLng: destination
+          }
+        },
+        travelMode: "DRIVE",
+        routingPreference: "TRAFFIC_AWARE_OPTIMAL",
+        extraComputations: ["TRAFFIC_ON_POLYLINE"]
       },
-      destination: {
-        location: {
-          latLng: destination
+      {
+        timeout: BORDER_API_TIMEOUT_MS,
+        headers: {
+          "Content-Type": "application/json",
+          "X-Goog-Api-Key": process.env.GOOGLE_MAPS_API_KEY,
+          "X-Goog-FieldMask":
+            "routes.duration,routes.staticDuration,routes.polyline.encodedPolyline,routes.travelAdvisory.speedReadingIntervals"
         }
-      },
-      travelMode: "DRIVE",
-      routingPreference: "TRAFFIC_AWARE_OPTIMAL",
-      extraComputations: ["TRAFFIC_ON_POLYLINE"]
-    },
-    {
-      timeout: BORDER_API_TIMEOUT_MS,
-      headers: {
-        "Content-Type": "application/json",
-        "X-Goog-Api-Key": process.env.GOOGLE_MAPS_API_KEY,
-        "X-Goog-FieldMask":
-          "routes.duration,routes.staticDuration,routes.polyline.encodedPolyline,routes.travelAdvisory.speedReadingIntervals"
       }
+    );
+
+    const route = Array.isArray(response.data?.routes) ? response.data.routes[0] : null;
+    if (!route) {
+      throw new Error("No live traffic route returned from Google Routes API");
     }
-  );
 
-  const route = Array.isArray(response.data?.routes) ? response.data.routes[0] : null;
-  if (!route) {
-    throw new Error("No live traffic route returned from Google Routes API");
+    const durationText = String(route.duration || "0s");
+    const staticDurationText = String(route.staticDuration || durationText);
+
+    const durationSeconds = Number(durationText.replace("s", "")) || 0;
+    const staticDurationSeconds = Number(staticDurationText.replace("s", "")) || durationSeconds;
+
+    const extraMinutes = Math.max(0, Math.round((durationSeconds - staticDurationSeconds) / 60));
+
+    console.log("Google live traffic result:", {
+      origin,
+      destination,
+      extraMinutes,
+      trafficLevel: getTrafficLevel(extraMinutes)
+    });
+
+    return {
+      extraMinutes,
+      trafficLevel: getTrafficLevel(extraMinutes)
+    };
+  } catch (error) {
+    console.error("Google live traffic failed:", error.message);
+    if (error.response) {
+      console.error("Google live traffic status:", error.response.status);
+      console.error("Google live traffic data:", JSON.stringify(error.response.data));
+    }
+    throw error;
   }
-
-  const durationText = String(route.duration || "0s");
-  const staticDurationText = String(route.staticDuration || durationText);
-
-  const durationSeconds = Number(durationText.replace("s", "")) || 0;
-  const staticDurationSeconds = Number(staticDurationText.replace("s", "")) || durationSeconds;
-
-  const extraMinutes = Math.max(0, Math.round((durationSeconds - staticDurationSeconds) / 60));
-
-  return {
-    extraMinutes,
-    trafficLevel: getTrafficLevel(extraMinutes),
-  };
-}
-
-async function fetchLiveTrafficIntoCanada() {
-  const traffic = await fetchLiveTrafficRoute(
-    BORDER_TRAFFIC_POINTS.intoCanada.origin,
-    BORDER_TRAFFIC_POINTS.intoCanada.destination
-  );
-
-  return {
-    direction: "live_into_canada",
-    locationSpeech: CHAMPLAIN_LACOLLE.spokenNameCanada,
-    source: "google-routes",
-    ...traffic
-  };
 }
 
 async function fetchLiveTrafficIntoUs() {
+  const cacheKey = "border:live_into_us:champlain_lacolle";
+  const cached = cacheGet(borderWaitCache, cacheKey, LIVE_TRAFFIC_CACHE_MS);
+  if (cached) return cached;
+
   const traffic = await fetchLiveTrafficRoute(
     BORDER_TRAFFIC_POINTS.intoUs.origin,
     BORDER_TRAFFIC_POINTS.intoUs.destination
   );
 
-  return {
+  const payload = {
     direction: "live_into_us",
     locationSpeech: CHAMPLAIN_LACOLLE.spokenNameUs,
     source: "google-routes",
     ...traffic
   };
+
+  return cacheSet(borderWaitCache, cacheKey, payload);
 }
 
 function pickPrimaryLane(lanes) {
