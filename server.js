@@ -2207,7 +2207,8 @@ async function fetchChamplainLacolleIntoUs() {
   const cached = cacheGet(borderWaitCache, cacheKey, BORDER_CACHE_MS);
   if (cached) return cached;
 
-  const portNumber = String(CHAMPLAIN_LACOLLE.cbpPortNumber || "").replace(/^0+/, "");
+  const rawPortNumber = String(CHAMPLAIN_LACOLLE.cbpPortNumber || "").trim();
+  const portNumber = rawPortNumber.slice(-6);
   const url = `https://bwt.cbp.gov/api/waittimes/${portNumber}`;
 
   const response = await axios.get(url, {
