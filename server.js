@@ -2263,13 +2263,15 @@ const BORDER_TRAFFIC_POINTS = {
 
 function buildBorderSpeech(result) {
   if (result.direction === "live_into_canada" || result.direction === "live_into_us") {
-    const parts = [
-      `Current traffic conditions for ${result.locationSpeech}.`,
-      `Traffic approaching the crossing is ${result.trafficLevel}.`
+  const minutes = Math.round(Number(result.extraMinutes || 0));
+
+  const parts = [
+    `Current traffic conditions for ${result.locationSpeech}.`,
+    `Traffic approaching the crossing is ${result.trafficLevel}.`
   ];
 
-  if (Number.isFinite(Number(result.extraMinutes)) && Number(result.extraMinutes) > 0) {
-    parts.push(`Current delay is about ${Math.round(Number(result.extraMinutes))} minutes.`);
+  if (Number.isFinite(minutes) && minutes > 0) {
+    parts.push(`Current delay is about ${minutes} ${minutes === 1 ? "minute" : "minutes"}.`);
   } else {
     parts.push("There is little or no delay approaching the crossing.");
   }
