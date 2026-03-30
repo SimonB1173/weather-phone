@@ -2405,7 +2405,7 @@ function buildBorderSpeech(result) {
   }
 
   const parts = [
-    `${result.source === "cbp-xml" ? "Official border wait time feed" : "Border wait time"} for ${result.locationSpeech}.`
+    `Border wait time for ${result.locationSpeech}.`,
     `Passenger wait time is ${result.passengerWait}.`
   ];
 
