@@ -2207,118 +2207,10 @@ async function fetchChamplainLacolleIntoUs() {
   const cached = cacheGet(borderWaitCache, cacheKey, BORDER_CACHE_MS);
   if (cached) return cached;
 
-  try {
-    const response = await axios.get("https://bwt.cbp.gov/xml/bwt.xml", {
-      timeout: BORDER_API_TIMEOUT_MS,
-      headers: {
-        "User-Agent": "weather-and-info-line/1.0",
-        Accept: "application/xml,text/xml;q=0.9,*/*;q=0.8"
-      }
-    });
+  const portNumber = String(CHAMPLAIN_LACOLLE.cbpPortNumber || "").replace(/^0+/, "");
+  const url = `https://bwt.cbp.gov/api/waittimes/${portNumber}`;
 
-    const xml = String(response.data || "");
-    console.log("CBP XML first 1500 chars:", xml.slice(0, 1500));
-
-    const ports = xml.match(/<port\b[\s\S]*?<\/port>/gi) || [];
-    console.log("CBP XML port count:", ports.length);
-
-    if (ports.length) {
-      const normalize = (v) =>
-        String(v || "")
-          .trim()
-          .toLowerCase()
-          .replace(/[^a-z0-9]/g, "");
-
-      const wantedPortNumber = normalize(CHAMPLAIN_LACOLLE.cbpPortNumber).replace(/^0+/, "");
-      const wantedPortName = normalize(CHAMPLAIN_LACOLLE.cbpPortName);
-
-      const candidates = ports.map((portXml) => {
-        const portNumber = firstXmlMatch(portXml, "port_number");
-        const portName = firstXmlMatch(portXml, "port_name");
-        const date = firstXmlMatch(portXml, "date");
-
-        const passengerBlockMatch = String(portXml).match(
-          /<passenger_vehicle_lanes\b[\s\S]*?<\/passenger_vehicle_lanes>/i
-        );
-        const passengerBlock = passengerBlockMatch ? passengerBlockMatch[0] : "";
-
-        const passenger = pickPrimaryLane({
-          standard_lanes: passengerBlock
-            ? {
-                update_time: firstXmlMatch(passengerBlock.match(/<standard_lanes\b[\s\S]*?<\/standard_lanes>/i)?.[0] || "", "update_time"),
-                operational_status: firstXmlMatch(passengerBlock.match(/<standard_lanes\b[\s\S]*?<\/standard_lanes>/i)?.[0] || "", "operational_status"),
-                delay_minutes: firstXmlMatch(passengerBlock.match(/<standard_lanes\b[\s\S]*?<\/standard_lanes>/i)?.[0] || "", "delay_minutes"),
-                lanes_open: firstXmlMatch(passengerBlock.match(/<standard_lanes\b[\s\S]*?<\/standard_lanes>/i)?.[0] || "", "lanes_open")
-              }
-            : null,
-          NEXUS_SENTRI_lanes: passengerBlock
-            ? {
-                update_time: firstXmlMatch(passengerBlock.match(/<NEXUS_SENTRI_lanes\b[\s\S]*?<\/NEXUS_SENTRI_lanes>/i)?.[0] || "", "update_time"),
-                operational_status: firstXmlMatch(passengerBlock.match(/<NEXUS_SENTRI_lanes\b[\s\S]*?<\/NEXUS_SENTRI_lanes>/i)?.[0] || "", "operational_status"),
-                delay_minutes: firstXmlMatch(passengerBlock.match(/<NEXUS_SENTRI_lanes\b[\s\S]*?<\/NEXUS_SENTRI_lanes>/i)?.[0] || "", "delay_minutes"),
-                lanes_open: firstXmlMatch(passengerBlock.match(/<NEXUS_SENTRI_lanes\b[\s\S]*?<\/NEXUS_SENTRI_lanes>/i)?.[0] || "", "lanes_open")
-              }
-            : null,
-          FAST_lanes: passengerBlock
-            ? {
-                update_time: firstXmlMatch(passengerBlock.match(/<FAST_lanes\b[\s\S]*?<\/FAST_lanes>/i)?.[0] || "", "update_time"),
-                operational_status: firstXmlMatch(passengerBlock.match(/<FAST_lanes\b[\s\S]*?<\/FAST_lanes>/i)?.[0] || "", "operational_status"),
-                delay_minutes: firstXmlMatch(passengerBlock.match(/<FAST_lanes\b[\s\S]*?<\/FAST_lanes>/i)?.[0] || "", "delay_minutes"),
-                lanes_open: firstXmlMatch(passengerBlock.match(/<FAST_lanes\b[\s\S]*?<\/FAST_lanes>/i)?.[0] || "", "lanes_open")
-              }
-            : null,
-          ready_lanes: passengerBlock
-            ? {
-                update_time: firstXmlMatch(passengerBlock.match(/<ready_lanes\b[\s\S]*?<\/ready_lanes>/i)?.[0] || "", "update_time"),
-                operational_status: firstXmlMatch(passengerBlock.match(/<ready_lanes\b[\s\S]*?<\/ready_lanes>/i)?.[0] || "", "operational_status"),
-                delay_minutes: firstXmlMatch(passengerBlock.match(/<ready_lanes\b[\s\S]*?<\/ready_lanes>/i)?.[0] || "", "delay_minutes"),
-                lanes_open: firstXmlMatch(passengerBlock.match(/<ready_lanes\b[\s\S]*?<\/ready_lanes>/i)?.[0] || "", "lanes_open")
-              }
-            : null
-        });
-
-        return {
-          portNumber,
-          portName,
-          date,
-          passenger
-        };
-      });
-
-      const match =
-        candidates.find((x) => normalize(x.portNumber).replace(/^0+/, "") === wantedPortNumber) ||
-        candidates.find((x) => normalize(x.portName) === wantedPortName);
-
-      if (match) {
-        console.log("CBP XML port match:", {
-          portNumber: match.portNumber,
-          portName: match.portName,
-          passengerWait: match.passenger.wait,
-          updatedAt: match.passenger.updatedAt,
-          passengerLanesOpen: match.passenger.lanesOpen
-        });
-
-        const payload = {
-          direction: "into_us",
-          locationSpeech: CHAMPLAIN_LACOLLE.spokenNameUs,
-          updatedAt: match.passenger.updatedAt || match.date || "",
-          updatedAtSpoken: match.passenger.updatedAt || match.date || "",
-          passengerWait: match.passenger.wait || "currently unavailable",
-          passengerLanesOpen: match.passenger.lanesOpen || "",
-          source: "cbp-xml"
-        };
-
-        return cacheSet(borderWaitCache, cacheKey, payload);
-      }
-    }
-
-    console.log("CBP XML did not produce a usable Champlain match. Falling back to bulk API.");
-  } catch (error) {
-    console.error("CBP XML fetch failed:", error.message);
-    console.log("Falling back to bulk API.");
-  }
-
-  const response = await axios.get("https://bwt.cbp.gov/api/waittimes", {
+  const response = await axios.get(url, {
     timeout: BORDER_API_TIMEOUT_MS,
     headers: {
       "User-Agent": "weather-and-info-line/1.0",
@@ -2326,28 +2218,15 @@ async function fetchChamplainLacolleIntoUs() {
     }
   });
 
-  const data = Array.isArray(response.data) ? response.data : [];
+  const port = response.data || {};
 
-  const normalize = (v) =>
-    String(v || "")
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9]/g, "");
-
-  const targetPortNumber = normalize(CHAMPLAIN_LACOLLE.cbpPortNumber);
-  const targetPortName = normalize(CHAMPLAIN_LACOLLE.cbpPortName);
-
-  const port =
-    data.find((item) => normalize(item?.port_number) === targetPortNumber) ||
-    data.find((item) => normalize(item?.port_name) === targetPortName);
-
-  if (!port) {
-    throw new Error("Champlain/Lacolle U.S.-bound wait time not found in CBP bulk API");
+  if (!port || !port.port_number) {
+    throw new Error("Champlain/Lacolle U.S.-bound wait time not found in CBP port API");
   }
 
   const passenger = pickPrimaryLane(port.passenger_vehicle_lanes);
 
-  console.log("CBP bulk fallback used:", {
+  console.log("CBP direct port API used:", {
     port_number: port?.port_number,
     port_name: port?.port_name,
     passengerWait: passenger.wait,
@@ -2358,11 +2237,11 @@ async function fetchChamplainLacolleIntoUs() {
   const payload = {
     direction: "into_us",
     locationSpeech: CHAMPLAIN_LACOLLE.spokenNameUs,
-    updatedAt: passenger.updatedAt || "",
-    updatedAtSpoken: passenger.updatedAt || "",
+    updatedAt: passenger.updatedAt || String(port.time || "").trim(),
+    updatedAtSpoken: passenger.updatedAt || String(port.time || "").trim(),
     passengerWait: passenger.wait || "currently unavailable",
     passengerLanesOpen: passenger.lanesOpen || "",
-    source: "cbp-bulk-fallback"
+    source: "cbp-port-api"
   };
 
   return cacheSet(borderWaitCache, cacheKey, payload);
