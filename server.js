@@ -172,15 +172,12 @@ function playbackWithStarTwiml(text, options = {}) {
   const language = xmlEscape(SAY_OPTIONS.language);
   const body = xmlEscape(cleaned);
 
-  const sayBlock =
-    rate !== "100%"
-      ? `<Say voice="${voice}" language="${language}"><prosody rate="${rate}">${body}</prosody></Say>`
-      : `<Say voice="${voice}" language="${language}">${body}</Say>`;
-
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Gather input="dtmf" action="/during-playback" method="POST" timeout="1" numDigits="1" finishOnKey="">
-    ${sayBlock}
+    <Say voice="${voice}" language="${language}">
+      <prosody rate="${rate}">${body}</prosody>
+    </Say>
   </Gather>
   <Redirect method="POST">/after-prompt</Redirect>
 </Response>`;
@@ -2594,8 +2591,7 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
         return twiml;
       }
       return playbackWithStarTwiml(playback.speech, {
-        rate: playback.speechRate || "100%",
-        useBreaks: playback.useBreaks === true
+        rate: playback.speechRate || "100%"
       });
     }
 
@@ -2615,9 +2611,8 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
       return twiml;
     }
 
-    return playbackWithStarTwiml(playback.speech, {
-      rate: playback.speechRate || "100%",
-      useBreaks: playback.useBreaks === true
+    return playbackWithStarTwiml(speech, {
+      rate: playback.speechRate || "100%"
     });
   }
 
@@ -3016,7 +3011,7 @@ app.post("/forecast-day", async (req, res) => {
     const selected = parseForecastDayChoice(req);
 
     if (selected === "all") {
-      setLastPlayback(req, { type: "all7", speechRate: "94%", useBreaks: true });
+      setLastPlayback(req, { type: "all7", speechRate: "94%" });
       const playbackTwiml = await buildStateTwiml(req, "playback", { push: false });
       return res.type("text/xml").send(
         typeof playbackTwiml === "string" ? playbackTwiml : playbackTwiml.toString()
