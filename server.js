@@ -170,15 +170,18 @@ function playbackWithStarTwiml(text, options = {}) {
   const rate = options.rate || "100%";
   const voice = xmlEscape(SAY_OPTIONS.voice);
   const language = xmlEscape(SAY_OPTIONS.language);
+  const useBreaks = options.useBreaks === true;
 
-  const body = cleaned
-    .split(/([.:]\s+)/)
-    .map((part) => {
-      if (/^\.\s+$/.test(part)) return '.<break time="220ms"/> ';
-      if (/^:\s+$/.test(part)) return ':<break time="180ms"/> ';
-      return xmlEscape(part);
-    })
-    .join("");
+  const body = useBreaks
+    ? cleaned
+        .split(/([.:]\s+)/)
+        .map((part) => {
+          if (/^\.\s+$/.test(part)) return '.<break time="220ms"/> ';
+          if (/^:\s+$/.test(part)) return ':<break time="180ms"/> ';
+          return xmlEscape(part);
+        })
+        .join("")
+    : xmlEscape(cleaned);
 
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -2599,7 +2602,8 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
         return twiml;
       }
       return playbackWithStarTwiml(playback.speech, {
-        rate: playback.speechRate || "100%"
+        rate: playback.speechRate || "100%",
+        useBreaks: playback.useBreaks === true
       });
     }
 
@@ -2619,8 +2623,9 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
       return twiml;
     }
 
-    return playbackWithStarTwiml(speech, {
-      rate: playback.speechRate || "100%"
+    return playbackWithStarTwiml(playback.speech, {
+      rate: playback.speechRate || "100%",
+      useBreaks: playback.useBreaks === true
     });
   }
 
@@ -3019,7 +3024,7 @@ app.post("/forecast-day", async (req, res) => {
     const selected = parseForecastDayChoice(req);
 
     if (selected === "all") {
-      setLastPlayback(req, { type: "all7", speechRate: "94%" });
+      setLastPlayback(req, { type: "all7", speechRate: "94%", useBreaks: true });
       const playbackTwiml = await buildStateTwiml(req, "playback", { push: false });
       return res.type("text/xml").send(
         typeof playbackTwiml === "string" ? playbackTwiml : playbackTwiml.toString()
