@@ -2209,7 +2209,7 @@ async function fetchChamplainLacolleIntoUs() {
 
   const rawPortNumber = String(CHAMPLAIN_LACOLLE.cbpPortNumber || "").trim();
   const portNumber = rawPortNumber.slice(-6);
-  const url = `https://bwt.cbp.gov/api/waittimes/${portNumber}`;
+  const url = `https://bwt.cbp.gov/api/bwtpublicmod/${portNumber}`;
 
   const response = await axios.get(url, {
     timeout: BORDER_API_TIMEOUT_MS,
