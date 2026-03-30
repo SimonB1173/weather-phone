@@ -2279,10 +2279,13 @@ function buildBorderSpeech(result) {
   return parts.join(" ");
 }
 
-  const parts = [
-    `Border wait time for ${result.locationSpeech}.`,
-    `Passenger wait time is ${result.passengerWait}.`
-  ];
+  const parts = [`Border wait time for ${result.locationSpeech}.`];
+
+  if (String(result.passengerWait || "").toLowerCase() === "update pending") {
+    parts.push("Official wait time is temporarily unavailable.");
+  } else {
+    parts.push(`Passenger wait time is ${result.passengerWait}.`);
+  }
 
   const passengerTraffic = trafficLevelFromWait(result.passengerWait);
   if (passengerTraffic) {
