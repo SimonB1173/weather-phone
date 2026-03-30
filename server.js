@@ -170,18 +170,7 @@ function playbackWithStarTwiml(text, options = {}) {
   const rate = options.rate || "100%";
   const voice = xmlEscape(SAY_OPTIONS.voice);
   const language = xmlEscape(SAY_OPTIONS.language);
-  const useBreaks = options.useBreaks === true;
-
-  const body = useBreaks
-    ? cleaned
-        .split(/([.:]\s+)/)
-        .map((part) => {
-          if (/^\.\s+$/.test(part)) return '.<break time="220ms"/> ';
-          if (/^:\s+$/.test(part)) return ':<break time="180ms"/> ';
-          return xmlEscape(part);
-        })
-        .join("")
-    : xmlEscape(cleaned);
+  const body = xmlEscape(cleaned);
 
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
