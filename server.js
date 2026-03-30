@@ -2015,12 +2015,6 @@ function getTrafficLevel(extraMinutes) {
   return "heavy";
 }
 
-function estimateCarsFromDelay(extraMinutes) {
-  const minutes = Number(extraMinutes || 0);
-  if (!Number.isFinite(minutes) || minutes <= 0) return 0;
-  return Math.max(0, Math.round(minutes * 8));
-}
-
 async function fetchLiveTrafficRoute(origin, destination) {
   if (!process.env.GOOGLE_MAPS_API_KEY) {
     throw new Error("GOOGLE_MAPS_API_KEY is missing");
@@ -2070,7 +2064,6 @@ async function fetchLiveTrafficRoute(origin, destination) {
   return {
     extraMinutes,
     trafficLevel: getTrafficLevel(extraMinutes),
-    estimatedCars: estimateCarsFromDelay(extraMinutes)
   };
 }
 
@@ -2214,8 +2207,9 @@ async function fetchChamplainLacolleIntoUs() {
   const response = await axios.get(url, {
     timeout: BORDER_API_TIMEOUT_MS,
     headers: {
-      "User-Agent": "weather-and-info-line/1.0",
-      Accept: "application/json"
+      "User-Agent": "Mozilla/5.0",
+      "Accept": "application/json, text/plain, */*",
+      "Referer": "https://bwt.cbp.gov/details/04071201/POV"
     }
   });
 
@@ -2270,19 +2264,18 @@ const BORDER_TRAFFIC_POINTS = {
 function buildBorderSpeech(result) {
   if (result.direction === "live_into_canada" || result.direction === "live_into_us") {
     const parts = [
-      `Current live traffic conditions for ${result.locationSpeech}.`,
+      `Current traffic conditions for ${result.locationSpeech}.`,
       `Traffic approaching the crossing is ${result.trafficLevel}.`
-    ];
+  ];
 
-    if (Number.isFinite(Number(result.estimatedCars)) && Number(result.estimatedCars) > 0) {
-      parts.push(`Estimated traffic approaching the crossing is about ${result.estimatedCars} vehicles based on current route delay.`);
-    } else {
-      parts.push("There does not appear to be a significant queue approaching the crossing.");
-    }
-
-    parts.push("Information is based on live traffic conditions near the crossing, updated in near real time.");
-    return parts.join(" ");
+  if (Number.isFinite(Number(result.extraMinutes)) && Number(result.extraMinutes) > 0) {
+    parts.push(`Current delay is about ${Math.round(Number(result.extraMinutes))} minutes.`);
+  } else {
+    parts.push("There is little or no delay approaching the crossing.");
   }
+
+  return parts.join(" ");
+}
 
   const parts = [
     `Border wait time for ${result.locationSpeech}.`,
