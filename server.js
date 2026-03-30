@@ -2084,6 +2084,26 @@ async function fetchLiveTrafficRoute(origin, destination) {
   }
 }
 
+async function fetchLiveTrafficIntoCanada() {
+  const cacheKey = "border:live_into_canada:champlain_lacolle";
+  const cached = cacheGet(borderWaitCache, cacheKey, LIVE_TRAFFIC_CACHE_MS);
+  if (cached) return cached;
+
+  const traffic = await fetchLiveTrafficRoute(
+    BORDER_TRAFFIC_POINTS.intoCanada.origin,
+    BORDER_TRAFFIC_POINTS.intoCanada.destination
+  );
+
+  const payload = {
+    direction: "live_into_canada",
+    locationSpeech: CHAMPLAIN_LACOLLE.spokenNameCanada,
+    source: "google-routes",
+    ...traffic
+  };
+
+  return cacheSet(borderWaitCache, cacheKey, payload);
+}
+
 async function fetchLiveTrafficIntoUs() {
   const cacheKey = "border:live_into_us:champlain_lacolle";
   const cached = cacheGet(borderWaitCache, cacheKey, LIVE_TRAFFIC_CACHE_MS);
