@@ -20,6 +20,7 @@ const inFlightForecasts = new Map();
 const canadaAlertCache = new Map();
 const ecCityPageCache = new Map();
 const exchangeRateCache = new Map();
+const borderWaitCache = new Map();
 
 const temporaryLocationsByCall = new Map();
 const pendingLocationChoiceByCall = new Map();
@@ -28,12 +29,19 @@ const menuStateByCall = new Map();
 const menuHistoryByCall = new Map();
 const unitPreferenceByCall = new Map();
 const exchangeSelectionByCall = new Map();
+const borderDirectionByCall = new Map();
 
-const FORECAST_CACHE_MS = 10 * 60 * 1000;
-const STALE_FORECAST_MS = 60 * 60 * 1000;
+const FORECAST_CACHE_MS = 15 * 60 * 1000;
+const STALE_FORECAST_MS = 2 * 60 * 1000;
 const ALERT_CACHE_MS = 10 * 60 * 1000;
-const EC_CITYPAGE_CACHE_MS = 10 * 60 * 1000;
+const EC_CITYPAGE_CACHE_MS = 20 * 60 * 1000;
 const EXCHANGE_CACHE_MS = 10 * 60 * 1000;
+const BORDER_CACHE_MS = 30 * 1000;
+
+const EC_API_TIMEOUT_MS = 5000;
+const EC_ALERT_TIMEOUT_MS = 5000;
+const OPEN_METEO_TIMEOUT_MS = 15000;
+const BORDER_API_TIMEOUT_MS = 15000;
 
 const VOICEMAILS_FILE = path.join(__dirname, "voicemails.json");
 
@@ -107,6 +115,14 @@ const US_LOCATIONS = {
   "3": PRESET_LOCATIONS["5"]
 };
 
+const CHAMPLAIN_LACOLLE = {
+  cbsaOfficeName: "St-Bernard-de-Lacolle",
+  cbpPortNumber: "04071201",
+  cbpPortName: "Champlain",
+  spokenNameCanada: "Champlain border, entering Canada",
+  spokenNameUs: "Champlain border, entering the United States"
+};
+
 function gatherOptions(action, timeout = 8, numDigits = 1) {
   return {
     input: "dtmf",
@@ -118,6 +134,15 @@ function gatherOptions(action, timeout = 8, numDigits = 1) {
   };
 }
 
+function xmlEscape(text) {
+  return String(text || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
 function say(twiml, text) {
   const cleaned = String(text || "")
     .replace(/\s+/g, " ")
@@ -126,14 +151,44 @@ function say(twiml, text) {
 
   if (!cleaned) return;
 
-  const parts = cleaned
-    .split(/(?<=[.!?])\s+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
+  twiml.say(
+    {
+      ...SAY_OPTIONS
+    },
+    cleaned
+  );
+}
 
-  for (const part of parts) {
-    twiml.say(SAY_OPTIONS, part);
-  }
+function playbackWithStarTwiml(text, options = {}) {
+  const cleaned = String(text || "")
+    .replace(/\s+/g, " ")
+    .replace(/\s+([,.!?;:])/g, "$1")
+    .trim();
+
+  const rate = options.rate || "100%";
+  const voice = xmlEscape(SAY_OPTIONS.voice);
+  const language = xmlEscape(SAY_OPTIONS.language);
+
+  const body = cleaned
+    .split(/([.:]\s+)/)
+    .map((part) => {
+      if (/^\.\s+$/.test(part)) return '.<break time="180ms"/> ';
+      if (/^:\s+$/.test(part)) return ':<break time="140ms"/> ';
+      return xmlEscape(part);
+    })
+    .join("");
+
+  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Gather input="dtmf" action="/during-playback" method="POST" timeout="1" numDigits="1" finishOnKey="">
+    <Say voice="${voice}" language="${language}">
+      <prosody rate="${rate}">${body}</prosody>
+    </Say>
+  </Gather>
+  <Redirect method="POST">/after-prompt</Redirect>
+</Response>`;
+
+  return twiml;
 }
 
 function getCallKey(req) {
@@ -203,6 +258,14 @@ function getMenuHistory(req) {
   return menuHistoryByCall.get(getCallKey(req)) || [];
 }
 
+function getBorderDirection(req) {
+  return borderDirectionByCall.get(getCallKey(req)) || null;
+}
+
+function setBorderDirection(req, direction) {
+  borderDirectionByCall.set(getCallKey(req), direction);
+}
+
 function shouldTrackHistoryState(state) {
   return [
     "root-menu",
@@ -261,6 +324,7 @@ function clearCallState(req) {
   menuHistoryByCall.delete(key);
   unitPreferenceByCall.delete(key);
   exchangeSelectionByCall.delete(key);
+  borderDirectionByCall.delete(key);
 }
 
 function appendVoicemailRecord(record) {
@@ -280,7 +344,7 @@ function updateVoicemailRecord(callSid, updates) {
     }
   }
   if (!found) current.push({ callSid, ...updates });
-  saveJsonFile(VOICEMAILS_FILE, current);
+  saveJsonFile(filePath = VOICEMAILS_FILE, value = current);
 }
 
 function normalizePlaceName(name) {
@@ -552,6 +616,20 @@ function parseExchangeChoice(req) {
   return null;
 }
 
+function parseBorderDirectionChoice(req) {
+  const digit = getDigits(req);
+  if (digit === "1") return "canada";
+  if (digit === "2") return "us";
+  return "";
+}
+
+function parseBorderTypeChoice(req) {
+  const digit = getDigits(req);
+  if (digit === "1") return "official";
+  if (digit === "2") return "live";
+  return "";
+}
+
 function parseAmountDigits(req) {
   return String(req.body.Digits || "").replace(/[^\d]/g, "").trim();
 }
@@ -613,7 +691,10 @@ function exchangeAsOfTime(timezone = "America/Toronto") {
 
 function buildRootMenuInto(twiml) {
   const gather = twiml.gather(gatherOptions("/root-menu", 8, 1));
-  say(gather, "Welcome to Weather and Info Line. Press 1 for weather. Press 2 for exchange rate.");
+  say(
+    gather,
+    "Welcome to Weather and Info Line. Press 1 for weather. Press 2 for exchange rate. Press 4 for border wait time."
+  );
   twiml.redirect({ method: "POST" }, "/root-menu-prompt");
 }
 
@@ -621,6 +702,33 @@ function buildMainMenuInto(twiml, activeLocationName) {
   const gather = twiml.gather(gatherOptions("/menu", 8, 1));
   say(gather, `${activeLocationName}. Press 1 for the forecast menu. Press 2 for hourly forecast. Press 3 for current weather. Press star for the previous menu.`);
   twiml.redirect({ method: "POST" }, "/main-menu");
+}
+
+function buildBorderMenuInto(twiml) {
+  const gather = twiml.gather(gatherOptions("/border-menu", 8, 1));
+  say(
+    gather,
+    "Champlain border wait time. Press 1 for entering Canada. Press 2 for entering the United States. Press star for the previous menu."
+  );
+  twiml.redirect({ method: "POST" }, "/border-menu-prompt");
+}
+
+function buildBorderSubmenuInto(twiml, direction) {
+  const gather = twiml.gather(gatherOptions("/border-submenu", 8, 1));
+
+  if (direction === "canada") {
+    say(
+      gather,
+      "Entering Canada. Press 1 for official border wait time. Press 2 for live traffic. Press star for the previous menu."
+    );
+  } else {
+    say(
+      gather,
+      "Entering the United States. Press 1 for official border wait time. Press 2 for live traffic. Press star for the previous menu."
+    );
+  }
+
+  twiml.redirect({ method: "POST" }, "/border-submenu-prompt");
 }
 
 function rootMenuTwiml() {
@@ -661,6 +769,12 @@ function exchangeMenuTwiml() {
   return twiml;
 }
 
+function borderMenuTwiml() {
+  const twiml = new VoiceResponse();
+  buildBorderMenuInto(twiml);
+  return twiml;
+}
+
 function exchangeAmountPromptTwiml(req, selection) {
   const twiml = new VoiceResponse();
 
@@ -698,7 +812,7 @@ function afterActionTwiml(req) {
 
   const playback = getLastPlayback(req);
 
-  if (playback?.type === "exchange") {
+  if (playback?.type === "exchange" || playback?.type === "border") {
     say(gather, "Press star to go back. Press pound to repeat. Press 5 for the main menu.");
   } else {
     const unit = getUnitPreference(req);
@@ -725,21 +839,6 @@ function voicemailPromptTwiml() {
     recordingStatusCallbackEvent: ["completed"]
   });
   say(twiml, "I did not receive a recording.");
-  twiml.redirect({ method: "POST" }, "/after-prompt");
-  return twiml;
-}
-
-function playbackWithStarTwiml(text) {
-  const twiml = new VoiceResponse();
-  const gather = twiml.gather({
-    input: "dtmf",
-    action: "/during-playback",
-    method: "POST",
-    timeout: 1,
-    numDigits: 1,
-    finishOnKey: ""
-  });
-  say(gather, text);
   twiml.redirect({ method: "POST" }, "/after-prompt");
   return twiml;
 }
@@ -954,7 +1053,7 @@ async function fetchCanadianAlert(location) {
 
   try {
     const response = await axios.get(location.alertFeedUrl, {
-      timeout: 8000,
+      timeout: EC_ALERT_TIMEOUT_MS,
       headers: { "User-Agent": "weather-line-canada/1.0" }
     });
     const xml = String(response.data || "");
@@ -1068,14 +1167,16 @@ function haversineKm(lat1, lon1, lat2, lon2) {
 }
 
 async function ecApiGet(url, params = {}) {
+  const started = Date.now();
   const response = await axios.get(url, {
     params,
-    timeout: 15000,
+    timeout: EC_API_TIMEOUT_MS,
     headers: {
       "User-Agent": "weather-line-ec/3.0",
       Accept: "application/json"
     }
   });
+  console.log("EC API OK", url, "ms=", Date.now() - started);
   return response.data;
 }
 
@@ -1105,14 +1206,18 @@ async function findNearestEcCityPagePoint(location) {
 
 async function fetchEnvironmentCanadaCityPage(location) {
   if (!location || location.country !== "CA") return null;
+
   const cacheKey = `ec-citypage:${location.ecCityPageId || cacheKeyForLocation(location)}`;
   const cached = cacheGet(ecCityPageCache, cacheKey, EC_CITYPAGE_CACHE_MS);
   if (cached) return cached;
 
   let pointId = location.ecCityPageId || "";
+
   if (!pointId) {
     const nearest = await findNearestEcCityPagePoint(location);
     pointId = nearest.id;
+    location.ecCityPageId = pointId;
+    console.log("Resolved EC city page point:", location.label, "=>", pointId, "distanceKm=", nearest.distanceKm);
   }
 
   const item = await ecApiGet(
@@ -1217,9 +1322,9 @@ function normalizeEcHourly(cityItem, timezone = "America/Toronto") {
     .filter((x) => x.time && Number.isFinite(Number(x.temperature_2m)));
 }
 
-function normalizeEcForecastPeriods(cityItem) {
-  const issueTime = cityItem?.properties?.forecastGroup?.timestamp?.en || "";
-  const periods = safeArray(cityItem?.properties?.forecastGroup?.forecasts);
+function normalizeEcForecastPeriods(ecItem) {
+  const issueTime = ecItem?.properties?.forecastGroup?.timestamp?.en || "";
+  const periods = safeArray(ecItem?.properties?.forecastGroup?.forecasts);
 
   return {
     issuedAt: issueTime,
@@ -1249,15 +1354,54 @@ function normalizeEcForecastPeriods(cityItem) {
   };
 }
 
+async function fetchOpenMeteoForecast(location) {
+  const params = {
+    latitude: Number(location.latitude),
+    longitude: Number(location.longitude),
+    apikey: process.env.OPEN_METEO_API_KEY,
+    current: ["temperature_2m", "apparent_temperature", "rain", "showers", "snowfall", "cloud_cover", "wind_speed_10m", "wind_gusts_10m", "wind_direction_10m", "weather_code"].join(","),
+    hourly: ["temperature_2m", "apparent_temperature", "precipitation_probability", "rain", "showers", "snowfall", "cloud_cover", "wind_speed_10m", "wind_gusts_10m", "wind_direction_10m", "uv_index", "weather_code"].join(","),
+    daily: ["weather_code", "temperature_2m_max", "temperature_2m_min", "precipitation_probability_max", "rain_sum", "showers_sum", "snowfall_sum", "wind_speed_10m_max", "wind_gusts_10m_max", "uv_index_max"].join(","),
+    timezone: location.timezone || "America/Toronto",
+    forecast_days: 7,
+    temperature_unit: "celsius",
+    wind_speed_unit: "kmh",
+    precipitation_unit: "mm"
+  };
+
+  const response = await axios.get("https://customer-api.open-meteo.com/v1/forecast", {
+    params,
+    timeout: OPEN_METEO_TIMEOUT_MS
+  });
+
+  const data = response.data;
+  if (!data || !data.current || !data.hourly || !data.daily) {
+    throw new Error("Open-Meteo returned incomplete forecast data");
+  }
+
+  if (!data.hourly.weather_code && data.hourly.weathercode) data.hourly.weather_code = data.hourly.weathercode;
+  if (!data.daily.weather_code && data.daily.weathercode) data.daily.weather_code = data.daily.weathercode;
+
+  data.source = "open-meteo";
+  return data;
+}
+
 async function fetchEnvironmentCanadaData(location) {
+  const started = Date.now();
+  console.log("EC fetch start:", location.label);
+
   const item = await fetchEnvironmentCanadaCityPage(location);
-  return {
+
+  const result = {
     source: "environment-canada-citypage",
     item,
     current: normalizeEcCurrent(item),
     hourly: normalizeEcHourly(item, location.timezone || "America/Toronto"),
     forecastPeriods: normalizeEcForecastPeriods(item)
   };
+
+  console.log("EC fetch done:", location.label, "ms=", Date.now() - started);
+  return result;
 }
 
 function ecCurrentWeatherSpeech(location, ecData, unit = "C") {
@@ -1455,9 +1599,6 @@ function buildEcDailyGroups(ecData, location) {
 
   const firstLower = String(periods[0]?.periodName || "").trim().toLowerCase();
 
-  // Key rule:
-  // After midnight and before early morning, if EC still leaves "Tonight"
-  // first, treat it as stale leftover data from the previous day and skip it.
   if (firstLower === "tonight" && nowLocal.hour < 6) {
     startIndex = 1;
   }
@@ -1470,8 +1611,6 @@ function buildEcDailyGroups(ecData, location) {
     const isNight = /night|tonight/.test(lower);
 
     if (isNight) {
-      // If the first usable period is Tonight before midnight,
-      // it should become button 1 for today.
       const lastGroup = groups[groups.length - 1];
 
       if (lastGroup && lastGroup.dateText === currentDate) {
@@ -1484,12 +1623,10 @@ function buildEcDailyGroups(ecData, location) {
         });
       }
 
-      // Move to next day only after attaching the night period
       currentDate = addDaysToDateText(currentDate, 1);
       continue;
     }
 
-    // Daytime period starts a new group for the current date
     groups.push({
       dateText: currentDate,
       label: relativeMenuDayLabel(currentDate, tz),
@@ -1773,6 +1910,399 @@ function buildExchangeTotalSpeech(selection, amount) {
   return `${formatMoneyAmount(amountNumber)} dollars equals ${formatMoneyAmount(total)} ${currencySpeech(selection.to)}.`;
 }
 
+function normalizeBorderWaitText(value) {
+  const text = String(value || "").trim();
+  if (!text || text === "--") return "currently unavailable";
+
+  const lower = text.toLowerCase();
+
+  if (lower.includes("no delay")) return "no delay";
+  if (lower.includes("update pending")) return "update pending";
+  if (lower.includes("lanes closed")) return "lanes closed";
+  if (lower.includes("closed")) return "closed";
+
+  const minutesMatch = lower.match(/^(\d+)\s*(min|mins|minute|minutes)?$/);
+  if (minutesMatch) return `${minutesMatch[1]} minutes`;
+
+  return text;
+}
+
+function parseCbsaBorderCsv(text) {
+  return String(text || "")
+    .replace(/^\uFEFF/, "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.split(";;").map((cell) => cell.trim()));
+}
+
+function decodeXmlText(text) {
+  return String(text || "")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function firstXmlMatch(block, tagName) {
+  const re = new RegExp(`<${tagName}[^>]*>([\\s\\S]*?)<\\/${tagName}>`, "i");
+  const m = String(block || "").match(re);
+  return m ? decodeXmlText(m[1]) : "";
+}
+
+function parseCbsaTimestamp(raw) {
+  const text = String(raw || "").trim();
+  if (!text) return null;
+
+  const m = text.match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})\s+([A-Z]{2,4})$/i);
+  if (!m) {
+    const parsed = new Date(text);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+
+  const [, y, mo, d, h, mi] = m;
+  return new Date(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), 0);
+}
+
+function getHoursOld(dateObj) {
+  if (!dateObj || Number.isNaN(dateObj.getTime())) return null;
+  return (Date.now() - dateObj.getTime()) / (1000 * 60 * 60);
+}
+
+function isStaleCbsaUpdate(rawTimestamp, staleHours = 24) {
+  const parsed = parseCbsaTimestamp(rawTimestamp);
+  const hoursOld = getHoursOld(parsed);
+  if (hoursOld === null) return false;
+  return hoursOld > staleHours;
+}
+
+function formatSpokenCbsaUpdate(rawTimestamp) {
+  const parsed = parseCbsaTimestamp(rawTimestamp);
+  if (!parsed || Number.isNaN(parsed.getTime())) return String(rawTimestamp || "").trim();
+
+  return parsed.toLocaleString("en-US", {
+    month: "long",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true
+  });
+}
+
+function trafficLevelFromWait(waitText) {
+  const text = String(waitText || "").trim().toLowerCase();
+
+  if (!text || text === "currently unavailable" || text === "update pending") return "";
+  if (text.includes("no delay")) return "light";
+  if (text.includes("closed") || text.includes("lanes closed")) return "";
+
+  const m = text.match(/(\d+)/);
+  if (!m) return "";
+
+  const minutes = Number(m[1]);
+
+  if (minutes <= 10) return "light";
+  if (minutes <= 25) return "moderate";
+  return "heavy";
+}
+
+function getTrafficLevel(extraMinutes) {
+  if (!Number.isFinite(Number(extraMinutes)) || Number(extraMinutes) <= 5) return "light";
+  if (Number(extraMinutes) <= 15) return "moderate";
+  return "heavy";
+}
+
+async function fetchLiveTrafficRoute(origin, destination) {
+  if (!process.env.GOOGLE_MAPS_API_KEY) {
+    throw new Error("GOOGLE_MAPS_API_KEY is missing");
+  }
+
+  const response = await axios.post(
+    "https://routes.googleapis.com/directions/v2:computeRoutes",
+    {
+      origin: {
+        location: {
+          latLng: origin
+        }
+      },
+      destination: {
+        location: {
+          latLng: destination
+        }
+      },
+      travelMode: "DRIVE",
+      routingPreference: "TRAFFIC_AWARE_OPTIMAL",
+      extraComputations: ["TRAFFIC_ON_POLYLINE"]
+    },
+    {
+      timeout: BORDER_API_TIMEOUT_MS,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": process.env.GOOGLE_MAPS_API_KEY,
+        "X-Goog-FieldMask":
+          "routes.duration,routes.staticDuration,routes.polyline.encodedPolyline,routes.travelAdvisory.speedReadingIntervals"
+      }
+    }
+  );
+
+  const route = Array.isArray(response.data?.routes) ? response.data.routes[0] : null;
+  if (!route) {
+    throw new Error("No live traffic route returned from Google Routes API");
+  }
+
+  const durationText = String(route.duration || "0s");
+  const staticDurationText = String(route.staticDuration || durationText);
+
+  const durationSeconds = Number(durationText.replace("s", "")) || 0;
+  const staticDurationSeconds = Number(staticDurationText.replace("s", "")) || durationSeconds;
+
+  const extraMinutes = Math.max(0, Math.round((durationSeconds - staticDurationSeconds) / 60));
+
+  return {
+    extraMinutes,
+    trafficLevel: getTrafficLevel(extraMinutes),
+  };
+}
+
+async function fetchLiveTrafficIntoCanada() {
+  const traffic = await fetchLiveTrafficRoute(
+    BORDER_TRAFFIC_POINTS.intoCanada.origin,
+    BORDER_TRAFFIC_POINTS.intoCanada.destination
+  );
+
+  return {
+    direction: "live_into_canada",
+    locationSpeech: CHAMPLAIN_LACOLLE.spokenNameCanada,
+    source: "google-routes",
+    ...traffic
+  };
+}
+
+async function fetchLiveTrafficIntoUs() {
+  const traffic = await fetchLiveTrafficRoute(
+    BORDER_TRAFFIC_POINTS.intoUs.origin,
+    BORDER_TRAFFIC_POINTS.intoUs.destination
+  );
+
+  return {
+    direction: "live_into_us",
+    locationSpeech: CHAMPLAIN_LACOLLE.spokenNameUs,
+    source: "google-routes",
+    ...traffic
+  };
+}
+
+function pickPrimaryLane(lanes) {
+  if (!lanes || typeof lanes !== "object") {
+    return {
+      wait: "currently unavailable",
+      updatedAt: "",
+      lanesOpen: ""
+    };
+  }
+
+  const preferredOrder = [
+    "standard_lanes",
+    "NEXUS_SENTRI_lanes",
+    "FAST_lanes",
+    "ready_lanes"
+  ];
+
+  const candidates = [];
+
+  for (const key of preferredOrder) {
+    const lane = lanes[key];
+    if (!lane || typeof lane !== "object") continue;
+
+    const operational = String(lane.operational_status || "").trim();
+    const delayMinutes = String(lane.delay_minutes || "").trim();
+    const updateTime = String(lane.update_time || "").trim();
+    const lanesOpen = String(lane.lanes_open || "").trim();
+
+    let wait = "currently unavailable";
+
+    if (delayMinutes !== "" && Number.isFinite(Number(delayMinutes))) {
+      wait = normalizeBorderWaitText(`${delayMinutes} minutes`);
+    } else if (operational) {
+      wait = normalizeBorderWaitText(operational);
+    }
+
+    const parsedTime = Date.parse(updateTime);
+
+    candidates.push({
+      key,
+      wait,
+      updatedAt: updateTime,
+      lanesOpen,
+      parsedTime: Number.isNaN(parsedTime) ? 0 : parsedTime
+    });
+  }
+
+  if (!candidates.length) {
+    return {
+      wait: "currently unavailable",
+      updatedAt: "",
+      lanesOpen: ""
+    };
+  }
+
+  candidates.sort((a, b) => {
+    if (b.parsedTime !== a.parsedTime) return b.parsedTime - a.parsedTime;
+    return preferredOrder.indexOf(a.key) - preferredOrder.indexOf(b.key);
+  });
+
+  return {
+    wait: candidates[0].wait,
+    updatedAt: candidates[0].updatedAt,
+    lanesOpen: candidates[0].lanesOpen
+  };
+}
+
+async function fetchChamplainLacolleIntoCanada() {
+  const cacheKey = "border:into_canada:champlain_lacolle";
+  const cached = cacheGet(borderWaitCache, cacheKey, BORDER_CACHE_MS);
+  if (cached) return cached;
+
+  const response = await axios.get("https://www.cbsa-asfc.gc.ca/bwt-taf/bwt-eng.csv", {
+    timeout: BORDER_API_TIMEOUT_MS,
+    headers: {
+      "User-Agent": "weather-and-info-line/1.0",
+      Accept: "text/csv,text/plain,*/*"
+    }
+  });
+
+  const rows = parseCbsaBorderCsv(response.data);
+  const match = rows.find((row) => String(row[0] || "").trim() === CHAMPLAIN_LACOLLE.cbsaOfficeName);
+
+  if (!match) {
+    throw new Error("Champlain/Lacolle Canada-bound wait time not found in CBSA feed");
+  }
+
+  const updatedAt = String(match[2] || "").trim();
+  const payload = {
+    direction: "into_canada",
+    locationSpeech: CHAMPLAIN_LACOLLE.spokenNameCanada,
+    updatedAt,
+    updatedAtSpoken: formatSpokenCbsaUpdate(updatedAt),
+    passengerWait: normalizeBorderWaitText(match[5]),
+    passengerLanesOpen: "",
+    source: "cbsa"
+  };
+
+  return cacheSet(borderWaitCache, cacheKey, payload);
+}
+
+async function fetchChamplainLacolleIntoUs() {
+  const cacheKey = "border:into_us:champlain_lacolle";
+  const cached = cacheGet(borderWaitCache, cacheKey, BORDER_CACHE_MS);
+  if (cached) return cached;
+
+  const rawPortNumber = String(CHAMPLAIN_LACOLLE.cbpPortNumber || "").trim();
+  const portNumber = rawPortNumber.slice(-6);
+  const url = `https://bwt.cbp.gov/api/bwtpublicmod/${portNumber}`;
+
+  const response = await axios.get(url, {
+    timeout: BORDER_API_TIMEOUT_MS,
+    headers: {
+      "User-Agent": "Mozilla/5.0",
+      "Accept": "application/json, text/plain, */*",
+      "Referer": "https://bwt.cbp.gov/details/04071201/POV"
+    }
+  });
+
+  const port = response.data || {};
+
+  if (!port || !port.port_number) {
+    throw new Error("Champlain/Lacolle U.S.-bound wait time not found in CBP port API");
+  }
+
+  const passenger = pickPrimaryLane(port.passenger_vehicle_lanes);
+
+  console.log("CBP direct port API used:", {
+    port_number: port?.port_number,
+    port_name: port?.port_name,
+    passengerWait: passenger.wait,
+    updatedAt: passenger.updatedAt,
+    passengerLanesOpen: passenger.lanesOpen
+  });
+
+  const payload = {
+    direction: "into_us",
+    locationSpeech: CHAMPLAIN_LACOLLE.spokenNameUs,
+    updatedAt: passenger.updatedAt || String(port.time || "").trim(),
+    updatedAtSpoken: passenger.updatedAt || String(port.time || "").trim(),
+    passengerWait: passenger.wait || "currently unavailable",
+    passengerLanesOpen: passenger.lanesOpen || "",
+    source: "cbp-port-api"
+  };
+
+  return cacheSet(borderWaitCache, cacheKey, payload);
+}
+
+async function fetchBorderWait(direction) {
+  if (direction === "official_into_canada") return fetchChamplainLacolleIntoCanada();
+  if (direction === "official_into_us") return fetchChamplainLacolleIntoUs();
+  if (direction === "live_into_canada") return fetchLiveTrafficIntoCanada();
+  if (direction === "live_into_us") return fetchLiveTrafficIntoUs();
+  throw new Error("Invalid border direction");
+}
+
+const BORDER_TRAFFIC_POINTS = {
+  intoCanada: {
+    origin: { latitude: 44.9625, longitude: -73.4466 },
+    destination: { latitude: 45.0060, longitude: -73.4544 }
+  },
+  intoUs: {
+    origin: { latitude: 45.0475, longitude: -73.4635 },
+    destination: { latitude: 44.9957, longitude: -73.4552 }
+  }
+};
+
+function buildBorderSpeech(result) {
+  if (result.direction === "live_into_canada" || result.direction === "live_into_us") {
+  const minutes = Math.round(Number(result.extraMinutes || 0));
+
+  const parts = [
+    `Current traffic conditions for ${result.locationSpeech}.`,
+    `Traffic approaching the crossing is ${result.trafficLevel}.`
+  ];
+
+  if (Number.isFinite(minutes) && minutes > 0) {
+    parts.push(`Current delay is about ${minutes} ${minutes === 1 ? "minute" : "minutes"}.`);
+  } else {
+    parts.push("There is little or no delay approaching the crossing.");
+  }
+
+  return parts.join(" ");
+}
+
+  const parts = [`Border wait time for ${result.locationSpeech}.`];
+
+  if (String(result.passengerWait || "").toLowerCase() === "update pending") {
+    parts.push("Official wait time is temporarily unavailable.");
+  } else {
+    parts.push(`Passenger wait time is ${result.passengerWait}.`);
+  }
+
+  const passengerTraffic = trafficLevelFromWait(result.passengerWait);
+  if (passengerTraffic) {
+    parts.push(`Traffic is ${passengerTraffic}.`);
+  }
+
+  if (result.passengerLanesOpen && Number.isFinite(Number(result.passengerLanesOpen))) {
+    const n = Number(result.passengerLanesOpen);
+    parts.push(`${result.passengerLanesOpen} passenger ${n === 1 ? "lane is" : "lanes are"} open.`);
+  }
+
+  if (result.updatedAtSpoken) {
+    parts.push(`Last updated ${result.updatedAtSpoken}.`);
+  }
+
+  return parts.join(" ");
+}
 async function fetchForecast(location) {
   pruneForecastCache();
   const cached = getCachedForecast(location);
@@ -1793,27 +2323,7 @@ async function fetchForecast(location) {
       if (location?.country === "CA") {
         data = await fetchEnvironmentCanadaData(location);
       } else {
-        const params = {
-          latitude: Number(location.latitude),
-          longitude: Number(location.longitude),
-          apikey: process.env.OPEN_METEO_API_KEY,
-          current: ["temperature_2m", "apparent_temperature", "rain", "showers", "snowfall", "cloud_cover", "wind_speed_10m", "wind_gusts_10m", "wind_direction_10m", "weather_code"].join(","),
-          hourly: ["temperature_2m", "apparent_temperature", "precipitation_probability", "rain", "showers", "snowfall", "cloud_cover", "wind_speed_10m", "wind_gusts_10m", "wind_direction_10m", "uv_index", "weather_code"].join(","),
-          daily: ["weather_code", "temperature_2m_max", "temperature_2m_min", "precipitation_probability_max", "rain_sum", "showers_sum", "snowfall_sum", "wind_speed_10m_max", "wind_gusts_10m_max", "uv_index_max"].join(","),
-          timezone: location.timezone || "America/Toronto",
-          forecast_days: 7,
-          temperature_unit: "celsius",
-          wind_speed_unit: "kmh",
-          precipitation_unit: "mm"
-        };
-        const response = await axios.get("https://customer-api.open-meteo.com/v1/forecast", {
-          params,
-          timeout: 15000
-        });
-        data = response.data;
-        if (!data || !data.current || !data.hourly || !data.daily) throw new Error("Open-Meteo returned incomplete forecast data");
-        if (!data.hourly.weather_code && data.hourly.weathercode) data.hourly.weather_code = data.hourly.weathercode;
-        if (!data.daily.weather_code && data.daily.weathercode) data.daily.weather_code = data.daily.weathercode;
+        data = await fetchOpenMeteoForecast(location);
       }
 
       const savedKey = setCachedForecast(location, data);
@@ -1892,7 +2402,7 @@ async function forecastDayPromptTwiml(location, forecast) {
 async function buildPlaybackSpeech(location, forecast, playback, unit = "C") {
   if (!playback || !playback.type) return "";
 
-  if (playback.type === "exchange") {
+  if (playback.type === "exchange" || playback.type === "border") {
     return playback.speech || "";
   }
 
@@ -1955,13 +2465,15 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
       return twiml;
     }
 
-    if (playback.type === "exchange") {
+    if (playback.type === "exchange" || playback.type === "border") {
       if (!playback.speech) {
         say(twiml, "There is nothing to repeat yet.");
         twiml.redirect({ method: "POST" }, "/root-menu-prompt");
         return twiml;
       }
-      return playbackWithStarTwiml(playback.speech);
+      return playbackWithStarTwiml(playback.speech, {
+        rate: playback.speechRate || "100%"
+      });
     }
 
     const location = getActiveLocation(req);
@@ -1980,7 +2492,9 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
       return twiml;
     }
 
-    return playbackWithStarTwiml(speech);
+    return playbackWithStarTwiml(speech, {
+      rate: playback.speechRate || "100%"
+    });
   }
 
   if (state === "after-prompt") return afterActionTwiml(req);
@@ -2049,12 +2563,110 @@ app.post("/root-menu", async (req, res) => {
       return res.type("text/xml").send(exchangeTwiml.toString());
     }
 
+    if (choice === "3") {
+      say(twiml, "That feature is not available yet.");
+      twiml.redirect({ method: "POST" }, "/root-menu-prompt");
+      return res.type("text/xml").send(twiml.toString());
+    }
+
+    if (choice === "4") {
+      const borderTwiml = borderMenuTwiml();
+      return res.type("text/xml").send(borderTwiml.toString());
+    }
+
     say(twiml, "I did not understand that choice.");
     twiml.redirect({ method: "POST" }, "/root-menu-prompt");
     return res.type("text/xml").send(twiml.toString());
   } catch (error) {
     console.error("ROOT-MENU route error:", error.message);
     say(twiml, "Sorry, an application error occurred. Please try again.");
+    return res.type("text/xml").send(twiml.toString());
+  }
+});
+
+app.post("/border-menu-prompt", async (req, res) => {
+  const twiml = borderMenuTwiml();
+  res.type("text/xml").send(twiml.toString());
+});
+
+app.post("/border-menu", async (req, res) => {
+  const twiml = new VoiceResponse();
+
+  try {
+    if (isBackKey(req)) {
+      twiml.redirect({ method: "POST" }, "/root-menu-prompt");
+      return res.type("text/xml").send(twiml.toString());
+    }
+
+    const direction = parseBorderDirectionChoice(req);
+
+    if (!direction) {
+      say(twiml, "I did not understand that choice.");
+      twiml.redirect({ method: "POST" }, "/border-menu-prompt");
+      return res.type("text/xml").send(twiml.toString());
+    }
+
+    setBorderDirection(req, direction);
+
+    const submenuTwiml = new VoiceResponse();
+    buildBorderSubmenuInto(submenuTwiml, direction);
+
+    return res.type("text/xml").send(submenuTwiml.toString());
+  } catch (error) {
+    console.error(error);
+    say(twiml, "Sorry, I could not retrieve border information.");
+    twiml.redirect({ method: "POST" }, "/border-menu-prompt");
+    return res.type("text/xml").send(twiml.toString());
+  }
+});
+
+app.post("/border-submenu-prompt", async (req, res) => {
+  const twiml = new VoiceResponse();
+  const direction = getBorderDirection(req) || "canada";
+  buildBorderSubmenuInto(twiml, direction);
+  res.type("text/xml").send(twiml.toString());
+});
+
+app.post("/border-submenu", async (req, res) => {
+  const twiml = new VoiceResponse();
+
+  try {
+    if (isBackKey(req)) {
+      twiml.redirect({ method: "POST" }, "/border-menu-prompt");
+      return res.type("text/xml").send(twiml.toString());
+    }
+
+    const direction = getBorderDirection(req);
+    const type = parseBorderTypeChoice(req);
+
+    if (!direction || !type) {
+      say(twiml, "I did not understand that choice.");
+      twiml.redirect({ method: "POST" }, "/border-submenu-prompt");
+      return res.type("text/xml").send(twiml.toString());
+    }
+
+    let choice = "";
+
+    if (direction === "canada" && type === "official") choice = "official_into_canada";
+    if (direction === "canada" && type === "live") choice = "live_into_canada";
+    if (direction === "us" && type === "official") choice = "official_into_us";
+    if (direction === "us" && type === "live") choice = "live_into_us";
+
+    const result = await fetchBorderWait(choice);
+    const speech = buildBorderSpeech(result);
+
+    setLastPlayback(req, {
+      type: "border",
+      speech,
+      borderDirection: direction
+    });
+
+    const playbackTwiml = playbackWithStarTwiml(speech);
+    return res.type("text/xml").send(playbackTwiml);
+  } catch (error) {
+    console.error(error);
+    say(twiml, "Sorry, I could not retrieve border information.");
+    twiml.redirect({ method: "POST" }, "/border-submenu-prompt");
     return res.type("text/xml").send(twiml.toString());
   }
 });
@@ -2234,13 +2846,17 @@ app.post("/menu", async (req, res) => {
     if (choice === "2") {
       setLastPlayback(req, { type: "hourly", hours: location.country === "CA" ? 12 : 6 });
       const playbackTwiml = await buildStateTwiml(req, "playback", { push: false });
-      return res.type("text/xml").send(playbackTwiml.toString());
+      return res.type("text/xml").send(
+        typeof playbackTwiml === "string" ? playbackTwiml : playbackTwiml.toString()
+      );
     }
 
     if (choice === "3") {
       setLastPlayback(req, { type: "current" });
       const playbackTwiml = await buildStateTwiml(req, "playback", { push: false });
-      return res.type("text/xml").send(playbackTwiml.toString());
+      return res.type("text/xml").send(
+        typeof playbackTwiml === "string" ? playbackTwiml : playbackTwiml.toString()
+      );
     }
 
     say(twiml, "I did not understand that choice.");
@@ -2276,9 +2892,11 @@ app.post("/forecast-day", async (req, res) => {
     const selected = parseForecastDayChoice(req);
 
     if (selected === "all") {
-      setLastPlayback(req, { type: "all7" });
+      setLastPlayback(req, { type: "all7", speechRate: "94%" });
       const playbackTwiml = await buildStateTwiml(req, "playback", { push: false });
-      return res.type("text/xml").send(playbackTwiml.toString());
+      return res.type("text/xml").send(
+        typeof playbackTwiml === "string" ? playbackTwiml : playbackTwiml.toString()
+      );
     }
 
     if (selected < 0) {
@@ -2302,7 +2920,9 @@ app.post("/forecast-day", async (req, res) => {
 
     setLastPlayback(req, { type: "daily", index: selected });
     const playbackTwiml = await buildStateTwiml(req, "playback", { push: false });
-    return res.type("text/xml").send(playbackTwiml.toString());
+    return res.type("text/xml").send(
+      typeof playbackTwiml === "string" ? playbackTwiml : playbackTwiml.toString()
+    );
   } catch (error) {
     console.error("FORECAST-DAY error:", error.message);
     speakWeatherError(twiml, error, "Sorry, I could not retrieve that forecast.");
@@ -2344,7 +2964,7 @@ app.post("/exchange-amount", async (req, res) => {
     });
 
     const playbackTwiml = playbackWithStarTwiml(speech);
-    return res.type("text/xml").send(playbackTwiml.toString());
+    return res.type("text/xml").send(playbackTwiml);
   } catch (error) {
     console.error("EXCHANGE-AMOUNT error:", error.message);
     say(twiml, "Sorry, I could not retrieve the exchange rate right now.");
@@ -2354,10 +2974,26 @@ app.post("/exchange-amount", async (req, res) => {
 });
 
 app.post("/during-playback", async (req, res) => {
+  const playback = getLastPlayback(req);
+
   if (isBackKey(req)) {
+    if (playback?.type === "border") {
+      const twiml = new VoiceResponse();
+
+      if (playback?.borderDirection) {
+        setBorderDirection(req, playback.borderDirection);
+        twiml.redirect({ method: "POST" }, "/border-submenu-prompt");
+      } else {
+        twiml.redirect({ method: "POST" }, "/border-menu-prompt");
+      }
+
+      return res.type("text/xml").send(twiml.toString());
+    }
+
     const backTwiml = await goBackOneMenu(req);
     return res.type("text/xml").send(backTwiml.toString());
   }
+
   const afterTwiml = await buildStateTwiml(req, "after-prompt", { push: false });
   res.type("text/xml").send(afterTwiml.toString());
 });
@@ -2369,30 +3005,51 @@ app.post("/after-prompt", async (req, res) => {
 
 app.post("/after", async (req, res) => {
   const twiml = new VoiceResponse();
+  const playback = getLastPlayback(req);
+
   console.log("AFTER Digits:", getDigits(req));
 
   if (isBackKey(req)) {
+    if (playback?.type === "border") {
+      if (playback?.borderDirection) {
+        setBorderDirection(req, playback.borderDirection);
+        twiml.redirect({ method: "POST" }, "/border-submenu-prompt");
+      } else {
+        twiml.redirect({ method: "POST" }, "/border-menu-prompt");
+      }
+
+      return res.type("text/xml").send(twiml.toString());
+    }
+
     const backTwiml = await goBackOneMenu(req);
     return res.type("text/xml").send(backTwiml.toString());
   }
 
   const choice = parseAfterChoice(req);
-  const playback = getLastPlayback(req);
 
   if (choice === "5") {
-    const rootTwiml = await buildStateTwiml(req, "root-menu");
-    return res.type("text/xml").send(rootTwiml.toString());
+    if (playback?.type === "border") {
+      const rootTwiml = await buildStateTwiml(req, "root-menu", { push: false });
+      return res.type("text/xml").send(rootTwiml.toString());
+    }
+
+    const mainTwiml = await buildStateTwiml(req, "main-menu", { push: false });
+    return res.type("text/xml").send(mainTwiml.toString());
   }
 
   if (choice === "#") {
     const playbackTwiml = await buildStateTwiml(req, "playback", { push: false });
-    return res.type("text/xml").send(playbackTwiml.toString());
+    return res.type("text/xml").send(
+      typeof playbackTwiml === "string" ? playbackTwiml : playbackTwiml.toString()
+    );
   }
 
-  if (choice === "7" && playback && playback.type !== "exchange") {
+  if (choice === "7" && playback && playback.type !== "exchange" && playback.type !== "border") {
     toggleUnitPreference(req);
     const playbackTwiml = await buildStateTwiml(req, "playback", { push: false });
-    return res.type("text/xml").send(playbackTwiml.toString());
+    return res.type("text/xml").send(
+      typeof playbackTwiml === "string" ? playbackTwiml : playbackTwiml.toString()
+    );
   }
 
   say(twiml, "I did not understand that choice.");
