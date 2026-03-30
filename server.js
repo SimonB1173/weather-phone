@@ -120,9 +120,7 @@ const CHAMPLAIN_LACOLLE = {
   cbpPortNumber: "04071201",
   cbpPortName: "Champlain",
   spokenNameCanada: "Champlain border, entering Canada",
-  spokenNameUs: "Champlain border, entering the United States",
-  staleHours: 5,
-  constructionWarning: "This crossing is under construction until 2027. Expect longer wait times."
+  spokenNameUs: "Champlain border, entering the United States"
 };
 
 function gatherOptions(action, timeout = 8, numDigits = 1) {
@@ -174,8 +172,8 @@ function playbackWithStarTwiml(text, options = {}) {
   const body = cleaned
     .split(/([.:]\s+)/)
     .map((part) => {
-      if (/^\.\s+$/.test(part)) return '.<break time="170ms"/> ';
-      if (/^:\s+$/.test(part)) return ':<break time="130ms"/> ';
+      if (/^\.\s+$/.test(part)) return '.<break time="180ms"/> ';
+      if (/^:\s+$/.test(part)) return ':<break time="140ms"/> ';
       return xmlEscape(part);
     })
     .join("");
@@ -2196,10 +2194,7 @@ async function fetchChamplainLacolleIntoCanada() {
     locationSpeech: CHAMPLAIN_LACOLLE.spokenNameCanada,
     updatedAt,
     updatedAtSpoken: formatSpokenCbsaUpdate(updatedAt),
-    isStale: isStaleCbsaUpdate(updatedAt, CHAMPLAIN_LACOLLE.staleHours),
-    commercialWait: normalizeBorderWaitText(match[3]),
     passengerWait: normalizeBorderWaitText(match[5]),
-    commercialLanesOpen: "",
     passengerLanesOpen: "",
     source: "cbsa"
   };
@@ -2403,32 +2398,11 @@ function buildBorderSpeech(result) {
     parts.push(`${result.passengerLanesOpen} passenger ${n === 1 ? "lane is" : "lanes are"} open.`);
   }
 
-  if (result.commercialWait && result.commercialWait !== "currently unavailable") {
-    parts.push(`Commercial wait time is ${result.commercialWait}.`);
-
-    const commercialTraffic = trafficLevelFromWait(result.commercialWait);
-    if (commercialTraffic) {
-      parts.push(`Commercial traffic is ${commercialTraffic}.`);
-    }
-  }
-
-  if (result.commercialLanesOpen && Number.isFinite(Number(result.commercialLanesOpen))) {
-    const n = Number(result.commercialLanesOpen);
-    parts.push(`${result.commercialLanesOpen} commercial ${n === 1 ? "lane is" : "lanes are"} open.`);
-  }
-
-  if (result.direction === "into_canada" && result.isStale) {
-    parts.push("However, the official update has not been refreshed within the last few hours.");
-    parts.push(CHAMPLAIN_LACOLLE.constructionWarning);
-    return parts.join(" ");
-  }
-
   if (result.updatedAtSpoken) {
     parts.push(`Last updated ${result.updatedAtSpoken}.`);
   }
 
   return parts.join(" ");
-}
 
 async function fetchForecast(location) {
   pruneForecastCache();
