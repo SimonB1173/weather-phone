@@ -2066,14 +2066,12 @@ async function fetchLiveTrafficRoute(origin, destination) {
     console.log("Google live traffic result:", {
       origin,
       destination,
+      durationSeconds,
+      staticDurationSeconds,
+      delaySeconds: Math.max(0, durationSeconds - staticDurationSeconds),
       extraMinutes,
       trafficLevel: getTrafficLevel(extraMinutes)
     });
-
-    return {
-      extraMinutes,
-      trafficLevel: getTrafficLevel(extraMinutes)
-    };
   } catch (error) {
     console.error("Google live traffic failed:", error.message);
     if (error.response) {
