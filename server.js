@@ -2403,7 +2403,7 @@ function buildBorderSpeech(result) {
   }
 
   return parts.join(" ");
-
+}
 async function fetchForecast(location) {
   pruneForecastCache();
   const cached = getCachedForecast(location);
