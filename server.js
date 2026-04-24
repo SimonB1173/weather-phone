@@ -1355,6 +1355,284 @@ function normalizeEcForecastPeriods(ecItem) {
   };
 }
 
+async function nwsApiGet(url) {
+  const response = await axios.get(url, {
+    timeout: OPEN_METEO_TIMEOUT_MS,
+    headers: {
+      "User-Agent": "weather-and-info-line/1.0 simon@levbrands.com",
+      Accept: "application/geo+json, application/json"
+    }
+  });
+  return response.data;
+}
+
+function nwsMetersPerSecondToKmh(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  return n * 3.6;
+}
+
+function nwsFahrenheitToCelsius(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  return ((n - 32) * 5) / 9;
+}
+
+function nwsTemperatureToC(value, unitCode) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  const code = String(unitCode || "").toLowerCase();
+  if (code.includes("degf")) return nwsFahrenheitToCelsius(n);
+  return n;
+}
+
+function parseNwsWindMphText(text) {
+  const nums = String(text || "")
+    .match(/\d+(?:\.\d+)?/g)
+    ?.map(Number)
+    .filter(Number.isFinite) || [];
+  if (!nums.length) return null;
+  return Math.max(...nums);
+}
+
+function formatNwsWindText(text, unit = "C") {
+  const raw = String(text || "").trim();
+  if (!raw) return "";
+  if (unit === "F") return raw.toLowerCase().replace(/mph/gi, "miles per hour");
+
+  const mph = parseNwsWindMphText(raw);
+  if (mph === null) return raw.toLowerCase().replace(/mph/gi, "miles per hour");
+
+  const kmh = Math.round(mph * 1.60934);
+  const direction = raw.replace(/\b\d+(?:\.\d+)?(?:\s*to\s*\d+(?:\.\d+)?)?\s*mph\b/i, "").trim();
+  return `${direction ? direction.toLowerCase() + " " : ""}${kmh} kilometres per hour`;
+}
+
+async function fetchNwsForecast(location) {
+  const point = await nwsApiGet(
+    `https://api.weather.gov/points/${Number(location.latitude).toFixed(4)},${Number(location.longitude).toFixed(4)}`
+  );
+
+  const props = point?.properties || {};
+  if (!props.forecast || !props.forecastHourly) {
+    throw new Error("National Weather Service point lookup returned incomplete forecast links");
+  }
+
+  const [forecast, hourly, stations] = await Promise.all([
+    nwsApiGet(props.forecast),
+    nwsApiGet(props.forecastHourly),
+    props.observationStations ? nwsApiGet(props.observationStations) : Promise.resolve(null)
+  ]);
+
+  let current = null;
+  const stationUrl = stations?.features?.[0]?.id;
+  if (stationUrl) {
+    try {
+      current = await nwsApiGet(`${stationUrl}/observations/latest`);
+    } catch (error) {
+      console.error("NWS current observation failed:", error.message);
+    }
+  }
+
+  return {
+    source: "nws",
+    point,
+    forecast,
+    hourly,
+    current
+  };
+}
+
+function nwsIssuedSpeechLine(label, rawTimestamp, timezone) {
+  const text = String(rawTimestamp || "").trim();
+  if (!text) return `${label}.`;
+  return `${label} at ${formatIssuedTime(text, timezone)} on ${issuedMonthDayLabel(text, timezone)}.`;
+}
+
+function nwsCurrentWeatherSpeech(location, nwsData, unit = "C") {
+  const props = nwsData?.current?.properties || {};
+  const description = String(props.textDescription || "").trim().toLowerCase();
+  const tempC = nwsTemperatureToC(props.temperature?.value, props.temperature?.unitCode);
+  const windChillC = nwsTemperatureToC(props.windChill?.value, props.windChill?.unitCode);
+  const heatIndexC = nwsTemperatureToC(props.heatIndex?.value, props.heatIndex?.unitCode);
+  const windSpeedKmh = nwsMetersPerSecondToKmh(props.windSpeed?.value);
+  const windGustKmh = nwsMetersPerSecondToKmh(props.windGust?.value);
+  const windBearing = safeNumber(props.windDirection?.value);
+
+  const parts = [
+    `Current weather for ${placeLabel(location)}.`,
+    nwsIssuedSpeechLine("Issued by the National Weather Service", props.timestamp, location.timezone)
+  ];
+
+  if (description) parts.push(`It is ${description}.`);
+  if (Number.isFinite(tempC)) parts.push(`Temperature ${formatSignedTemp(tempC, unit)} degrees.`);
+
+  const apparent = windChillC ?? heatIndexC;
+  if (
+    Number.isFinite(apparent) &&
+    Number.isFinite(tempC) &&
+    Math.round(tempValueForUnit(apparent, unit)) !== Math.round(tempValueForUnit(tempC, unit))
+  ) {
+    parts.push(`Feels like ${formatSignedTemp(apparent, unit)}.`);
+  }
+
+  if (Number.isFinite(windSpeedKmh) && windSpeedKmh > 0) {
+    const speed = Math.round(speedValueForUnit(windSpeedKmh, unit));
+    const direction = degreesToCompass(windBearing || 0);
+    if (Number.isFinite(windGustKmh) && windGustKmh > windSpeedKmh + 5) {
+      const gust = Math.round(speedValueForUnit(windGustKmh, unit));
+      parts.push(`Wind ${direction} ${speed} ${speedUnitLabel(unit)}, gusting to ${gust}.`);
+    } else {
+      parts.push(`Wind ${direction} ${speed} ${speedUnitLabel(unit)}.`);
+    }
+  }
+
+  return parts.join(" ");
+}
+
+function nwsForecastPeriods(nwsData) {
+  return safeArray(nwsData?.forecast?.properties?.periods);
+}
+
+function nwsHourlyPeriods(nwsData) {
+  return safeArray(nwsData?.hourly?.properties?.periods);
+}
+
+function nwsPeriodSpeech(period, unit = "C") {
+  const parts = [];
+  const name = String(period?.name || "").trim();
+  const shortForecast = String(period?.shortForecast || "").trim();
+  const tempF = safeNumber(period?.temperature);
+  const tempC = tempF === null ? null : nwsFahrenheitToCelsius(tempF);
+  const isNight = period?.isDaytime === false;
+  const pop = safeNumber(period?.probabilityOfPrecipitation?.value);
+
+  if (name) parts.push(`${name}.`);
+
+  if (shortForecast) {
+    parts.push(shortForecast.endsWith(".") ? shortForecast : `${shortForecast}.`);
+  }
+
+  if (Number.isFinite(tempC)) {
+    parts.push(`${isNight ? "Low" : "High"} ${formatForecastTempValue(tempC, unit)}.`);
+  }
+
+  if (Number.isFinite(pop) && pop > 0) {
+    parts.push(`${Math.round(pop)} percent chance of precipitation.`);
+  }
+
+  if (period?.windDirection && period?.windSpeed) {
+    parts.push(`Wind ${formatNwsWindText(`${period.windDirection} ${period.windSpeed}`, unit)}.`);
+  }
+
+  return parts.join(" ");
+}
+
+function buildNwsDailyGroups(nwsData, location) {
+  const periods = nwsForecastPeriods(nwsData);
+  const tz = location?.timezone || "America/New_York";
+  const groups = [];
+
+  for (const period of periods) {
+    const startDate = String(period?.startTime || "").slice(0, 10);
+    if (!startDate) continue;
+
+    let group = groups.find((g) => g.dateText === startDate);
+    if (!group) {
+      group = {
+        dateText: startDate,
+        label: relativeMenuDayLabel(startDate, tz),
+        periods: []
+      };
+      groups.push(group);
+    }
+
+    group.periods.push(period);
+  }
+
+  return groups;
+}
+
+function nwsSingleForecastSpeech(location, nwsData, index, unit = "C") {
+  const groups = buildNwsDailyGroups(nwsData, location);
+
+  if (index < 0 || index >= groups.length) {
+    return `That forecast day is not available for ${placeLabel(location)}.`;
+  }
+
+  const group = groups[index];
+  const parts = [
+    `Forecast for ${group.label}.`,
+    nwsIssuedSpeechLine("Issued by the National Weather Service", nwsData?.forecast?.properties?.updated, location.timezone)
+  ];
+
+  for (const period of group.periods) {
+    parts.push(nwsPeriodSpeech(period, unit));
+  }
+
+  return parts.join(" ");
+}
+
+function nwsAllForecastSpeech(location, nwsData, unit = "C") {
+  const groups = buildNwsDailyGroups(nwsData, location);
+  if (!groups.length) return `I could not find forecast days for ${placeLabel(location)}.`;
+
+  const parts = [
+    `Seven day forecast for ${placeLabel(location)}.`,
+    nwsIssuedSpeechLine("Issued by the National Weather Service", nwsData?.forecast?.properties?.updated, location.timezone)
+  ];
+
+  for (const group of groups.slice(0, 7)) {
+    const periodSummaries = group.periods.map((period) => {
+      const name = String(period?.name || "").trim();
+      const shortForecast = String(period?.shortForecast || "").trim();
+      const tempF = safeNumber(period?.temperature);
+      const tempC = tempF === null ? null : nwsFahrenheitToCelsius(tempF);
+      const isNight = period?.isDaytime === false;
+
+      const tempText = Number.isFinite(tempC)
+        ? `${isNight ? "low" : "high"} ${formatForecastTempValue(tempC, unit)}`
+        : "";
+
+      return [name, shortForecast, tempText].filter(Boolean).join(", ");
+    });
+
+    parts.push(`${group.label}. ${periodSummaries.join(". ")}.`);
+  }
+
+  return parts.join(" ");
+}
+
+function nwsHourlySpeech(location, nwsData, hours = 12, unit = "C") {
+  const periods = nwsHourlyPeriods(nwsData).slice(0, hours);
+
+  if (!periods.length) {
+    return `I could not find hourly forecast data for ${placeLabel(location)}.`;
+  }
+
+  const parts = [
+    nwsIssuedSpeechLine("Issued by the National Weather Service", nwsData?.hourly?.properties?.updated || nwsData?.forecast?.properties?.updated, location.timezone),
+    `Here is the next ${periods.length} hour forecast for ${placeLabel(location)}.`
+  ];
+
+  for (const period of periods) {
+    const tempF = safeNumber(period?.temperature);
+    const tempC = tempF === null ? null : nwsFahrenheitToCelsius(tempF);
+    const time = formatIssuedTime(period?.startTime, location.timezone);
+    const condition = String(period?.shortForecast || "").trim().toLowerCase();
+    const lineParts = [`${time}, ${condition || "forecast unavailable"}.`];
+
+    if (Number.isFinite(tempC)) lineParts.push(`Around ${Math.round(tempValueForUnit(tempC, unit))} degrees.`);
+    if (period?.windDirection && period?.windSpeed) {
+      lineParts.push(`Wind ${formatNwsWindText(`${period.windDirection} ${period.windSpeed}`, unit)}.`);
+    }
+
+    parts.push(lineParts.join(" "));
+  }
+
+  return parts.join(" ");
+}
+
 async function fetchOpenMeteoForecast(location) {
   const params = {
     latitude: Number(location.latitude),
@@ -2351,6 +2629,8 @@ async function fetchForecast(location) {
       let data;
       if (location?.country === "CA") {
         data = await fetchEnvironmentCanadaData(location);
+      } else if (location?.country === "US") {
+        data = await fetchNwsForecast(location);
       } else {
         data = await fetchOpenMeteoForecast(location);
       }
@@ -2415,6 +2695,18 @@ async function forecastDayPromptTwiml(location, forecast) {
     return twiml;
   }
 
+  if (location?.country === "US" && forecast?.source === "nws") {
+    const groups = buildNwsDailyGroups(forecast, location);
+    const parts = ["For the full National Weather Service forecast, press 0."];
+    for (let i = 0; i < Math.min(9, groups.length); i++) {
+      parts.push(`Press ${i + 1} for ${groups[i].label}.`);
+    }
+    parts.push("Press star to go back to the previous menu.");
+    say(gather, parts.join(" "));
+    twiml.redirect({ method: "POST" }, "/forecast-menu");
+    return twiml;
+  }
+
   const dailyTimes = forecast.daily?.time || [];
   const parts = ["For the seven day forecast, press 0."];
   if (dailyTimes[0]) parts.push("Press 1 for today.");
@@ -2433,6 +2725,14 @@ async function buildPlaybackSpeech(location, forecast, playback, unit = "C") {
 
   if (playback.type === "exchange" || playback.type === "border") {
     return playback.speech || "";
+  }
+
+  if (location?.country === "US" && forecast?.source === "nws") {
+    if (playback.type === "current") return nwsCurrentWeatherSpeech(location, forecast, unit);
+    if (playback.type === "hourly") return nwsHourlySpeech(location, forecast, playback.hours || 12, unit);
+    if (playback.type === "daily") return nwsSingleForecastSpeech(location, forecast, playback.index, unit);
+    if (playback.type === "all7") return nwsAllForecastSpeech(location, forecast, unit);
+    return "";
   }
 
   if (location?.country === "CA") {
@@ -2873,7 +3173,7 @@ app.post("/menu", async (req, res) => {
     }
 
     if (choice === "2") {
-      setLastPlayback(req, { type: "hourly", hours: location.country === "CA" ? 12 : 6 });
+      setLastPlayback(req, { type: "hourly", hours: 12 });
       const playbackTwiml = await buildStateTwiml(req, "playback", { push: false });
       return res.type("text/xml").send(
         typeof playbackTwiml === "string" ? playbackTwiml : playbackTwiml.toString()
@@ -2941,6 +3241,13 @@ app.post("/forecast-day", async (req, res) => {
         const forecastTwiml = await buildStateTwiml(req, "forecast-menu", { push: false });
         return res.type("text/xml").send(forecastTwiml.toString());
       }
+    } else if (location.country === "US" && forecast?.source === "nws") {
+      const groupCount = buildNwsDailyGroups(forecast, location).length;
+      if (selected >= groupCount) {
+        say(twiml, "I did not understand the forecast day.");
+        const forecastTwiml = await buildStateTwiml(req, "forecast-menu", { push: false });
+        return res.type("text/xml").send(forecastTwiml.toString());
+     }
     } else if (selected > 6) {
       say(twiml, "I did not understand the forecast day.");
       const forecastTwiml = await buildStateTwiml(req, "forecast-menu", { push: false });
