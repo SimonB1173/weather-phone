@@ -30,6 +30,8 @@ const menuHistoryByCall = new Map();
 const unitPreferenceByCall = new Map();
 const exchangeSelectionByCall = new Map();
 const borderDirectionByCall = new Map();
+const zmanimSessionByCall = new Map();
+const zmanimCache = new Map();
 
 const FORECAST_CACHE_MS = 15 * 60 * 1000;
 const STALE_FORECAST_MS = 2 * 60 * 1000;
@@ -38,6 +40,8 @@ const EC_CITYPAGE_CACHE_MS = 20 * 60 * 1000;
 const EXCHANGE_CACHE_MS = 10 * 60 * 1000;
 const BORDER_CACHE_MS = 30 * 1000;
 const LIVE_TRAFFIC_CACHE_MS = 30 * 1000;
+const ZMANIM_CACHE_MS = 12 * 60 * 60 * 1000;
+const HEBCAL_ZMANIM_TIMEOUT_MS = 10000;
 
 const EC_API_TIMEOUT_MS = 5000;
 const EC_ALERT_TIMEOUT_MS = 5000;
@@ -114,6 +118,45 @@ const US_LOCATIONS = {
   "1": PRESET_LOCATIONS["4"],
   "2": PRESET_LOCATIONS["6"],
   "3": PRESET_LOCATIONS["5"]
+};
+
+const ZMANIM_LOCATIONS = {
+  "1": {
+    id: "zmanim_montreal",
+    name: "Montreal, Quebec, Canada",
+    label: "Montreal",
+    latitude: 45.5017,
+    longitude: -73.5673,
+    timezone: "America/Toronto",
+    country: "CA"
+  },
+  "2": {
+    id: "zmanim_brooklyn",
+    name: "Brooklyn, New York, USA",
+    label: "Brooklyn",
+    latitude: 40.6782,
+    longitude: -73.9442,
+    timezone: "America/New_York",
+    country: "US"
+  },
+  "3": {
+    id: "zmanim_monroe",
+    name: "Monroe, New York, USA",
+    label: "Monroe",
+    latitude: 41.3306,
+    longitude: -74.1868,
+    timezone: "America/New_York",
+    country: "US"
+  },
+  "4": {
+    id: "zmanim_monsey",
+    name: "Monsey, New York, USA",
+    label: "Monsey",
+    latitude: 41.1112,
+    longitude: -74.0685,
+    timezone: "America/New_York",
+    country: "US"
+  }
 };
 
 const CHAMPLAIN_LACOLLE = {
@@ -326,6 +369,7 @@ function clearCallState(req) {
   unitPreferenceByCall.delete(key);
   exchangeSelectionByCall.delete(key);
   borderDirectionByCall.delete(key);
+  zmanimSessionByCall.delete(key);
 }
 
 function appendVoicemailRecord(record) {
@@ -624,6 +668,38 @@ function parseBorderDirectionChoice(req) {
   return "";
 }
 
+function parseZmanimLocationChoice(req) {
+  const digit = getDigits(req);
+  if (/^[1-4]$/.test(digit)) return digit;
+  return "";
+}
+
+function parseZmanimDateChoice(req) {
+  const digit = getDigits(req);
+  if (/^[1-7]$/.test(digit)) return Number(digit) - 1;
+  return -1;
+}
+
+function parseZmanimTypeChoice(req) {
+  const digit = getDigits(req);
+  if (/^[0-9]$/.test(digit)) return digit;
+  return "";
+}
+
+function getZmanimSession(req) {
+  return zmanimSessionByCall.get(getCallKey(req)) || {};
+}
+
+function setZmanimSession(req, updates) {
+  const key = getCallKey(req);
+  const current = zmanimSessionByCall.get(key) || {};
+  zmanimSessionByCall.set(key, { ...current, ...updates });
+}
+
+function clearZmanimSession(req) {
+  zmanimSessionByCall.delete(getCallKey(req));
+}
+
 function parseBorderTypeChoice(req) {
   const digit = getDigits(req);
   if (digit === "1") return "official";
@@ -694,7 +770,7 @@ function buildRootMenuInto(twiml) {
   const gather = twiml.gather(gatherOptions("/root-menu", 8, 1));
   say(
     gather,
-    "Welcome to Weather and Info Line. Press 1 for weather. Press 2 for exchange rate. Press 4 for border wait time."
+    "Welcome to Weather and Info Line. Press 1 for weather. Press 2 for exchange rate. Press 3 for zmanim. Press 4 for border wait time."
   );
   twiml.redirect({ method: "POST" }, "/root-menu-prompt");
 }
@@ -776,6 +852,66 @@ function borderMenuTwiml() {
   return twiml;
 }
 
+function zmanimLocationMenuTwiml() {
+  const twiml = new VoiceResponse();
+  const gather = twiml.gather(gatherOptions("/zmanim-location", 8, 1));
+
+  say(
+    gather,
+    "Zmanim. Press 1 for Montreal. Press 2 for Brooklyn. Press 3 for Monroe. Press 4 for Monsey. Press star for the previous menu."
+  );
+
+  twiml.redirect({ method: "POST" }, "/zmanim-location-prompt");
+  return twiml;
+}
+
+function zmanimDateMenuTwiml(req) {
+  const session = getZmanimSession(req);
+  const location = session.location || ZMANIM_LOCATIONS["1"];
+  const tz = location.timezone || "America/New_York";
+  const today = getCurrentLocalDateParts(tz).date;
+
+  const twiml = new VoiceResponse();
+  const gather = twiml.gather(gatherOptions("/zmanim-date", 8, 1));
+
+  const parts = [`Choose day for ${placeLabel(location)}.`];
+
+  for (let i = 0; i < 7; i++) {
+    const dateText = addDaysToDateText(today, i);
+    const label = i === 0
+      ? `today, ${monthDayLabel(dateText, tz)}`
+      : i === 1
+        ? `tomorrow, ${monthDayLabel(dateText, tz)}`
+        : weekdayMonthDayLabel(dateText, tz);
+
+    parts.push(`Press ${i + 1} for ${label}.`);
+  }
+
+  parts.push("Press star for the previous menu.");
+  say(gather, parts.join(" "));
+
+  twiml.redirect({ method: "POST" }, "/zmanim-date-prompt");
+  return twiml;
+}
+
+function zmanimTypeMenuTwiml(req) {
+  const session = getZmanimSession(req);
+  const location = session.location || ZMANIM_LOCATIONS["1"];
+  const dateText = session.date || getCurrentLocalDateParts(location.timezone).date;
+  const label = relativeMenuDayLabel(dateText, location.timezone);
+
+  const twiml = new VoiceResponse();
+  const gather = twiml.gather(gatherOptions("/zmanim-type", 8, 1));
+
+  say(
+    gather,
+    `Zmanim for ${label}, in ${placeLabel(location)}. Press 0 for full zmanim from now and onward. Press 1 for alos hashachar. Press 2 for neitz ha chamma. Press 3 for sof zman kree-yas shma, Gra and Magen Avraham. Press 4 for sof zman tefillah, Gra and Magen Avraham. Press 5 for chatzos. Press 6 for mincha gedolah. Press 7 for plag ha mincha. Press 8 for shkee-ah. Press 9 for tzais and Rabbeinu Tam. Press star for the previous menu.`
+  );
+
+  twiml.redirect({ method: "POST" }, "/zmanim-type-prompt");
+  return twiml;
+}
+
 function exchangeAmountPromptTwiml(req, selection) {
   const twiml = new VoiceResponse();
 
@@ -813,7 +949,7 @@ function afterActionTwiml(req) {
 
   const playback = getLastPlayback(req);
 
-  if (playback?.type === "exchange" || playback?.type === "border") {
+  if (playback?.type === "exchange" || playback?.type === "border" || playback?.type === "zmanim") {
     say(gather, "Press star to go back. Press pound to repeat. Press 5 for the main menu.");
   } else {
     const unit = getUnitPreference(req);
@@ -2610,6 +2746,227 @@ function buildBorderSpeech(result) {
 
   return parts.join(" ");
 }
+
+function zmanimCacheKey(location, dateText) {
+  return `${location.id || placeLabel(location)}:${location.latitude}:${location.longitude}:${location.timezone}:${dateText}`;
+}
+
+async function fetchHebcalCandleLighting(location, dateText) {
+  const response = await axios.get("https://www.hebcal.com/hebcal", {
+    timeout: HEBCAL_ZMANIM_TIMEOUT_MS,
+    params: {
+      cfg: "json",
+      v: "1",
+      c: "on",
+      b: 18,
+      M: "on",
+      latitude: Number(location.latitude),
+      longitude: Number(location.longitude),
+      tzid: location.timezone || "America/New_York",
+      start: dateText,
+      end: dateText
+    },
+    headers: {
+      "User-Agent": "weather-and-info-line/1.0 simon@levbrands.com",
+      Accept: "application/json"
+    }
+  });
+
+  const items = Array.isArray(response.data?.items) ? response.data.items : [];
+  const candle = items.find((item) => item.category === "candles" && item.date);
+
+  return candle
+    ? {
+        title: candle.title || "Candle lighting",
+        iso: candle.date
+      }
+    : null;
+}
+
+async function fetchHebcalZmanim(location, dateText) {
+  const key = zmanimCacheKey(location, dateText);
+  const cached = zmanimCache.get(key);
+
+  if (cached && Date.now() - cached.timestamp < ZMANIM_CACHE_MS) {
+    return cached.data;
+  }
+
+  const response = await axios.get("https://www.hebcal.com/zmanim", {
+    timeout: HEBCAL_ZMANIM_TIMEOUT_MS,
+    params: {
+      cfg: "json",
+      latitude: Number(location.latitude),
+      longitude: Number(location.longitude),
+      tzid: location.timezone || "America/New_York",
+      date: dateText
+    },
+    headers: {
+      "User-Agent": "weather-and-info-line/1.0 simon@levbrands.com",
+      Accept: "application/json"
+    }
+  });
+
+  const data = response.data || {};
+  if (!data.times) throw new Error("Hebcal returned incomplete zmanim data");
+
+  zmanimCache.set(key, { data, timestamp: Date.now() });
+  return data;
+}
+
+function formatZmanTime(iso, timezone) {
+  if (!iso) return "not available";
+
+  const parsed = new Date(iso);
+  if (Number.isNaN(parsed.getTime())) return "not available";
+
+  return parsed.toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+    timeZone: timezone || "America/New_York"
+  });
+}
+
+function subtractMinutesIso(iso, minutes) {
+  if (!iso) return "";
+  const parsed = new Date(iso);
+  if (Number.isNaN(parsed.getTime())) return "";
+  return new Date(parsed.getTime() - Number(minutes || 0) * 60 * 1000).toISOString();
+}
+
+function zmanHasPassed(iso, location, dateText) {
+  if (!iso) return true;
+
+  const selectedDate = String(dateText || "").slice(0, 10);
+  const today = getCurrentLocalDateParts(location.timezone || "America/New_York").date;
+
+  if (selectedDate > today) return false;
+  if (selectedDate < today) return true;
+
+  return new Date(iso).getTime() <= Date.now();
+}
+
+function buildZmanItem(label, iso, location) {
+  return {
+    label,
+    iso,
+    speech: `${label}, ${formatZmanTime(iso, location.timezone)}.`
+  };
+}
+
+function getZmanimItems(data, location, candleLighting = null) {
+  const z = data.times || {};
+
+  const shkiahItems = [
+    buildZmanItem("Shkee-ah", z.sunset, location)
+  ];
+
+  if (candleLighting?.iso) {
+    shkiahItems.push(
+      buildZmanItem("Candle lighting", candleLighting.iso, location)
+    );
+  }
+
+  return {
+    alos: [
+      buildZmanItem("Alos hashachar", z.alotHaShachar, location)
+    ],
+    neitz: [
+      buildZmanItem("Neitz ha chamma", z.sunrise, location)
+    ],
+    shema: [
+      buildZmanItem("Sof zman kree-yas shma Gra", z.sofZmanShma, location),
+      buildZmanItem("Sof zman kree-yas shma Magen Avraham", z.sofZmanShmaMGA, location)
+    ],
+    tefillah: [
+      buildZmanItem("Sof zman tefillah Gra", z.sofZmanTfilla, location),
+      buildZmanItem("Sof zman tefillah Magen Avraham", z.sofZmanTfillaMGA, location)
+    ],
+    chatzos: [
+      buildZmanItem("Chatzos", z.chatzot, location)
+    ],
+    mincha: [
+      buildZmanItem("Mincha gedolah", z.minchaGedola, location)
+    ],
+    plag: [
+      buildZmanItem("Plag ha mincha", z.plagHaMincha, location)
+    ],
+    shkiah: shkiahItems,
+    tzais: [
+      buildZmanItem("Tzais", z.tzeit, location),
+      buildZmanItem("Tzais 60 minutes", z.tzeit60min, location),
+      buildZmanItem("Rabbeinu Tam, 72 minutes", z.tzeit72min, location)
+    ]
+  };
+}
+
+function flattenZmanimItems(grouped) {
+  return [
+    ...grouped.alos,
+    ...grouped.neitz,
+    ...grouped.shema,
+    ...grouped.tefillah,
+    ...grouped.chatzos,
+    ...grouped.mincha,
+    ...grouped.plag,
+    ...grouped.shkiah,
+    ...grouped.tzais
+  ];
+}
+
+function buildZmanimSpeech(data, location, dateText, choice) {
+  const grouped = getZmanimItems(data, location, data.candleLighting || null);
+  const dateLabel = relativeMenuDayLabel(dateText, location.timezone);
+
+  const choiceMap = {
+    "1": grouped.alos,
+    "2": grouped.neitz,
+    "3": grouped.shema,
+    "4": grouped.tefillah,
+    "5": grouped.chatzos,
+    "6": grouped.mincha,
+    "7": grouped.plag,
+    "8": grouped.shkiah,
+    "9": grouped.tzais
+  };
+
+  if (choice === "0") {
+    const allUpcoming = flattenZmanimItems(grouped)
+      .filter((item) => item.iso && !zmanHasPassed(item.iso, location, dateText));
+
+    if (!allUpcoming.length) {
+      return `There are no remaining zmanim for ${dateLabel}, in ${placeLabel(location)}.`;
+    }
+
+    return [
+      `Remaining zmanim for ${dateLabel}, in ${placeLabel(location)}.`,
+      ...allUpcoming.map((item) => item.speech)
+    ].join(" ");
+  }
+
+  const selectedItems = choiceMap[choice] || [];
+  if (!selectedItems.length) {
+    return `I did not understand that zman choice.`;
+  }
+
+  const parts = [`Zmanim for ${dateLabel}, in ${placeLabel(location)}.`];
+
+  for (const item of selectedItems) {
+    if (!item.iso) {
+      parts.push(`${item.label} is not available.`);
+      continue;
+    }
+
+    if (zmanHasPassed(item.iso, location, dateText)) {
+      parts.push(`${item.label} already passed at ${formatZmanTime(item.iso, location.timezone)}.`);
+    } else {
+      parts.push(item.speech);
+    }
+  }
+
+  return parts.join(" ");
+}
+
 async function fetchForecast(location) {
   pruneForecastCache();
   const cached = getCachedForecast(location);
@@ -2794,7 +3151,7 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
       return twiml;
     }
 
-    if (playback.type === "exchange" || playback.type === "border") {
+    if (playback.type === "exchange" || playback.type === "border" || playback.type === "zmanim") {
       if (!playback.speech) {
         say(twiml, "There is nothing to repeat yet.");
         twiml.redirect({ method: "POST" }, "/root-menu-prompt");
@@ -2893,9 +3250,9 @@ app.post("/root-menu", async (req, res) => {
     }
 
     if (choice === "3") {
-      say(twiml, "That feature is not available yet.");
-      twiml.redirect({ method: "POST" }, "/root-menu-prompt");
-      return res.type("text/xml").send(twiml.toString());
+      clearZmanimSession(req);
+      const zmanimTwiml = zmanimLocationMenuTwiml();
+      return res.type("text/xml").send(zmanimTwiml.toString());
     }
 
     if (choice === "4") {
@@ -2909,6 +3266,131 @@ app.post("/root-menu", async (req, res) => {
   } catch (error) {
     console.error("ROOT-MENU route error:", error.message);
     say(twiml, "Sorry, an application error occurred. Please try again.");
+    return res.type("text/xml").send(twiml.toString());
+  }
+});
+
+app.post("/zmanim-location-prompt", async (req, res) => {
+  res.type("text/xml").send(zmanimLocationMenuTwiml().toString());
+});
+
+app.post("/zmanim-location", async (req, res) => {
+  const twiml = new VoiceResponse();
+
+  try {
+    if (isBackKey(req)) {
+      twiml.redirect({ method: "POST" }, "/root-menu-prompt");
+      return res.type("text/xml").send(twiml.toString());
+    }
+
+    const choice = parseZmanimLocationChoice(req);
+    const location = ZMANIM_LOCATIONS[choice];
+
+    if (!location) {
+      say(twiml, "I did not understand that location choice.");
+      twiml.redirect({ method: "POST" }, "/zmanim-location-prompt");
+      return res.type("text/xml").send(twiml.toString());
+    }
+
+    setZmanimSession(req, { location });
+    return res.type("text/xml").send(zmanimDateMenuTwiml(req).toString());
+  } catch (error) {
+    console.error("ZMANIM-LOCATION error:", error.message);
+    say(twiml, "Sorry, an application error occurred.");
+    twiml.redirect({ method: "POST" }, "/root-menu-prompt");
+    return res.type("text/xml").send(twiml.toString());
+  }
+});
+
+app.post("/zmanim-date-prompt", async (req, res) => {
+  res.type("text/xml").send(zmanimDateMenuTwiml(req).toString());
+});
+
+app.post("/zmanim-date", async (req, res) => {
+  const twiml = new VoiceResponse();
+
+  try {
+    if (isBackKey(req)) {
+      twiml.redirect({ method: "POST" }, "/zmanim-location-prompt");
+      return res.type("text/xml").send(twiml.toString());
+    }
+
+    const session = getZmanimSession(req);
+    const location = session.location;
+
+    if (!location) {
+      twiml.redirect({ method: "POST" }, "/zmanim-location-prompt");
+      return res.type("text/xml").send(twiml.toString());
+    }
+
+    const offset = parseZmanimDateChoice(req);
+    if (offset < 0 || offset > 6) {
+      say(twiml, "I did not understand that day choice.");
+      twiml.redirect({ method: "POST" }, "/zmanim-date-prompt");
+      return res.type("text/xml").send(twiml.toString());
+    }
+
+    const today = getCurrentLocalDateParts(location.timezone || "America/New_York").date;
+    const dateText = addDaysToDateText(today, offset);
+
+    setZmanimSession(req, { date: dateText });
+    return res.type("text/xml").send(zmanimTypeMenuTwiml(req).toString());
+  } catch (error) {
+    console.error("ZMANIM-DATE error:", error.message);
+    say(twiml, "Sorry, an application error occurred.");
+    twiml.redirect({ method: "POST" }, "/root-menu-prompt");
+    return res.type("text/xml").send(twiml.toString());
+  }
+});
+
+app.post("/zmanim-type-prompt", async (req, res) => {
+  res.type("text/xml").send(zmanimTypeMenuTwiml(req).toString());
+});
+
+app.post("/zmanim-type", async (req, res) => {
+  const twiml = new VoiceResponse();
+
+  try {
+    if (isBackKey(req)) {
+      twiml.redirect({ method: "POST" }, "/zmanim-date-prompt");
+      return res.type("text/xml").send(twiml.toString());
+    }
+
+    const session = getZmanimSession(req);
+    const location = session.location;
+    const dateText = session.date;
+    const choice = parseZmanimTypeChoice(req);
+
+    if (!location || !dateText) {
+      twiml.redirect({ method: "POST" }, "/zmanim-location-prompt");
+      return res.type("text/xml").send(twiml.toString());
+    }
+
+    if (!choice) {
+      say(twiml, "I did not understand that zman choice.");
+      twiml.redirect({ method: "POST" }, "/zmanim-type-prompt");
+      return res.type("text/xml").send(twiml.toString());
+    }
+
+    const [zmanimData, candleLighting] = await Promise.all([
+      fetchHebcalZmanim(location, dateText),
+      fetchHebcalCandleLighting(location, dateText)
+    ]);
+
+    zmanimData.candleLighting = candleLighting;
+
+    const speech = buildZmanimSpeech(zmanimData, location, dateText, choice);
+
+    setLastPlayback(req, {
+      type: "zmanim",
+      speech
+    });
+
+    return res.type("text/xml").send(playbackWithStarTwiml(speech));
+  } catch (error) {
+    console.error("ZMANIM-TYPE error:", error.message);
+    say(twiml, "Sorry, I could not retrieve zmanim right now.");
+    twiml.redirect({ method: "POST" }, "/zmanim-type-prompt");
     return res.type("text/xml").send(twiml.toString());
   }
 });
@@ -3313,6 +3795,12 @@ app.post("/during-playback", async (req, res) => {
   const playback = getLastPlayback(req);
 
   if (isBackKey(req)) {
+    if (playback?.type === "zmanim") {
+      const twiml = new VoiceResponse();
+      twiml.redirect({ method: "POST" }, "/zmanim-type-prompt");
+      return res.type("text/xml").send(twiml.toString());
+    }
+
     if (playback?.type === "border") {
       const twiml = new VoiceResponse();
 
@@ -3346,6 +3834,11 @@ app.post("/after", async (req, res) => {
   console.log("AFTER Digits:", getDigits(req));
 
   if (isBackKey(req)) {
+    if (playback?.type === "zmanim") {
+      twiml.redirect({ method: "POST" }, "/zmanim-type-prompt");
+      return res.type("text/xml").send(twiml.toString());
+    }
+
     if (playback?.type === "border") {
       if (playback?.borderDirection) {
         setBorderDirection(req, playback.borderDirection);
@@ -3364,7 +3857,7 @@ app.post("/after", async (req, res) => {
   const choice = parseAfterChoice(req);
 
   if (choice === "5") {
-    if (playback?.type === "border") {
+    if (playback?.type === "border" || playback?.type === "zmanim") {
       const rootTwiml = await buildStateTwiml(req, "root-menu", { push: false });
       return res.type("text/xml").send(rootTwiml.toString());
     }
@@ -3380,7 +3873,13 @@ app.post("/after", async (req, res) => {
     );
   }
 
-  if (choice === "7" && playback && playback.type !== "exchange" && playback.type !== "border") {
+  if (
+    choice === "7" &&
+    playback &&
+    playback.type !== "exchange" &&
+    playback.type !== "border" &&
+    playback.type !== "zmanim"
+  ) {
     toggleUnitPreference(req);
     const playbackTwiml = await buildStateTwiml(req, "playback", { push: false });
     return res.type("text/xml").send(
