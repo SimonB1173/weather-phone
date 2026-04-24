@@ -1502,28 +1502,27 @@ function nwsPeriodSpeech(period, unit = "C") {
   const parts = [];
   const name = String(period?.name || "").trim();
   const shortForecast = String(period?.shortForecast || "").trim();
-  const detailed = String(period?.detailedForecast || "").trim();
   const tempF = safeNumber(period?.temperature);
   const tempC = tempF === null ? null : nwsFahrenheitToCelsius(tempF);
-  const isNight = !!period?.isDaytime === false;
+  const isNight = period?.isDaytime === false;
+  const pop = safeNumber(period?.probabilityOfPrecipitation?.value);
 
   if (name) parts.push(`${name}.`);
-  if (shortForecast) parts.push(shortForecast.endsWith(".") ? shortForecast : `${shortForecast}.`);
+
+  if (shortForecast) {
+    parts.push(shortForecast.endsWith(".") ? shortForecast : `${shortForecast}.`);
+  }
 
   if (Number.isFinite(tempC)) {
     parts.push(`${isNight ? "Low" : "High"} ${formatForecastTempValue(tempC, unit)}.`);
   }
 
-  if (period?.windDirection && period?.windSpeed) {
-    parts.push(`Wind ${formatNwsWindText(`${period.windDirection} ${period.windSpeed}`, unit)}.`);
+  if (Number.isFinite(pop) && pop > 0) {
+    parts.push(`${Math.round(pop)} percent chance of precipitation.`);
   }
 
-  if (detailed) {
-    const detailedLower = detailed.toLowerCase();
-    const shortLower = shortForecast.toLowerCase();
-    if (!shortLower || !detailedLower.includes(shortLower)) {
-      parts.push(detailed);
-    }
+  if (period?.windDirection && period?.windSpeed) {
+    parts.push(`Wind ${formatNwsWindText(`${period.windDirection} ${period.windSpeed}`, unit)}.`);
   }
 
   return parts.join(" ");
@@ -1579,15 +1578,26 @@ function nwsAllForecastSpeech(location, nwsData, unit = "C") {
   if (!groups.length) return `I could not find forecast days for ${placeLabel(location)}.`;
 
   const parts = [
-    `Forecast for ${placeLabel(location)}.`,
+    `Seven day forecast for ${placeLabel(location)}.`,
     nwsIssuedSpeechLine("Issued by the National Weather Service", nwsData?.forecast?.properties?.updated, location.timezone)
   ];
 
   for (const group of groups.slice(0, 7)) {
-    parts.push(`Forecast for ${group.label}.`);
-    for (const period of group.periods) {
-      parts.push(nwsPeriodSpeech(period, unit));
-    }
+    const periodSummaries = group.periods.map((period) => {
+      const name = String(period?.name || "").trim();
+      const shortForecast = String(period?.shortForecast || "").trim();
+      const tempF = safeNumber(period?.temperature);
+      const tempC = tempF === null ? null : nwsFahrenheitToCelsius(tempF);
+      const isNight = period?.isDaytime === false;
+
+      const tempText = Number.isFinite(tempC)
+        ? `${isNight ? "low" : "high"} ${formatForecastTempValue(tempC, unit)}`
+        : "";
+
+      return [name, shortForecast, tempText].filter(Boolean).join(", ");
+    });
+
+    parts.push(`${group.label}. ${periodSummaries.join(". ")}.`);
   }
 
   return parts.join(" ");
