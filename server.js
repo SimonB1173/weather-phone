@@ -905,7 +905,7 @@ function zmanimTypeMenuTwiml(req) {
 
   say(
     gather,
-    `Zmanim for ${label}, in ${placeLabel(location)}. Press 0 for full zmanim from now and onward. Press 1 for alos hashachar. Press 2 for neitz ha chamma. Press 3 for sof zman kree-yas shma, Gra and Magen Avraham. Press 4 for sof zman tefillah, Gra and Magen Avraham. Press 5 for chatzos. Press 6 for mincha gedolah. Press 7 for plag ha mincha. Press 8 for shkee-ah. Press 9 for tzais and Rabbeinu Tam. Press star for the previous menu.`
+    `Zmanim for ${label}, in ${placeLabel(location)}. Press 0 for full remaining zmanim. Press 1 for dawn. Press 2 for sunrise. Press 3 for latest time for Shema, Magen Avraham and Gra. Press 4 for latest time for morning prayers, Magen Avraham and Gra. Press 5 for midday. Press 6 for earliest afternoon prayer.          Press 7 for plag. Press 8 for sunset. Press 9 for nightfall and Rabbeinu Tam. Press star for the previous menu.`
   );
 
   twiml.redirect({ method: "POST" }, "/zmanim-type-prompt");
@@ -2857,45 +2857,45 @@ function buildZmanItem(label, iso, location) {
 function getZmanimItems(data, location, candleLighting = null) {
   const z = data.times || {};
 
-  const shkiahItems = [
-    buildZmanItem("Shkee-ah", z.sunset, location)
+  const sunsetItems = [
+    buildZmanItem("Sunset", z.sunset, location)
   ];
 
   if (candleLighting?.iso) {
-    shkiahItems.push(
+    sunsetItems.push(
       buildZmanItem("Candle lighting", candleLighting.iso, location)
     );
   }
 
   return {
     alos: [
-      buildZmanItem("Alos hashachar", z.alotHaShachar, location)
+      buildZmanItem("Dawn", z.alotHaShachar, location)
     ],
     neitz: [
-      buildZmanItem("Neitz ha chamma", z.sunrise, location)
+      buildZmanItem("Sunrise", z.sunrise, location)
     ],
     shema: [
-      buildZmanItem("Sof zman kree-yas shma Gra", z.sofZmanShma, location),
-      buildZmanItem("Sof zman kree-yas shma Magen Avraham", z.sofZmanShmaMGA, location)
+      buildZmanItem("Latest time for Shema Magen Avraham", z.sofZmanShmaMGA, location),
+      buildZmanItem("Latest time for Shema Gra", z.sofZmanShma, location)
     ],
     tefillah: [
-      buildZmanItem("Sof zman tefillah Gra", z.sofZmanTfilla, location),
-      buildZmanItem("Sof zman tefillah Magen Avraham", z.sofZmanTfillaMGA, location)
+      buildZmanItem("Latest time for morning prayers Magen Avraham", z.sofZmanTfillaMGA, location),
+      buildZmanItem("Latest time for morning prayers Gra", z.sofZmanTfilla, location)
     ],
     chatzos: [
-      buildZmanItem("Chatzos", z.chatzot, location)
+      buildZmanItem("Midday", z.chatzot, location)
     ],
     mincha: [
-      buildZmanItem("Mincha gedolah", z.minchaGedola, location)
+      buildZmanItem("Earliest afternoon prayer", z.minchaGedola, location)
     ],
     plag: [
-      buildZmanItem("Plag ha mincha", z.plagHaMincha, location)
+      buildZmanItem("Plag", z.plagHaMincha, location)
     ],
-    shkiah: shkiahItems,
+    shkiah: sunsetItems,
     tzais: [
-      buildZmanItem("Tzais", z.tzeit, location),
-      buildZmanItem("Tzais 60 minutes", z.tzeit60min, location),
-      buildZmanItem("Rabbeinu Tam, 72 minutes", z.tzeit72min, location)
+      buildZmanItem("Nightfall", z.tzeit, location),
+      buildZmanItem("Nightfall 60 minutes", z.tzeit60min, location),
+      buildZmanItem("Rabbeinu Tam nightfall", z.tzeit72min, location)
     ]
   };
 }
