@@ -2875,11 +2875,11 @@ function getZmanimItems(data, location, candleLighting = null) {
       buildZmanItem("Sunrise", z.sunrise, location)
     ],
     shema: [
-      buildZmanItem("Latest time for Shema Magen Avraham", z.sofZmanShmaMGA, location),
+      buildZmanItem("Latest time for Shema Magen Avraham", z.sofZmanShmaMGA16Point1 || z.sofZmanShmaMGA, location),
       buildZmanItem("Latest time for Shema Gra", z.sofZmanShma, location)
     ],
     tefillah: [
-      buildZmanItem("Latest time for morning prayers Magen Avraham", z.sofZmanTfillaMGA, location),
+      buildZmanItem("Latest time for morning prayers Magen Avraham", z.sofZmanTfillaMGA16Point1 || z.sofZmanTfillaMGA, location),
       buildZmanItem("Latest time for morning prayers Gra", z.sofZmanTfilla, location)
     ],
     chatzos: [
