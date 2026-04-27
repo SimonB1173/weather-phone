@@ -123,28 +123,28 @@ const US_LOCATIONS = {
 const ZMANIM_LOCATIONS = {
   "1": {
     id: "zmanim_montreal",
-    name: "Montreal, Quebec, Canada",
+    name: "Outremont, Montreal, Quebec, Canada",
     label: "Montreal",
-    latitude: 45.5017,
-    longitude: -73.5673,
+    latitude: 45.5260,
+    longitude: -73.6100,
     timezone: "America/Toronto",
     country: "CA"
   },
   "2": {
-    id: "zmanim_brooklyn",
-    name: "Brooklyn, New York, USA",
-    label: "Brooklyn",
-    latitude: 40.6782,
-    longitude: -73.9442,
+    id: "zmanim_williamsburg",
+    name: "Williamsburg, Brooklyn, New York, USA",
+    label: "Williamsburg",
+    latitude: 40.7126,
+    longitude: -73.9570,
     timezone: "America/New_York",
     country: "US"
   },
   "3": {
     id: "zmanim_monroe",
-    name: "Monroe, New York, USA",
+    name: "Kiryas Joel, Monroe, New York, USA",
     label: "Monroe",
-    latitude: 41.3306,
-    longitude: -74.1868,
+    latitude: 41.3415,
+    longitude: -74.1677,
     timezone: "America/New_York",
     country: "US"
   },
@@ -152,11 +152,11 @@ const ZMANIM_LOCATIONS = {
     id: "zmanim_monsey",
     name: "Monsey, New York, USA",
     label: "Monsey",
-    latitude: 41.1112,
-    longitude: -74.0685,
+    latitude: 41.1180,
+    longitude: -74.0820,
     timezone: "America/New_York",
     country: "US"
-  }
+  },
 };
 
 const CHAMPLAIN_LACOLLE = {
