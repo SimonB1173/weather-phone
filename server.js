@@ -159,11 +159,11 @@ const ZMANIM_LOCATIONS = {
     country: "US"
   },
   "3": {
-    id: "zmanim_monroe",
-    name: "Kiryas Joel, Monroe, New York, USA",
-    label: "Monroe",
-    latitude: 41.3415,
-    longitude: -74.1677,
+    id: "zmanim_boro_park",
+    name: "Boro Park, Brooklyn, New York, USA",
+    label: "Boro Park",
+    latitude: 40.6336,
+    longitude: -73.9968,
     timezone: "America/New_York",
     country: "US"
   },
@@ -176,8 +176,16 @@ const ZMANIM_LOCATIONS = {
     timezone: "America/New_York",
     country: "US"
   },
-  
   "5": {
+    id: "zmanim_monroe",
+    name: "Kiryas Joel, Monroe, New York, USA",
+    label: "Monroe",
+    latitude: 41.3415,
+    longitude: -74.1677,
+    timezone: "America/New_York",
+    country: "US"
+  },
+  "6": {
     id: "zmanim_lakewood",
     name: "Lakewood, New Jersey, USA",
     label: "Lakewood",
@@ -185,17 +193,7 @@ const ZMANIM_LOCATIONS = {
     longitude: -74.2097,
     timezone: "America/New_York",
     country: "US"
-  },
-  "6": {
-    id: "zmanim_boro_park",
-    name: "Boro Park, Brooklyn, New York, USA",
-    label: "Boro Park",
-    latitude: 40.6336,
-    longitude: -73.9968,
-    timezone: "America/New_York",
-    country: "US"
   }
-
 };
 
 const CHAMPLAIN_LACOLLE = {
@@ -897,7 +895,7 @@ function zmanimLocationMenuTwiml() {
 
   say(
     gather,
-    "Zmanim. Press 1 for Montreal. Press 2 for Williamsburg. Press 3 for Monroe. Press 4 for Monsey. Press 5 for Lakewood. Press 6 for Boro Park. Press star for the previous menu."
+    "Zmanim. Press 1 for Montreal. Press 2 for Williamsburg. Press 3 for Boro Park. Press 4 for Monsey. Press 5 for Monroe. Press 6 for Lakewood. Press star for the previous menu."
   );
 
   twiml.redirect({ method: "POST" }, "/zmanim-location-prompt");
