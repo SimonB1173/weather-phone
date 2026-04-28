@@ -1693,15 +1693,6 @@ function ecCurrentWeatherSpeech(location, ecData, unit = "C") {
   if (c.condition) parts.push(`It is ${String(c.condition).toLowerCase()}.`);
   if (Number.isFinite(c.temperatureC)) parts.push(`Temperature ${formatSignedTemp(c.temperatureC, unit)} degrees.`);
 
-  const apparent = c.windChillC ?? c.humidexC;
-  if (
-    Number.isFinite(apparent) &&
-    Number.isFinite(c.temperatureC) &&
-    Math.round(tempValueForUnit(apparent, unit)) !== Math.round(tempValueForUnit(c.temperatureC, unit))
-  ) {
-    parts.push(`Feels like ${formatSignedTemp(apparent, unit)}.`);
-  }
-
   if (Number.isFinite(c.windSpeedKmh) && c.windSpeedKmh > 0) {
     const speed = Math.round(speedValueForUnit(c.windSpeedKmh, unit));
     const dir = c.windDirectionText ? compassLettersToWords(c.windDirectionText) : degreesToCompass(c.windBearing || 0);
