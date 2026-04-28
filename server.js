@@ -2893,11 +2893,21 @@ function zmanHasPassed(iso, location, dateText) {
 }
 
 function buildZmanItem(label, iso, location, key = "") {
+  const formatted = formatZmanTime(iso, location.timezone, key);
+
+  console.log("ZMAN FORMAT CHECK", {
+    label,
+    key,
+    iso,
+    timezone: location.timezone,
+    formatted
+  });
+
   return {
     label,
     iso,
     key,
-    speech: `${label}, ${formatZmanTime(iso, location.timezone, key)}.`
+    speech: `${label}, ${formatted}.`
   };
 }
 
