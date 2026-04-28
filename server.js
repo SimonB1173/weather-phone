@@ -40,7 +40,7 @@ const EC_CITYPAGE_CACHE_MS = 20 * 60 * 1000;
 const EXCHANGE_CACHE_MS = 10 * 60 * 1000;
 const BORDER_CACHE_MS = 30 * 1000;
 const LIVE_TRAFFIC_CACHE_MS = 30 * 1000;
-const ZMANIM_CACHE_MS = 12 * 60 * 60 * 1000;
+const ZMANIM_CACHE_MS = 1;
 const HEBCAL_ZMANIM_TIMEOUT_MS = 10000;
 const ZMANIM_ROUND_DOWN_KEYS = new Set([
   "alotHaShachar",
@@ -2779,6 +2779,7 @@ async function fetchHebcalCandleLighting(location, dateText) {
       c: "on",
       b: 18,
       M: "on",
+      sec: 1,
       latitude: Number(location.latitude),
       longitude: Number(location.longitude),
       tzid: location.timezone || "America/New_York",
@@ -2814,6 +2815,7 @@ async function fetchHebcalZmanim(location, dateText) {
     timeout: HEBCAL_ZMANIM_TIMEOUT_MS,
     params: {
       cfg: "json",
+      sec: 1,
       latitude: Number(location.latitude),
       longitude: Number(location.longitude),
       tzid: location.timezone || "America/New_York",
@@ -2950,8 +2952,6 @@ function getZmanimItems(data, location, candleLighting = null) {
     ],
     shkiah: sunsetItems,
     tzais: [
-      buildZmanItem("Nightfall", z.tzeit, location, "tzeit"),
-      buildZmanItem("Nightfall 60 minutes", z.tzeit60min, location, "tzeit60min"),
       buildZmanItem("Rabbeinu Tam nightfall", z.tzeit72min, location, "tzeit72min")
     ]
   };
