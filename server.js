@@ -176,6 +176,26 @@ const ZMANIM_LOCATIONS = {
     timezone: "America/New_York",
     country: "US"
   },
+  
+  "5": {
+    id: "zmanim_lakewood",
+    name: "Lakewood, New Jersey, USA",
+    label: "Lakewood",
+    latitude: 40.0821,
+    longitude: -74.2097,
+    timezone: "America/New_York",
+    country: "US"
+  },
+  "6": {
+    id: "zmanim_boro_park",
+    name: "Boro Park, Brooklyn, New York, USA",
+    label: "Boro Park",
+    latitude: 40.6336,
+    longitude: -73.9968,
+    timezone: "America/New_York",
+    country: "US"
+  }
+
 };
 
 const CHAMPLAIN_LACOLLE = {
@@ -689,7 +709,7 @@ function parseBorderDirectionChoice(req) {
 
 function parseZmanimLocationChoice(req) {
   const digit = getDigits(req);
-  if (/^[1-4]$/.test(digit)) return digit;
+  if (/^[1-6]$/.test(digit)) return digit;
   return "";
 }
 
@@ -877,7 +897,7 @@ function zmanimLocationMenuTwiml() {
 
   say(
     gather,
-    "Zmanim. Press 1 for Montreal. Press 2 for Brooklyn. Press 3 for Monroe. Press 4 for Monsey. Press star for the previous menu."
+    "Zmanim. Press 1 for Montreal. Press 2 for Williamsburg. Press 3 for Monroe. Press 4 for Monsey. Press 5 for Lakewood. Press 6 for Boro Park. Press star for the previous menu."
   );
 
   twiml.redirect({ method: "POST" }, "/zmanim-location-prompt");
@@ -924,7 +944,7 @@ function zmanimTypeMenuTwiml(req) {
 
   say(
     gather,
-    `Zmanim for ${label}, in ${placeLabel(location)}. Press 0 for full remaining zmanim. Press 1 for dawn. Press 2 for sunrise. Press 3 for latest time for Shema, Magen Avraham and Gra. Press 4 for latest time for morning prayers, Magen Avraham and Gra. Press 5 for midday. Press 6 for earliest afternoon prayer.          Press 7 for plag. Press 8 for sunset. Press 9 for nightfall and Rabbeinu Tam. Press star for the previous menu.`
+    `Zmanim for ${label}, in ${placeLabel(location)}. ${dateText === getCurrentLocalDateParts(location.timezone).date ? "Press 0 for remaining zmanim." : "Press 0 for all zmanim."} Press 1 for dawn. Press 2 for sunrise. Press 3 for latest time for Shema, Magen Avraham and Gra. Press 4 for latest time for morning prayers, Magen Avraham and Gra. Press 5 for midday. Press 6 for earliest afternoon prayer. Press 7 for plag. Press 8 for sunset. Press 9 for nightfall and Rabbeinu Tam. Press star for the previous menu.`
   );
 
   twiml.redirect({ method: "POST" }, "/zmanim-type-prompt");
@@ -2988,7 +3008,7 @@ function buildZmanimSpeech(data, location, dateText, choice) {
     }
 
     return [
-      `Remaining zmanim for ${dateLabel}, in ${placeLabel(location)}.`,
+      `${dateText === getCurrentLocalDateParts(location.timezone).date ? "Remaining zmanim" : "All zmanim"} for ${dateLabel}, in ${placeLabel(location)}.`,
       ...allUpcoming.map((item) => item.speech)
     ].join(" ");
   }
@@ -3383,7 +3403,31 @@ app.post("/zmanim-date", async (req, res) => {
     const dateText = addDaysToDateText(today, offset);
 
     setZmanimSession(req, { date: dateText });
-    return res.type("text/xml").send(zmanimTypeMenuTwiml(req).toString());
+
+    const typeTwiml = zmanimTypeMenuTwiml(req);
+
+    try {
+      const candleLighting = await fetchHebcalCandleLighting(location, dateText);
+      if (candleLighting?.iso) {
+        const intro = new VoiceResponse();
+        say(
+          intro,
+          `Candle lighting is ${formatZmanTime(candleLighting.iso, location.timezone, "candleLighting")}.`
+        );
+
+        const gather = intro.gather(gatherOptions("/zmanim-type", 8, 1));
+        say(
+          gather,
+          `Zmanim for ${relativeMenuDayLabel(dateText, location.timezone)}, in ${placeLabel(location)}. ${dateText === getCurrentLocalDateParts(location.timezone).date ? "Press 0 for remaining zmanim." : "Press 0 for all zmanim."} Press 1 for dawn. Press 2 for sunrise. Press 3 for latest time for Shema, Magen Avraham and Gra. Press 4 for latest time for morning prayers, Magen Avraham and Gra. Press 5 for midday.  Press 6 for earliest afternoon prayer. Press 7 for plag. Press 8 for sunset. Press 9 for nightfall and Rabbeinu Tam. Press star for the previous menu.`
+    );
+    intro.redirect({ method: "POST" }, "/zmanim-type-prompt");
+    return res.type("text/xml").send(intro.toString());
+  }
+} catch (error) {
+  console.error("Candle lighting prefetch failed:", error.message);
+}
+
+return res.type("text/xml").send(typeTwiml.toString());
   } catch (error) {
     console.error("ZMANIM-DATE error:", error.message);
     say(twiml, "Sorry, an application error occurred.");
