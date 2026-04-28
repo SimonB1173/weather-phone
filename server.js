@@ -3997,7 +3997,7 @@ app.post("/during-playback", async (req, res) => {
   if (isBackKey(req)) {
     if (playback?.type === "zmanim") {
       const twiml = new VoiceResponse();
-      twiml.redirect({ method: "POST" }, "/zmanim-type-prompt");
+      twiml.redirect({ method: "POST" }, "/zmanim-date-prompt");
       return res.type("text/xml").send(twiml.toString());
     }
 
@@ -4055,6 +4055,19 @@ app.post("/after", async (req, res) => {
   }
 
   const choice = parseAfterChoice(req);
+
+  if (choice === "7" && playback?.type === "zmanim") {
+    const rate = toggleZmanimSpeechRate(req);
+
+    setLastPlayback(req, {
+      ...playback,
+      speechRate: rate
+    });
+
+    return res.type("text/xml").send(
+      playbackWithStarTwiml(playback.speech, { rate })
+    );
+  }
 
   if (choice === "5") {
     if (playback?.type === "border" || playback?.type === "zmanim") {
