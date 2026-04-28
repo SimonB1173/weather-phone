@@ -1008,10 +1008,6 @@ function afterActionTwiml(req) {
     const unitText = unit === "F" ? "Press 7 to switch back to Celsius." : "Press 7 to hear it in Fahrenheit.";
     say(gather, `Press star to go back. Press pound to repeat. Press 5 for the main menu. ${unitText}`);
   }
-    const unit = getUnitPreference(req);
-    const unitText = unit === "F" ? "Press 7 to switch back to Celsius." : "Press 7 to hear it in Fahrenheit.";
-    say(gather, `Press star to go back. Press pound to repeat. Press 5 for the main menu. ${unitText}`);
-  }
 
   twiml.hangup();
   return twiml;
