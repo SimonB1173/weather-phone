@@ -2853,6 +2853,7 @@ function formatZmanTime(iso, timezone, key = "") {
   const second = Number(parts.find((p) => p.type === "second")?.value || 0);
   let dayPeriod = parts.find((p) => p.type === "dayPeriod")?.value || "";
 
+  // Only these are rounded UP
   if (ZMANIM_ROUND_UP_KEYS.has(key) && second > 0) {
     minute += 1;
 
@@ -2864,12 +2865,11 @@ function formatZmanTime(iso, timezone, key = "") {
         dayPeriod = dayPeriod === "AM" ? "PM" : "AM";
       }
 
-      if (hour > 12) {
-        hour = 1;
-      }
+      if (hour > 12) hour = 1;
     }
   }
 
+  // Everything else stays at the minute shown by seconds — meaning rounded DOWN
   return `${hour}:${String(minute).padStart(2, "0")} ${dayPeriod}`;
 }
 
