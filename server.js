@@ -40,7 +40,7 @@ const EC_CITYPAGE_CACHE_MS = 20 * 60 * 1000;
 const EXCHANGE_CACHE_MS = 10 * 60 * 1000;
 const BORDER_CACHE_MS = 30 * 1000;
 const LIVE_TRAFFIC_CACHE_MS = 30 * 1000;
-const ZMANIM_CACHE_MS = 1;
+const ZMANIM_CACHE_MS = 12 * 60 * 60 * 1000;
 const HEBCAL_ZMANIM_TIMEOUT_MS = 10000;
 const ZMANIM_ROUND_DOWN_KEYS = new Set([
   "alotHaShachar",
@@ -2896,14 +2896,6 @@ function zmanHasPassed(iso, location, dateText) {
 
 function buildZmanItem(label, iso, location, key = "") {
   const formatted = formatZmanTime(iso, location.timezone, key);
-
-  console.log("ZMAN FORMAT CHECK", {
-    label,
-    key,
-    iso,
-    timezone: location.timezone,
-    formatted
-  });
 
   return {
     label,
