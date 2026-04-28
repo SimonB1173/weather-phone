@@ -42,6 +42,25 @@ const BORDER_CACHE_MS = 30 * 1000;
 const LIVE_TRAFFIC_CACHE_MS = 30 * 1000;
 const ZMANIM_CACHE_MS = 12 * 60 * 60 * 1000;
 const HEBCAL_ZMANIM_TIMEOUT_MS = 10000;
+const ZMANIM_ROUND_DOWN_KEYS = new Set([
+  "alotHaShachar",
+  "sunrise",
+  "sofZmanShmaMGA16Point1",
+  "sofZmanShma",
+  "sofZmanTfillaMGA72Minutes",
+  "sofZmanTfilla",
+  "chatzot",
+  "minchaGedola",
+  "plagHaMincha",
+  "candleLighting"
+]);
+
+const ZMANIM_ROUND_UP_KEYS = new Set([
+  "sunset",
+  "tzeit",
+  "tzeit60min",
+  "tzeit72min"
+]);
 
 const EC_API_TIMEOUT_MS = 5000;
 const EC_ALERT_TIMEOUT_MS = 5000;
@@ -2813,18 +2832,45 @@ async function fetchHebcalZmanim(location, dateText) {
   return data;
 }
 
-function formatZmanTime(iso, timezone) {
+function formatZmanTime(iso, timezone, key = "") {
   if (!iso) return "not available";
 
   const parsed = new Date(iso);
   if (Number.isNaN(parsed.getTime())) return "not available";
 
-  return parsed.toLocaleTimeString("en-US", {
+  const tz = timezone || "America/New_York";
+
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
     hour: "numeric",
     minute: "2-digit",
-    hour12: true,
-    timeZone: timezone || "America/New_York"
-  });
+    second: "2-digit",
+    hour12: true
+  }).formatToParts(parsed);
+
+  let hour = Number(parts.find((p) => p.type === "hour")?.value || 0);
+  let minute = Number(parts.find((p) => p.type === "minute")?.value || 0);
+  const second = Number(parts.find((p) => p.type === "second")?.value || 0);
+  let dayPeriod = parts.find((p) => p.type === "dayPeriod")?.value || "";
+
+  if (ZMANIM_ROUND_UP_KEYS.has(key) && second > 0) {
+    minute += 1;
+
+    if (minute >= 60) {
+      minute = 0;
+      hour += 1;
+
+      if (hour === 12) {
+        dayPeriod = dayPeriod === "AM" ? "PM" : "AM";
+      }
+
+      if (hour > 12) {
+        hour = 1;
+      }
+    }
+  }
+
+  return `${hour}:${String(minute).padStart(2, "0")} ${dayPeriod}`;
 }
 
 function subtractMinutesIso(iso, minutes) {
@@ -2846,11 +2892,12 @@ function zmanHasPassed(iso, location, dateText) {
   return new Date(iso).getTime() <= Date.now();
 }
 
-function buildZmanItem(label, iso, location) {
+function buildZmanItem(label, iso, location, key = "") {
   return {
     label,
     iso,
-    speech: `${label}, ${formatZmanTime(iso, location.timezone)}.`
+    key,
+    speech: `${label}, ${formatZmanTime(iso, location.timezone, key)}.`
   };
 }
 
@@ -2858,44 +2905,44 @@ function getZmanimItems(data, location, candleLighting = null) {
   const z = data.times || {};
 
   const sunsetItems = [
-    buildZmanItem("Sunset", z.sunset, location)
+    buildZmanItem("Sunset", z.sunset, location, "sunset")
   ];
 
   if (candleLighting?.iso) {
     sunsetItems.push(
-      buildZmanItem("Candle lighting", candleLighting.iso, location)
+      buildZmanItem("Candle lighting", candleLighting.iso, location, "candleLighting")
     );
   }
 
   return {
     alos: [
-      buildZmanItem("Dawn", z.alotHaShachar, location)
+      buildZmanItem("Dawn", z.alotHaShachar, location, "alotHaShachar")
     ],
     neitz: [
-      buildZmanItem("Sunrise", z.sunrise, location)
+      buildZmanItem("Sunrise", z.sunrise, location, "sunrise")
     ],
     shema: [
-      buildZmanItem("Latest time for Shema Magen Avraham", z.sofZmanShmaMGA16Point1 || z.sofZmanShmaMGA, location),
-      buildZmanItem("Latest time for Shema Gra", z.sofZmanShma, location)
+      buildZmanItem("Latest time for Shema Magen Avraham", z.sofZmanShmaMGA16Point1 || z.sofZmanShmaMGA, location, "sofZmanShmaMGA16Point1"),
+      buildZmanItem("Latest time for Shema Gra", z.sofZmanShma, location, "sofZmanShma")
     ],
     tefillah: [
-      buildZmanItem("Latest time for morning prayers Magen Avraham", z.sofZmanTfillaMGA72Minutes || z.sofZmanTfillaMGA, location),
-      buildZmanItem("Latest time for morning prayers Gra", z.sofZmanTfilla, location)
+      buildZmanItem("Latest time for morning prayers Magen Avraham", z.sofZmanTfillaMGA72Minutes || z.sofZmanTfillaMGA, location, "sofZmanTfillaMGA72Minutes"),
+      buildZmanItem("Latest time for morning prayers Gra", z.sofZmanTfilla, location, "sofZmanTfilla")
     ],
     chatzos: [
-      buildZmanItem("Midday", z.chatzot, location)
+      buildZmanItem("Midday", z.chatzot, location, "chatzot")
     ],
     mincha: [
-      buildZmanItem("Earliest afternoon prayer", z.minchaGedola, location)
+      buildZmanItem("Earliest afternoon prayer", z.minchaGedola, location, "minchaGedola")
     ],
     plag: [
-      buildZmanItem("Plag", z.plagHaMincha, location)
+      buildZmanItem("Plag", z.plagHaMincha, location, "plagHaMincha")
     ],
     shkiah: sunsetItems,
     tzais: [
-      buildZmanItem("Nightfall", z.tzeit, location),
-      buildZmanItem("Nightfall 60 minutes", z.tzeit60min, location),
-      buildZmanItem("Rabbeinu Tam nightfall", z.tzeit72min, location)
+      buildZmanItem("Nightfall", z.tzeit, location, "tzeit"),
+      buildZmanItem("Nightfall 60 minutes", z.tzeit60min, location, "tzeit60min"),
+      buildZmanItem("Rabbeinu Tam nightfall", z.tzeit72min, location, "tzeit72min")
     ]
   };
 }
