@@ -37,6 +37,7 @@ const zmanimSpeedByCall = new Map();
 const FORECAST_CACHE_MS = 15 * 60 * 1000;
 const STALE_FORECAST_MS = 2 * 60 * 1000;
 const ALERT_CACHE_MS = 10 * 60 * 1000;
+const CURRENT_WEATHER_CACHE_MS = 2 * 60 * 1000;
 const EC_CITYPAGE_CACHE_MS = 20 * 60 * 1000;
 const EXCHANGE_CACHE_MS = 10 * 60 * 1000;
 const BORDER_CACHE_MS = 30 * 1000;
@@ -452,13 +453,21 @@ function pruneForecastCache() {
   }
 }
 
-function getCachedForecast(location, { allowStale = false } = {}) {
+function getCachedForecast(location, { allowStale = false, maxAgeMs = FORECAST_CACHE_MS } = {}) {
   const key = cacheKeyForLocation(location);
   const cached = forecastCache.get(key);
   if (!cached) return null;
+
   const age = Date.now() - cached.timestamp;
-  if (age <= FORECAST_CACHE_MS) return { data: cached.data, isStale: false, key, age };
-  if (allowStale && age <= STALE_FORECAST_MS) return { data: cached.data, isStale: true, key, age };
+
+  if (age <= maxAgeMs) {
+    return { data: cached.data, isStale: false, key, age };
+  }
+
+  if (allowStale && age <= STALE_FORECAST_MS) {
+    return { data: cached.data, isStale: true, key, age };
+  }
+
   return null;
 }
 
@@ -3087,9 +3096,11 @@ function buildZmanimSpeech(data, location, dateText, choice) {
   return parts.join(" ");
 }
 
-async function fetchForecast(location) {
+async function fetchForecast(location, { currentOnly = false } = {}) {
   pruneForecastCache();
-  const cached = getCachedForecast(location);
+  const cached = getCachedForecast(location, {
+    maxAgeMs: currentOnly ? CURRENT_WEATHER_CACHE_MS : FORECAST_CACHE_MS
+  });
   if (cached) {
     console.log(`Using fresh cache for ${cached.key}`);
     return cached.data;
@@ -3289,7 +3300,9 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
       return twiml;
     }
 
-    const forecast = await fetchForecast(location);
+    const forecast = await fetchForecast(location, {
+      currentOnly: playback.type === "current"
+    });
     const speech = await buildPlaybackSpeech(location, forecast, playback, getUnitPreference(req));
 
     if (!speech) {
