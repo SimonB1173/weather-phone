@@ -963,7 +963,15 @@ function summarizeHourlyBlock(block, tz, unit = "C") {
   const totalRain = block.items.reduce((sum, x) => sum + Number(x.rain || 0) + Number(x.showers || 0), 0);
   const totalSnow = block.items.reduce((sum, x) => sum + Number(x.snow || 0), 0);
   const isNight = isNightHourFromIso(first.time, tz);
-  const spokenCondition = weatherCodeToText(first.code, isNight);
+  const rawCondition = String(first.condition || "").trim();
+
+  const spokenCondition = rawCondition
+    ? rawCondition
+        .replace(/\.\s*/g, ". ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .toLowerCase()
+    : weatherCodeToText(first.code, isNight);
 
   const parts = [`From ${start} until ${end}, ${spokenCondition}. Around ${avgTemp} degrees.`];
 
@@ -1937,20 +1945,21 @@ function ecHourlySpeech(location, ecData, hours = 12, unit = "C") {
     return `I could not find hourly forecast data for ${placeLabel(location)}.`;
   }
 
-  const compact = slice.map((row) => ({
-    time: row.time,
-    temp: row.temperature_2m,
-    apparentTemp: row.apparent_temperature,
-    rainChance: row.precipitation_probability,
-    rain: row.rain,
-    showers: row.showers,
-    snow: row.snowfall,
-    clouds: row.cloud_cover,
-    wind: row.wind_speed_10m,
-    gusts: row.wind_gusts_10m,
-    direction: row.wind_direction_10m,
-    code: row.weather_code
-  }));
+const compact = slice.map((row) => ({
+  time: row.time,
+  temp: row.temperature_2m,
+  apparentTemp: row.apparent_temperature,
+  rainChance: row.precipitation_probability,
+  rain: row.rain,
+  showers: row.showers,
+  snow: row.snowfall,
+  clouds: row.cloud_cover,
+  wind: row.wind_speed_10m,
+  gusts: row.wind_gusts_10m,
+  direction: row.wind_direction_10m,
+  code: row.weather_code,
+  condition: row.condition
+}));
 
   const blocks = buildSmartHourlyBlocks(compact, tz);
   const spoken = blocks
