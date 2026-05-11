@@ -30,39 +30,14 @@ const menuHistoryByCall = new Map();
 const unitPreferenceByCall = new Map();
 const exchangeSelectionByCall = new Map();
 const borderDirectionByCall = new Map();
-const zmanimSessionByCall = new Map();
-const zmanimCache = new Map();
-const zmanimSpeedByCall = new Map();
 
 const FORECAST_CACHE_MS = 15 * 60 * 1000;
 const STALE_FORECAST_MS = 2 * 60 * 1000;
 const ALERT_CACHE_MS = 10 * 60 * 1000;
-const CURRENT_WEATHER_CACHE_MS = 2 * 60 * 1000;
 const EC_CITYPAGE_CACHE_MS = 20 * 60 * 1000;
 const EXCHANGE_CACHE_MS = 10 * 60 * 1000;
 const BORDER_CACHE_MS = 30 * 1000;
 const LIVE_TRAFFIC_CACHE_MS = 30 * 1000;
-const ZMANIM_CACHE_MS = 12 * 60 * 60 * 1000;
-const HEBCAL_ZMANIM_TIMEOUT_MS = 10000;
-const ZMANIM_ROUND_DOWN_KEYS = new Set([
-  "alotHaShachar",
-  "sunrise",
-  "sofZmanShmaMGA16Point1",
-  "sofZmanShma",
-  "sofZmanTfillaMGA72Minutes",
-  "sofZmanTfilla",
-  "chatzot",
-  "minchaGedola",
-  "plagHaMincha",
-  "candleLighting"
-]);
-
-const ZMANIM_ROUND_UP_KEYS = new Set([
-  "sunset",
-  "tzeit",
-  "tzeit60min",
-  "tzeit72min"
-]);
 
 const EC_API_TIMEOUT_MS = 5000;
 const EC_ALERT_TIMEOUT_MS = 5000;
@@ -139,63 +114,6 @@ const US_LOCATIONS = {
   "1": PRESET_LOCATIONS["4"],
   "2": PRESET_LOCATIONS["6"],
   "3": PRESET_LOCATIONS["5"]
-};
-
-const ZMANIM_LOCATIONS = {
-  "1": {
-    id: "zmanim_montreal",
-    name: "Outremont, Montreal, Quebec, Canada",
-    label: "Montreal",
-    latitude: 45.5260,
-    longitude: -73.6100,
-    timezone: "America/Toronto",
-    country: "CA"
-  },
-  "2": {
-    id: "zmanim_williamsburg",
-    name: "Williamsburg, Brooklyn, New York, USA",
-    label: "Williamsburg",
-    latitude: 40.7126,
-    longitude: -73.9570,
-    timezone: "America/New_York",
-    country: "US"
-  },
-  "3": {
-    id: "zmanim_boro_park",
-    name: "Boro Park, Brooklyn, New York, USA",
-    label: "Boro Park",
-    latitude: 40.6336,
-    longitude: -73.9968,
-    timezone: "America/New_York",
-    country: "US"
-  },
-  "4": {
-    id: "zmanim_monsey",
-    name: "Monsey, New York, USA",
-    label: "Monsey",
-    latitude: 41.1180,
-    longitude: -74.0820,
-    timezone: "America/New_York",
-    country: "US"
-  },
-  "5": {
-    id: "zmanim_monroe",
-    name: "Kiryas Joel, Monroe, New York, USA",
-    label: "Monroe",
-    latitude: 41.3415,
-    longitude: -74.1677,
-    timezone: "America/New_York",
-    country: "US"
-  },
-  "6": {
-    id: "zmanim_lakewood",
-    name: "Lakewood, New Jersey, USA",
-    label: "Lakewood",
-    latitude: 40.0821,
-    longitude: -74.2097,
-    timezone: "America/New_York",
-    country: "US"
-  }
 };
 
 const CHAMPLAIN_LACOLLE = {
@@ -408,8 +326,6 @@ function clearCallState(req) {
   unitPreferenceByCall.delete(key);
   exchangeSelectionByCall.delete(key);
   borderDirectionByCall.delete(key);
-  zmanimSessionByCall.delete(key);
-  zmanimSpeedByCall.delete(key);
 }
 
 function appendVoicemailRecord(record) {
@@ -453,21 +369,13 @@ function pruneForecastCache() {
   }
 }
 
-function getCachedForecast(location, { allowStale = false, maxAgeMs = FORECAST_CACHE_MS } = {}) {
+function getCachedForecast(location, { allowStale = false } = {}) {
   const key = cacheKeyForLocation(location);
   const cached = forecastCache.get(key);
   if (!cached) return null;
-
   const age = Date.now() - cached.timestamp;
-
-  if (age <= maxAgeMs) {
-    return { data: cached.data, isStale: false, key, age };
-  }
-
-  if (allowStale && age <= STALE_FORECAST_MS) {
-    return { data: cached.data, isStale: true, key, age };
-  }
-
+  if (age <= FORECAST_CACHE_MS) return { data: cached.data, isStale: false, key, age };
+  if (allowStale && age <= STALE_FORECAST_MS) return { data: cached.data, isStale: true, key, age };
   return null;
 }
 
@@ -716,49 +624,6 @@ function parseBorderDirectionChoice(req) {
   return "";
 }
 
-function parseZmanimLocationChoice(req) {
-  const digit = getDigits(req);
-  if (/^[1-6]$/.test(digit)) return digit;
-  return "";
-}
-
-function parseZmanimDateChoice(req) {
-  const digit = getDigits(req);
-  if (/^[1-7]$/.test(digit)) return Number(digit) - 1;
-  return -1;
-}
-
-function parseZmanimTypeChoice(req) {
-  const digit = getDigits(req);
-  if (/^[0-9]$/.test(digit)) return digit;
-  return "";
-}
-
-function getZmanimSession(req) {
-  return zmanimSessionByCall.get(getCallKey(req)) || {};
-}
-
-function setZmanimSession(req, updates) {
-  const key = getCallKey(req);
-  const current = zmanimSessionByCall.get(key) || {};
-  zmanimSessionByCall.set(key, { ...current, ...updates });
-}
-
-function clearZmanimSession(req) {
-  zmanimSessionByCall.delete(getCallKey(req));
-}
-
-function getZmanimSpeechRate(req) {
-  return zmanimSpeedByCall.get(getCallKey(req)) || "100%";
-}
-
-function toggleZmanimSpeechRate(req) {
-  const current = getZmanimSpeechRate(req);
-  const next = current === "100%" ? "88%" : "100%";
-  zmanimSpeedByCall.set(getCallKey(req), next);
-  return next;
-}
-
 function parseBorderTypeChoice(req) {
   const digit = getDigits(req);
   if (digit === "1") return "official";
@@ -829,7 +694,7 @@ function buildRootMenuInto(twiml) {
   const gather = twiml.gather(gatherOptions("/root-menu", 8, 1));
   say(
     gather,
-    "Welcome to Weather and Info Line. Press 1 for weather. Press 2 for exchange rate. Press 3 for zmanim. Press 4 for border wait time."
+    "Welcome to Weather and Info Line. Press 1 for weather. Press 2 for exchange rate. Press 4 for border wait time."
   );
   twiml.redirect({ method: "POST" }, "/root-menu-prompt");
 }
@@ -911,66 +776,6 @@ function borderMenuTwiml() {
   return twiml;
 }
 
-function zmanimLocationMenuTwiml() {
-  const twiml = new VoiceResponse();
-  const gather = twiml.gather(gatherOptions("/zmanim-location", 8, 1));
-
-  say(
-    gather,
-    "Zmanim. Press 1 for Montreal. Press 2 for Williamsburg. Press 3 for Boro Park. Press 4 for Monsey. Press 5 for Monroe. Press 6 for Lakewood. Press star for the previous menu."
-  );
-
-  twiml.redirect({ method: "POST" }, "/zmanim-location-prompt");
-  return twiml;
-}
-
-function zmanimDateMenuTwiml(req) {
-  const session = getZmanimSession(req);
-  const location = session.location || ZMANIM_LOCATIONS["1"];
-  const tz = location.timezone || "America/New_York";
-  const today = getCurrentLocalDateParts(tz).date;
-
-  const twiml = new VoiceResponse();
-  const gather = twiml.gather(gatherOptions("/zmanim-date", 8, 1));
-
-  const parts = [`Choose day for ${placeLabel(location)}.`];
-
-  for (let i = 0; i < 7; i++) {
-    const dateText = addDaysToDateText(today, i);
-    const label = i === 0
-      ? `today, ${monthDayLabel(dateText, tz)}`
-      : i === 1
-        ? `tomorrow, ${monthDayLabel(dateText, tz)}`
-        : weekdayMonthDayLabel(dateText, tz);
-
-    parts.push(`Press ${i + 1} for ${label}.`);
-  }
-
-  parts.push("Press star for the previous menu.");
-  say(gather, parts.join(" "));
-
-  twiml.redirect({ method: "POST" }, "/zmanim-date-prompt");
-  return twiml;
-}
-
-function zmanimTypeMenuTwiml(req) {
-  const session = getZmanimSession(req);
-  const location = session.location || ZMANIM_LOCATIONS["1"];
-  const dateText = session.date || getCurrentLocalDateParts(location.timezone).date;
-  const label = relativeMenuDayLabel(dateText, location.timezone);
-
-  const twiml = new VoiceResponse();
-  const gather = twiml.gather(gatherOptions("/zmanim-type", 8, 1));
-
-  say(
-    gather,
-    `Zmanim for ${label}, in ${placeLabel(location)}. ${dateText === getCurrentLocalDateParts(location.timezone).date ? "Press 0 for remaining zmanim." : "Press 0 for all zmanim."} Press 1 for dawn. Press 2 for sunrise. Press 3 for latest time for Shema, Magen Avraham and Gra. Press 4 for latest time for morning prayers, Magen Avraham and Gra. Press 5 for midday. Press 6 for earliest afternoon prayer. Press 7 for plag. Press 8 for sunset. Press 9 for nightfall and Rabbeinu Tam. Press star for the previous menu.`
-  );
-
-  twiml.redirect({ method: "POST" }, "/zmanim-type-prompt");
-  return twiml;
-}
-
 function exchangeAmountPromptTwiml(req, selection) {
   const twiml = new VoiceResponse();
 
@@ -1008,9 +813,7 @@ function afterActionTwiml(req) {
 
   const playback = getLastPlayback(req);
 
-  if (playback?.type === "zmanim") {
-    say(gather, "Press star to go back. Press pound to repeat. Press 5 for the main menu. Press 7 to change speed.");
-  } else if (playback?.type === "exchange" || playback?.type === "border") {
+  if (playback?.type === "exchange" || playback?.type === "border") {
     say(gather, "Press star to go back. Press pound to repeat. Press 5 for the main menu.");
   } else {
     const unit = getUnitPreference(req);
@@ -1160,7 +963,15 @@ function summarizeHourlyBlock(block, tz, unit = "C") {
   const totalRain = block.items.reduce((sum, x) => sum + Number(x.rain || 0) + Number(x.showers || 0), 0);
   const totalSnow = block.items.reduce((sum, x) => sum + Number(x.snow || 0), 0);
   const isNight = isNightHourFromIso(first.time, tz);
-  const spokenCondition = weatherCodeToText(first.code, isNight);
+  const rawCondition = String(first.condition || "").trim();
+
+  const spokenCondition = rawCondition
+    ? rawCondition
+        .replace(/\.\s*/g, ". ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .toLowerCase()
+    : weatherCodeToText(first.code, isNight);
 
   const parts = [`From ${start} until ${end}, ${spokenCondition}. Around ${avgTemp} degrees.`];
 
@@ -2134,20 +1945,21 @@ function ecHourlySpeech(location, ecData, hours = 12, unit = "C") {
     return `I could not find hourly forecast data for ${placeLabel(location)}.`;
   }
 
-  const compact = slice.map((row) => ({
-    time: row.time,
-    temp: row.temperature_2m,
-    apparentTemp: row.apparent_temperature,
-    rainChance: row.precipitation_probability,
-    rain: row.rain,
-    showers: row.showers,
-    snow: row.snowfall,
-    clouds: row.cloud_cover,
-    wind: row.wind_speed_10m,
-    gusts: row.wind_gusts_10m,
-    direction: row.wind_direction_10m,
-    code: row.weather_code
-  }));
+const compact = slice.map((row) => ({
+  time: row.time,
+  temp: row.temperature_2m,
+  apparentTemp: row.apparent_temperature,
+  rainChance: row.precipitation_probability,
+  rain: row.rain,
+  showers: row.showers,
+  snow: row.snowfall,
+  clouds: row.cloud_cover,
+  wind: row.wind_speed_10m,
+  gusts: row.wind_gusts_10m,
+  direction: row.wind_direction_10m,
+  code: row.weather_code,
+  condition: row.condition
+}));
 
   const blocks = buildSmartHourlyBlocks(compact, tz);
   const spoken = blocks
@@ -2798,309 +2610,9 @@ function buildBorderSpeech(result) {
 
   return parts.join(" ");
 }
-
-function zmanimCacheKey(location, dateText) {
-  return `${location.id || placeLabel(location)}:${location.latitude}:${location.longitude}:${location.timezone}:${dateText}`;
-}
-
-async function fetchHebcalCandleLighting(location, dateText) {
-  const response = await axios.get("https://www.hebcal.com/hebcal", {
-    timeout: HEBCAL_ZMANIM_TIMEOUT_MS,
-    params: {
-      cfg: "json",
-      v: "1",
-      c: "on",
-      b: 18,
-      M: "on",
-      sec: 1,
-      latitude: Number(location.latitude),
-      longitude: Number(location.longitude),
-      tzid: location.timezone || "America/New_York",
-      start: dateText,
-      end: dateText
-    },
-    headers: {
-      "User-Agent": "weather-and-info-line/1.0 simon@levbrands.com",
-      Accept: "application/json"
-    }
-  });
-
-  const items = Array.isArray(response.data?.items) ? response.data.items : [];
-  const candle = items.find((item) => item.category === "candles" && item.date);
-
-  return candle
-    ? {
-        title: candle.title || "Candle lighting",
-        iso: candle.date
-      }
-    : null;
-}
-
-async function fetchHebcalHavdalah(location, dateText) {
-  const response = await axios.get("https://www.hebcal.com/hebcal", {
-    timeout: HEBCAL_ZMANIM_TIMEOUT_MS,
-    params: {
-      cfg: "json",
-      v: "1",
-      c: "on",
-      M: "on",
-      latitude: Number(location.latitude),
-      longitude: Number(location.longitude),
-      tzid: location.timezone || "America/New_York",
-      start: dateText,
-      end: dateText
-    },
-    headers: {
-      "User-Agent": "weather-and-info-line/1.0 simon@levbrands.com",
-      Accept: "application/json"
-    }
-  });
-
-  const items = Array.isArray(response.data?.items) ? response.data.items : [];
-  const havdalah = items.find((item) => item.category === "havdalah" && item.date);
-
-  return havdalah
-    ? { title: havdalah.title || "Havdalah", iso: havdalah.date }
-    : null;
-}
-
-async function fetchHebcalZmanim(location, dateText) {
-  const key = zmanimCacheKey(location, dateText);
-  const cached = zmanimCache.get(key);
-
-  if (cached && Date.now() - cached.timestamp < ZMANIM_CACHE_MS) {
-    return cached.data;
-  }
-
-  const response = await axios.get("https://www.hebcal.com/zmanim", {
-    timeout: HEBCAL_ZMANIM_TIMEOUT_MS,
-    params: {
-      cfg: "json",
-      sec: 1,
-      latitude: Number(location.latitude),
-      longitude: Number(location.longitude),
-      tzid: location.timezone || "America/New_York",
-      date: dateText
-    },
-    headers: {
-      "User-Agent": "weather-and-info-line/1.0 simon@levbrands.com",
-      Accept: "application/json"
-    }
-  });
-
-  const data = response.data || {};
-  if (!data.times) throw new Error("Hebcal returned incomplete zmanim data");
-
-  zmanimCache.set(key, { data, timestamp: Date.now() });
-  return data;
-}
-
-function formatZmanTime(iso, timezone, key = "") {
-  if (!iso) return "not available";
-
-  const parsed = new Date(iso);
-  if (Number.isNaN(parsed.getTime())) return "not available";
-
-  const tz = timezone || "America/New_York";
-
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: tz,
-    hour: "numeric",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: true
-  }).formatToParts(parsed);
-
-  let hour = Number(parts.find((p) => p.type === "hour")?.value || 0);
-  let minute = Number(parts.find((p) => p.type === "minute")?.value || 0);
-  const second = Number(parts.find((p) => p.type === "second")?.value || 0);
-  let dayPeriod = parts.find((p) => p.type === "dayPeriod")?.value || "";
-
-  // Only these are rounded UP
-  if (ZMANIM_ROUND_UP_KEYS.has(key) && second > 0) {
-    minute += 1;
-
-    if (minute >= 60) {
-      minute = 0;
-      hour += 1;
-
-      if (hour === 12) {
-        dayPeriod = dayPeriod === "AM" ? "PM" : "AM";
-      }
-
-      if (hour > 12) hour = 1;
-    }
-  }
-
-  // Everything else stays at the minute shown by seconds — meaning rounded DOWN
-  return `${hour}:${String(minute).padStart(2, "0")} ${dayPeriod}`;
-}
-
-function subtractMinutesIso(iso, minutes) {
-  if (!iso) return "";
-  const parsed = new Date(iso);
-  if (Number.isNaN(parsed.getTime())) return "";
-  return new Date(parsed.getTime() - Number(minutes || 0) * 60 * 1000).toISOString();
-}
-
-function zmanHasPassed(iso, location, dateText) {
-  if (!iso) return true;
-
-  const selectedDate = String(dateText || "").slice(0, 10);
-  const today = getCurrentLocalDateParts(location.timezone || "America/New_York").date;
-
-  if (selectedDate > today) return false;
-  if (selectedDate < today) return true;
-
-  return new Date(iso).getTime() <= Date.now();
-}
-
-function buildZmanItem(label, iso, location, key = "") {
-  const formatted = formatZmanTime(iso, location.timezone, key);
-
-  return {
-    label,
-    iso,
-    key,
-    speech: `${label}, ${formatted}.`
-  };
-}
-
-function minutesUntilIso(iso) {
-  if (!iso) return null;
-  const diff = new Date(iso).getTime() - Date.now();
-  if (!Number.isFinite(diff)) return null;
-  return Math.round(diff / 60000);
-}
-
-function buildCandleUrgencySpeech(candleLighting, location) {
-  if (!candleLighting?.iso) return "";
-
-  const minutes = minutesUntilIso(candleLighting.iso);
-  const time = formatZmanTime(candleLighting.iso, location.timezone, "candleLighting");
-
-  if (minutes !== null && minutes > 0 && minutes <= 30) {
-    return `Candle lighting is ${time}. That is in ${minutes} minutes.`;
-  }
-
-  return `Candle lighting is ${time}.`;
-}
-
-function getZmanimItems(data, location, candleLighting = null) {
-  const z = data.times || {};
-
-  const sunsetItems = [
-    buildZmanItem("Sunset", z.sunset, location, "sunset")
-  ];
-
-  if (candleLighting?.iso) {
-    sunsetItems.push(
-      buildZmanItem("Candle lighting", candleLighting.iso, location, "candleLighting")
-    );
-  }
-
-  return {
-    alos: [
-      buildZmanItem("Dawn", z.alotHaShachar, location, "alotHaShachar")
-    ],
-    neitz: [
-      buildZmanItem("Sunrise", z.sunrise, location, "sunrise")
-    ],
-    shema: [
-      buildZmanItem("Latest time for Shema Magen Avraham", z.sofZmanShmaMGA16Point1 || z.sofZmanShmaMGA, location, "sofZmanShmaMGA16Point1"),
-      buildZmanItem("Latest time for Shema Gra", z.sofZmanShma, location, "sofZmanShma")
-    ],
-    tefillah: [
-      buildZmanItem("Latest time for morning prayers Magen Avraham", z.sofZmanTfillaMGA72Minutes || z.sofZmanTfillaMGA, location, "sofZmanTfillaMGA72Minutes"),
-      buildZmanItem("Latest time for morning prayers Gra", z.sofZmanTfilla, location, "sofZmanTfilla")
-    ],
-    chatzos: [
-      buildZmanItem("Midday", z.chatzot, location, "chatzot")
-    ],
-    mincha: [
-      buildZmanItem("Earliest afternoon prayer", z.minchaGedola, location, "minchaGedola")
-    ],
-    plag: [
-      buildZmanItem("Plag", z.plagHaMincha, location, "plagHaMincha")
-    ],
-    shkiah: sunsetItems,
-    tzais: [
-      buildZmanItem("Rabbeinu Tam nightfall", z.tzeit72min, location, "tzeit72min")
-    ]
-  };
-}
-
-function flattenZmanimItems(grouped) {
-  return [
-    ...grouped.alos,
-    ...grouped.neitz,
-    ...grouped.shema,
-    ...grouped.tefillah,
-    ...grouped.chatzos,
-    ...grouped.mincha,
-    ...grouped.plag,
-    ...grouped.shkiah,
-    ...grouped.tzais
-  ];
-}
-
-function buildZmanimSpeech(data, location, dateText, choice) {
-  const grouped = getZmanimItems(data, location, data.candleLighting || null);
-  const dateLabel = relativeMenuDayLabel(dateText, location.timezone);
-
-  const choiceMap = {
-    "1": grouped.alos,
-    "2": grouped.neitz,
-    "3": grouped.shema,
-    "4": grouped.tefillah,
-    "5": grouped.chatzos,
-    "6": grouped.mincha,
-    "7": grouped.plag,
-    "8": grouped.shkiah,
-    "9": grouped.tzais
-  };
-
-  if (choice === "0") {
-    const isToday = dateText === getCurrentLocalDateParts(location.timezone).date;
-
-    const items = flattenZmanimItems(grouped).filter((item) => {
-      if (!item.iso) return false;
-      return isToday ? !zmanHasPassed(item.iso, location, dateText) : true;
-    });
-
-    if (!items.length && isToday) {
-      return null;
-    }
-
-    return [
-      `${isToday ? "Remaining zmanim" : "All zmanim"} for ${dateLabel}, in ${placeLabel(location)}.`,
-      ...items.map((item) => item.speech)
-    ].join(" ");
-  }
-
-  const selectedItems = choiceMap[choice] || [];
-  if (!selectedItems.length) return `I did not understand that zman choice.`;
-
-  const parts = [`Zmanim for ${dateLabel}, in ${placeLabel(location)}.`];
-
-  for (const item of selectedItems) {
-    if (!item.iso) {
-      parts.push(`${item.label} is not available.`);
-    } else if (zmanHasPassed(item.iso, location, dateText)) {
-      parts.push(`${item.label} already passed at ${formatZmanTime(item.iso, location.timezone, item.key)}.`);
-    } else {
-      parts.push(item.speech);
-    }
-  }
-
-  return parts.join(" ");
-}
-
-async function fetchForecast(location, { currentOnly = false } = {}) {
+async function fetchForecast(location) {
   pruneForecastCache();
-  const cached = getCachedForecast(location, {
-    maxAgeMs: currentOnly ? CURRENT_WEATHER_CACHE_MS : FORECAST_CACHE_MS
-  });
+  const cached = getCachedForecast(location);
   if (cached) {
     console.log(`Using fresh cache for ${cached.key}`);
     return cached.data;
@@ -3282,7 +2794,7 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
       return twiml;
     }
 
-    if (playback.type === "exchange" || playback.type === "border" || playback.type === "zmanim") {
+    if (playback.type === "exchange" || playback.type === "border") {
       if (!playback.speech) {
         say(twiml, "There is nothing to repeat yet.");
         twiml.redirect({ method: "POST" }, "/root-menu-prompt");
@@ -3300,9 +2812,7 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
       return twiml;
     }
 
-    const forecast = await fetchForecast(location, {
-      currentOnly: playback.type === "current"
-    });
+    const forecast = await fetchForecast(location);
     const speech = await buildPlaybackSpeech(location, forecast, playback, getUnitPreference(req));
 
     if (!speech) {
@@ -3383,9 +2893,9 @@ app.post("/root-menu", async (req, res) => {
     }
 
     if (choice === "3") {
-      clearZmanimSession(req);
-      const zmanimTwiml = zmanimLocationMenuTwiml();
-      return res.type("text/xml").send(zmanimTwiml.toString());
+      say(twiml, "That feature is not available yet.");
+      twiml.redirect({ method: "POST" }, "/root-menu-prompt");
+      return res.type("text/xml").send(twiml.toString());
     }
 
     if (choice === "4") {
@@ -3399,189 +2909,6 @@ app.post("/root-menu", async (req, res) => {
   } catch (error) {
     console.error("ROOT-MENU route error:", error.message);
     say(twiml, "Sorry, an application error occurred. Please try again.");
-    return res.type("text/xml").send(twiml.toString());
-  }
-});
-
-app.post("/zmanim-location-prompt", async (req, res) => {
-  res.type("text/xml").send(zmanimLocationMenuTwiml().toString());
-});
-
-app.post("/zmanim-location", async (req, res) => {
-  const twiml = new VoiceResponse();
-
-  try {
-    if (isBackKey(req)) {
-      twiml.redirect({ method: "POST" }, "/root-menu-prompt");
-      return res.type("text/xml").send(twiml.toString());
-    }
-
-    const choice = parseZmanimLocationChoice(req);
-    const location = ZMANIM_LOCATIONS[choice];
-
-    if (!location) {
-      say(twiml, "I did not understand that location choice.");
-      twiml.redirect({ method: "POST" }, "/zmanim-location-prompt");
-      return res.type("text/xml").send(twiml.toString());
-    }
-
-    setZmanimSession(req, { location });
-    return res.type("text/xml").send(zmanimDateMenuTwiml(req).toString());
-  } catch (error) {
-    console.error("ZMANIM-LOCATION error:", error.message);
-    say(twiml, "Sorry, an application error occurred.");
-    twiml.redirect({ method: "POST" }, "/root-menu-prompt");
-    return res.type("text/xml").send(twiml.toString());
-  }
-});
-
-app.post("/zmanim-date-prompt", async (req, res) => {
-  res.type("text/xml").send(zmanimDateMenuTwiml(req).toString());
-});
-
-app.post("/zmanim-date", async (req, res) => {
-  const twiml = new VoiceResponse();
-
-  try {
-    if (isBackKey(req)) {
-      twiml.redirect({ method: "POST" }, "/zmanim-location-prompt");
-      return res.type("text/xml").send(twiml.toString());
-    }
-
-    const session = getZmanimSession(req);
-    const location = session.location;
-
-    if (!location) {
-      twiml.redirect({ method: "POST" }, "/zmanim-location-prompt");
-      return res.type("text/xml").send(twiml.toString());
-    }
-
-    const offset = parseZmanimDateChoice(req);
-    if (offset < 0 || offset > 6) {
-      say(twiml, "I did not understand that day choice.");
-      twiml.redirect({ method: "POST" }, "/zmanim-date-prompt");
-      return res.type("text/xml").send(twiml.toString());
-    }
-
-    const today = getCurrentLocalDateParts(location.timezone || "America/New_York").date;
-    const dateText = addDaysToDateText(today, offset);
-
-    setZmanimSession(req, { date: dateText });
-
-    try {
-      const [candleLighting, havdalah] = await Promise.all([
-        fetchHebcalCandleLighting(location, dateText),
-        fetchHebcalHavdalah(location, dateText)
-      ]);
-
-      const intro = new VoiceResponse();
-      let hasIntro = false;
-
-      if (candleLighting?.iso) {
-        say(intro, buildCandleUrgencySpeech(candleLighting, location));
-        hasIntro = true;
-      }
-
-      if (havdalah?.iso) {
-        say(intro, `Havdalah is ${formatZmanTime(havdalah.iso, location.timezone, "tzeit72min")}.`);
-        hasIntro = true;
-      }
-
-      if (hasIntro) {
-        const gather = intro.gather(gatherOptions("/zmanim-type", 8, 1));
-        const isToday = dateText === getCurrentLocalDateParts(location.timezone).date;
-
-        say(
-          gather,
-          `Zmanim for ${relativeMenuDayLabel(dateText, location.timezone)}, in ${placeLabel(location)}. ${isToday ? "Press 0 for remaining zmanim." : "Press 0 for all zmanim."} Press 1 for dawn. Press 2 for sunrise. Press 3 for latest time for Shema, Magen Avraham and Gra. Press 4 for latest time for morning prayers, Magen Avraham and Gra. Press 5 for midday. Press 6 for earliest afternoon prayer. Press 7 for plag. Press 8 for sunset. Press 9 for nightfall and Rabbeinu Tam. Press star for the previous menu.`
-        );
-
-        intro.redirect({ method: "POST" }, "/zmanim-type-prompt");
-        return res.type("text/xml").send(intro.toString());
-     }
-   } catch (error) {
-     console.error("Zmanim intro prefetch failed:", error.message);
-   }
-
-   return res.type("text/xml").send(zmanimTypeMenuTwiml(req).toString());
-  } catch (error) {
-    console.error("ZMANIM-DATE error:", error.message);
-    say(twiml, "Sorry, an application error occurred.");
-    twiml.redirect({ method: "POST" }, "/root-menu-prompt");
-    return res.type("text/xml").send(twiml.toString());
-  }
-});
-
-app.post("/zmanim-type-prompt", async (req, res) => {
-  res.type("text/xml").send(zmanimTypeMenuTwiml(req).toString());
-});
-
-app.post("/zmanim-type", async (req, res) => {
-  const twiml = new VoiceResponse();
-
-  try {
-    if (isBackKey(req)) {
-      twiml.redirect({ method: "POST" }, "/zmanim-date-prompt");
-      return res.type("text/xml").send(twiml.toString());
-    }
-
-    const session = getZmanimSession(req);
-    const location = session.location;
-    const dateText = session.date;
-    const choice = parseZmanimTypeChoice(req);
-
-    if (!location || !dateText) {
-      twiml.redirect({ method: "POST" }, "/zmanim-location-prompt");
-      return res.type("text/xml").send(twiml.toString());
-    }
-
-    if (!choice) {
-      say(twiml, "I did not understand that zman choice.");
-      twiml.redirect({ method: "POST" }, "/zmanim-type-prompt");
-      return res.type("text/xml").send(twiml.toString());
-    }
-
-    const [zmanimData, candleLighting, havdalah] = await Promise.all([
-      fetchHebcalZmanim(location, dateText),
-      fetchHebcalCandleLighting(location, dateText),
-      fetchHebcalHavdalah(location, dateText)
-    ]);
-
-    zmanimData.candleLighting = candleLighting;
-    zmanimData.havdalah = havdalah;
-
-    let speech = buildZmanimSpeech(zmanimData, location, dateText, choice);
-
-    if (!speech && choice === "0") {
-      const tomorrow = addDaysToDateText(dateText, 1);
-      const [tomorrowData, tomorrowCandle, tomorrowHavdalah] = await Promise.all([
-        fetchHebcalZmanim(location, tomorrow),
-        fetchHebcalCandleLighting(location, tomorrow),
-        fetchHebcalHavdalah(location, tomorrow)
-      ]);
-
-      tomorrowData.candleLighting = tomorrowCandle;
-      tomorrowData.havdalah = tomorrowHavdalah;
-
-      speech = [
-        `There are no remaining zmanim for today. Here are the zmanim for ${relativeMenuDayLabel(tomorrow, location.timezone)}.`,
-        buildZmanimSpeech(tomorrowData, location, tomorrow, "0")
-      ].join(" ");
-    }
-
-    setLastPlayback(req, {
-      type: "zmanim",
-      speech,
-      speechRate: getZmanimSpeechRate(req)
-    });
-
-    return res.type("text/xml").send(
-      playbackWithStarTwiml(speech, { rate: getZmanimSpeechRate(req) })
-    );
-  } catch (error) {
-    console.error("ZMANIM-TYPE error:", error.message);
-    say(twiml, "Sorry, I could not retrieve zmanim right now.");
-    twiml.redirect({ method: "POST" }, "/zmanim-type-prompt");
     return res.type("text/xml").send(twiml.toString());
   }
 });
@@ -3984,27 +3311,8 @@ app.post("/exchange-amount", async (req, res) => {
 
 app.post("/during-playback", async (req, res) => {
   const playback = getLastPlayback(req);
-  if (getDigits(req) === "7" && playback?.type === "zmanim") {
-    const rate = toggleZmanimSpeechRate(req);
-    const twiml = new VoiceResponse();
-
-    setLastPlayback(req, {
-      ...playback,
-      speechRate: rate
-    });
-
-    say(twiml, rate === "88%" ? "Zmanim speech is now faster." : "Zmanim speech is now normal speed.");
-    twiml.redirect({ method: "POST" }, "/after-prompt");
-    return res.type("text/xml").send(twiml.toString());
- }
 
   if (isBackKey(req)) {
-    if (playback?.type === "zmanim") {
-      const twiml = new VoiceResponse();
-      twiml.redirect({ method: "POST" }, "/zmanim-date-prompt");
-      return res.type("text/xml").send(twiml.toString());
-    }
-
     if (playback?.type === "border") {
       const twiml = new VoiceResponse();
 
@@ -4038,11 +3346,6 @@ app.post("/after", async (req, res) => {
   console.log("AFTER Digits:", getDigits(req));
 
   if (isBackKey(req)) {
-    if (playback?.type === "zmanim") {
-      twiml.redirect({ method: "POST" }, "/zmanim-type-prompt");
-      return res.type("text/xml").send(twiml.toString());
-    }
-
     if (playback?.type === "border") {
       if (playback?.borderDirection) {
         setBorderDirection(req, playback.borderDirection);
@@ -4060,21 +3363,8 @@ app.post("/after", async (req, res) => {
 
   const choice = parseAfterChoice(req);
 
-  if (choice === "7" && playback?.type === "zmanim") {
-    const rate = toggleZmanimSpeechRate(req);
-
-    setLastPlayback(req, {
-      ...playback,
-      speechRate: rate
-    });
-
-    return res.type("text/xml").send(
-      playbackWithStarTwiml(playback.speech, { rate })
-    );
-  }
-
   if (choice === "5") {
-    if (playback?.type === "border" || playback?.type === "zmanim") {
+    if (playback?.type === "border") {
       const rootTwiml = await buildStateTwiml(req, "root-menu", { push: false });
       return res.type("text/xml").send(rootTwiml.toString());
     }
@@ -4090,13 +3380,7 @@ app.post("/after", async (req, res) => {
     );
   }
 
-  if (
-    choice === "7" &&
-    playback &&
-    playback.type !== "exchange" &&
-    playback.type !== "border" &&
-    playback.type !== "zmanim"
-  ) {
+  if (choice === "7" && playback && playback.type !== "exchange" && playback.type !== "border") {
     toggleUnitPreference(req);
     const playbackTwiml = await buildStateTwiml(req, "playback", { push: false });
     return res.type("text/xml").send(
