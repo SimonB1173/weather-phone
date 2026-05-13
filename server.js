@@ -701,7 +701,7 @@ function buildRootMenuInto(twiml) {
 
 function buildMainMenuInto(twiml, activeLocationName) {
   const gather = twiml.gather(gatherOptions("/menu", 8, 1));
-  say(gather, `${activeLocationName}. Press 1 for the forecast menu. Press 2 for hourly forecast. Press 3 for current weather. Press star for the previous menu.`);
+  say(gather, `${activeLocationName}. Press 1 for daily forecast. Press 2 for hourly forecast. Press 3 for current weather. Press star for the previous menu.`);
   twiml.redirect({ method: "POST" }, "/main-menu");
 }
 
@@ -2874,7 +2874,7 @@ async function forecastDayPromptTwiml(location, forecast) {
 
   if (location?.country === "CA") {
     const groups = buildEcDailyGroups(forecast, location);
-    const parts = ["For the full Environment Canada forecast, press 0."];
+    const parts = ["For the full 7 day forecast, press 0."];
     for (let i = 0; i < Math.min(9, groups.length); i++) {
       parts.push(`Press ${i + 1} for ${groups[i].label}.`);
     }
@@ -2886,7 +2886,7 @@ async function forecastDayPromptTwiml(location, forecast) {
 
   if (location?.country === "US" && forecast?.source === "nws") {
     const groups = buildNwsDailyGroups(forecast, location);
-    const parts = ["For the full National Weather Service forecast, press 0."];
+    const parts = ["For the full 7 day forecast, press 0."];
     for (let i = 0; i < Math.min(9, groups.length); i++) {
       parts.push(`Press ${i + 1} for ${groups[i].label}.`);
     }
