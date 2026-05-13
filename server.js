@@ -1830,26 +1830,77 @@ function buildPeriodWindowFromIndex(period, location) {
   const dayAfter = addDaysToDateText(today, 2);
   const name = String(period.periodName || "").toLowerCase();
 
+  const nowIso = `${today}T${String(nowLocal.hour).padStart(2, "0")}:${String(nowLocal.minute).padStart(2, "0")}`;
+
+  /*
+    Important:
+    Environment Canada can still show the first period as "Tonight" after midnight.
+    Example: at 12:11 AM Wednesday, "Tonight" really means the leftover
+    Tuesday-night period ending Wednesday morning, not Wednesday night into Thursday.
+  */
   if (period.index === 0 && /tonight/.test(name)) {
+    if (nowLocal.hour < 6) {
+      return {
+        start: nowIso,
+        end: `${today}T06:00`
+      };
+    }
+
+    if (nowLocal.hour < 18) {
+      return {
+        start: `${today}T18:00`,
+        end: `${tomorrow}T06:00`
+      };
+    }
+
     return {
-      start: `${today}T${String(nowLocal.hour).padStart(2, "0")}:${String(nowLocal.minute).padStart(2, "0")}`,
+      start: nowIso,
       end: `${tomorrow}T06:00`
     };
   }
 
   if (period.index === 0 && /today/.test(name)) {
     return {
-      start: `${today}T${String(nowLocal.hour).padStart(2, "0")}:${String(nowLocal.minute).padStart(2, "0")}`,
+      start: nowIso,
       end: `${today}T18:00`
     };
   }
 
-  if (period.index === 1 && !/night/.test(name)) {
-    return { start: `${tomorrow}T06:00`, end: `${tomorrow}T18:00` };
+  /*
+    If the first EC period is "Tonight" and we are after midnight but before 6 AM,
+    then period index 1 is today's daytime forecast, not tomorrow.
+  */
+  if (period.index === 1 && !/night|tonight/.test(name)) {
+    if (nowLocal.hour < 6) {
+      return {
+        start: `${today}T06:00`,
+        end: `${today}T18:00`
+      };
+    }
+
+    return {
+      start: `${tomorrow}T06:00`,
+      end: `${tomorrow}T18:00`
+    };
   }
 
-  if (period.index === 2 && /night/.test(name)) {
-    return { start: `${tomorrow}T18:00`, end: `${dayAfter}T06:00` };
+  /*
+    Same correction for the next night period.
+    After midnight with old "Tonight" still present:
+    index 2 is tonight, meaning today 6 PM to tomorrow 6 AM.
+  */
+  if (period.index === 2 && /night|tonight/.test(name)) {
+    if (nowLocal.hour < 6) {
+      return {
+        start: `${today}T18:00`,
+        end: `${tomorrow}T06:00`
+      };
+    }
+
+    return {
+      start: `${tomorrow}T18:00`,
+      end: `${dayAfter}T06:00`
+    };
   }
 
   return null;
