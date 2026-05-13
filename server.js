@@ -173,8 +173,8 @@ function playbackWithStarTwiml(text, options = {}) {
   const body = cleaned
     .split(/([.:]\s+)/)
     .map((part) => {
-      if (/^\.\s+$/.test(part)) return '.<break time="180ms"/> ';
-      if (/^:\s+$/.test(part)) return ':<break time="140ms"/> ';
+      if (/^\.\s+$/.test(part)) return '.<break time="120ms"/> ';
+      if (/^:\s+$/.test(part)) return ':<break time="90ms"/> ';
       return xmlEscape(part);
     })
     .join("");
