@@ -1949,6 +1949,43 @@ function inferTimingFromHourlyForPeriod(location, ecData, period) {
   return parts.join(" ");
 }
 
+function summaryAlreadyHasPrecipTiming(summary, timing) {
+  const summaryText = String(summary || "").toLowerCase();
+  const timingText = String(timing || "").toLowerCase();
+
+  if (!summaryText || !timingText) return false;
+
+  const timingIsAboutStart =
+    timingText.includes("starting around") ||
+    timingText.includes("beginning around");
+
+  const timingIsAboutStop =
+    timingText.includes("easing off near") ||
+    timingText.includes("ending near") ||
+    timingText.includes("stopping near");
+
+  const summaryHasStartTiming =
+    summaryText.includes("beginning near") ||
+    summaryText.includes("beginning around") ||
+    summaryText.includes("starting near") ||
+    summaryText.includes("starting around") ||
+    summaryText.includes("developing near") ||
+    summaryText.includes("developing around");
+
+  const summaryHasStopTiming =
+    summaryText.includes("ending near") ||
+    summaryText.includes("ending around") ||
+    summaryText.includes("stopping near") ||
+    summaryText.includes("stopping around") ||
+    summaryText.includes("easing off near") ||
+    summaryText.includes("easing off around");
+
+  if (timingIsAboutStart && summaryHasStartTiming) return true;
+  if (timingIsAboutStop && summaryHasStopTiming) return true;
+
+  return false;
+}
+
 function ecPeriodSpeech(location, ecData, period, unit = "C") {
   const parts = [];
   const summary = chooseBestEcSummary(period);
@@ -1959,9 +1996,16 @@ function ecPeriodSpeech(location, ecData, period, unit = "C") {
 
   const timing = nearTerm ? inferTimingFromHourlyForPeriod(location, ecData, period) : "";
   if (timing) {
-    const joined = parts.join(" ").toLowerCase();
+    const joined = parts.join(" ");
+    const joinedLower = joined.toLowerCase();
     const timingLower = timing.toLowerCase();
-    if (!joined.includes(timingLower)) parts.push(timing);
+
+    if (
+      !joinedLower.includes(timingLower) &&
+      !summaryAlreadyHasPrecipTiming(joined, timing)
+    ) {
+      parts.push(timing);
+    }
   }
 
   if (period.tempText) {
