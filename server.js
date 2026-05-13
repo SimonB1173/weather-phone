@@ -173,8 +173,8 @@ function playbackWithStarTwiml(text, options = {}) {
   const body = cleaned
     .split(/([.:]\s+)/)
     .map((part) => {
-      if (/^\.\s+$/.test(part)) return '.<break time="180ms"/> ';
-      if (/^:\s+$/.test(part)) return ':<break time="140ms"/> ';
+      if (/^\.\s+$/.test(part)) return '.<break time="120ms"/> ';
+      if (/^:\s+$/.test(part)) return ':<break time="90ms"/> ';
       return xmlEscape(part);
     })
     .join("");
@@ -3415,7 +3415,7 @@ app.post("/forecast-day", async (req, res) => {
     const selected = parseForecastDayChoice(req);
 
     if (selected === "all") {
-      setLastPlayback(req, { type: "all7", speechRate: "94%" });
+      setLastPlayback(req, { type: "all7", speechRate: "98%" });
       const playbackTwiml = await buildStateTwiml(req, "playback", { push: false });
       return res.type("text/xml").send(
         typeof playbackTwiml === "string" ? playbackTwiml : playbackTwiml.toString()
