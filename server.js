@@ -3415,7 +3415,7 @@ app.post("/forecast-day", async (req, res) => {
     const selected = parseForecastDayChoice(req);
 
     if (selected === "all") {
-      setLastPlayback(req, { type: "all7", speechRate: "96%" });
+      setLastPlayback(req, { type: "all7", speechRate: "94%" });
       const playbackTwiml = await buildStateTwiml(req, "playback", { push: false });
       return res.type("text/xml").send(
         typeof playbackTwiml === "string" ? playbackTwiml : playbackTwiml.toString()
