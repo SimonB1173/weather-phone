@@ -1742,6 +1742,87 @@ function classifyPrecipTypeFromHourlyRow(row) {
   return "";
 }
 
+function hasHourlyPrecip(row) {
+  return !!classifyPrecipTypeFromHourlyRow(row);
+}
+
+function capitalizeFirst(text) {
+  const value = String(text || "").trim();
+  if (!value) return "";
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function dominantPrecipType(rows) {
+  const typeCounts = new Map();
+
+  for (const row of rows) {
+    const type = classifyPrecipTypeFromHourlyRow(row);
+    if (!type) continue;
+    typeCounts.set(type, (typeCounts.get(type) || 0) + 1);
+  }
+
+  return [...typeCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || "precipitation";
+}
+
+function buildHourlyPrecipRuns(hourlyRows) {
+  const rows = safeArray(hourlyRows)
+    .filter((row) => row?.time)
+    .slice()
+    .sort((a, b) => String(a.time).localeCompare(String(b.time)));
+
+  const runs = [];
+  let current = null;
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const isPrecip = hasHourlyPrecip(row);
+
+    if (!isPrecip) {
+      if (current) {
+        current.endIndex = i - 1;
+        current.endTime = addHoursToLocalIso(rows[i - 1].time, 1);
+        current.hasKnownStop = true;
+        runs.push(current);
+        current = null;
+      }
+      continue;
+    }
+
+    if (!current) {
+      const previousRow = rows[i - 1] || null;
+
+      current = {
+        startIndex: i,
+        startTime: row.time,
+        rows: [],
+        hasKnownStart: !!previousRow && !hasHourlyPrecip(previousRow),
+        hasKnownStop: false,
+        endIndex: i,
+        endTime: addHoursToLocalIso(row.time, 1)
+      };
+    }
+
+    current.rows.push(row);
+    current.endIndex = i;
+    current.endTime = addHoursToLocalIso(row.time, 1);
+  }
+
+  if (current) {
+    current.hasKnownStop = false;
+    runs.push(current);
+  }
+
+  for (const run of runs) {
+    run.type = dominantPrecipType(run.rows);
+  }
+
+  return runs;
+}
+
+function runOverlapsWindow(run, window) {
+  return run.startTime < window.end && run.endTime > window.start;
+}
+
 function buildPeriodWindowFromIndex(period, location) {
   const nowLocal = getCurrentLocalDateParts(location.timezone || "America/Toronto");
   const today = nowLocal.date;
@@ -1778,30 +1859,43 @@ function inferTimingFromHourlyForPeriod(location, ecData, period) {
   const window = buildPeriodWindowFromIndex(period, location);
   if (!window) return "";
 
-  const rows = safeArray(ecData.hourly).filter((row) => row.time >= window.start && row.time < window.end);
-  if (!rows.length) return "";
+  const hourlyRows = safeArray(ecData.hourly)
+    .filter((row) => row?.time)
+    .slice()
+    .sort((a, b) => String(a.time).localeCompare(String(b.time)));
 
-  const precipRows = rows.filter((row) => {
-    const type = classifyPrecipTypeFromHourlyRow(row);
-    return !!type;
-  });
+  if (!hourlyRows.length) return "";
 
-  if (!precipRows.length) return "";
+  const runs = buildHourlyPrecipRuns(hourlyRows).filter((run) => runOverlapsWindow(run, window));
+  if (!runs.length) return "";
 
-  const typeCounts = new Map();
-  for (const row of precipRows) {
-    const type = classifyPrecipTypeFromHourlyRow(row);
-    typeCounts.set(type, (typeCounts.get(type) || 0) + 1);
+  const parts = [];
+
+  for (const run of runs) {
+    const type = capitalizeFirst(run.type);
+
+    const startIsInsideThisPeriod = run.startTime >= window.start && run.startTime < window.end;
+    const stopIsInsideThisPeriod = run.endTime > window.start && run.endTime <= window.end;
+
+    const canSayStart = run.hasKnownStart && startIsInsideThisPeriod;
+    const canSayStop = run.hasKnownStop && stopIsInsideThisPeriod;
+
+    if (canSayStart && canSayStop) {
+      parts.push(
+        `${type} likely starting around ${formatLocalIsoTimeLabel(run.startTime)} and easing off near ${formatLocalIsoTimeLabel(run.endTime)}.`
+      );
+    } else if (canSayStart) {
+      parts.push(
+        `${type} likely starting around ${formatLocalIsoTimeLabel(run.startTime)}.`
+      );
+    } else if (canSayStop) {
+      parts.push(
+        `${type} likely easing off near ${formatLocalIsoTimeLabel(run.endTime)}.`
+      );
+    }
   }
 
-  const dominantType = [...typeCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || "precipitation";
-  const start = precipRows[0].time;
-  const end = addHoursToLocalIso(precipRows[precipRows.length - 1].time, 1);
-
-  const startText = formatLocalIsoTimeLabel(start);
-  const endText = formatLocalIsoTimeLabel(end);
-
-  return `${dominantType.charAt(0).toUpperCase() + dominantType.slice(1)} likely starting around ${startText} and easing off near ${endText}.`;
+  return parts.join(" ");
 }
 
 function ecPeriodSpeech(location, ecData, period, unit = "C") {
