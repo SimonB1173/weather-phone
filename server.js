@@ -694,7 +694,7 @@ function buildRootMenuInto(twiml) {
   const gather = twiml.gather(gatherOptions("/root-menu", 8, 1));
   say(
     gather,
-    "Welcome to Weather and Info Line. Press 1 for weather. Press 2 for exchange rate. Press 4 for border wait time."
+    "Welcome to Weather and Info Line. Press 1 for weather. Press 2 for exchange rate. Press 4 for border wait time. Press 9 to advertise, leave a comment, or send feedback."
   );
   twiml.redirect({ method: "POST" }, "/root-menu-prompt");
 }
@@ -827,7 +827,7 @@ function afterActionTwiml(req) {
 
 function voicemailPromptTwiml() {
   const twiml = new VoiceResponse();
-  say(twiml, "Please leave your message after the beep. When you are finished, just hang up.");
+  say(twiml, "To advertise, leave a comment, or send feedback, please leave your message after the beep. When you are finished, just hang up.");
   twiml.record({
     action: "/handle-recording",
     method: "POST",
@@ -3090,6 +3090,11 @@ app.post("/root-menu", async (req, res) => {
     if (choice === "4") {
       const borderTwiml = borderMenuTwiml();
       return res.type("text/xml").send(borderTwiml.toString());
+    }
+
+    if (choice === "9") {
+      const voicemailTwiml = await buildStateTwiml(req, "voicemail", { push: false });
+      return res.type("text/xml").send(voicemailTwiml.toString());
     }
 
     say(twiml, "I did not understand that choice.");
