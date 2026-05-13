@@ -694,7 +694,7 @@ function buildRootMenuInto(twiml) {
   const gather = twiml.gather(gatherOptions("/root-menu", 8, 1));
   say(
     gather,
-    "Welcome to Weather and Info Line. Press 1 for weather. Press 2 for exchange rate. Press 4 for border wait time. Press 9 to advertise, leave a comment, or send feedback."
+    "Welcome to Weather and Info Line. Press 1 for weather. Press 2 for exchange rate. Press 4 for border wait time. To advertise, or to leave comments and feedback, press 9."
   );
   twiml.redirect({ method: "POST" }, "/root-menu-prompt");
 }
