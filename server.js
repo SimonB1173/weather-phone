@@ -1583,30 +1583,16 @@ function nwsSingleForecastSpeech(location, nwsData, index, unit = "C") {
 }
 
 function nwsAllForecastSpeech(location, nwsData, unit = "C") {
-  const groups = buildNwsDailyGroups(nwsData, location);
-  if (!groups.length) return `I could not find forecast days for ${placeLabel(location)}.`;
+  const periods = nwsForecastPeriods(nwsData);
+  if (!periods.length) return `I could not find forecast periods for ${placeLabel(location)}.`;
 
   const parts = [
     `Seven day forecast for ${placeLabel(location)}.`,
     nwsIssuedSpeechLine("Issued by the National Weather Service", nwsData?.forecast?.properties?.updated, location.timezone)
   ];
 
-  for (const group of groups.slice(0, 7)) {
-    const periodSummaries = group.periods.map((period) => {
-      const name = String(period?.name || "").trim();
-      const shortForecast = String(period?.shortForecast || "").trim();
-      const tempF = safeNumber(period?.temperature);
-      const tempC = tempF === null ? null : nwsFahrenheitToCelsius(tempF);
-      const isNight = period?.isDaytime === false;
-
-      const tempText = Number.isFinite(tempC)
-        ? `${isNight ? "low" : "high"} ${formatForecastTempValue(tempC, unit)}`
-        : "";
-
-      return [name, shortForecast, tempText].filter(Boolean).join(", ");
-    });
-
-    parts.push(`${group.label}. ${periodSummaries.join(". ")}.`);
+  for (const period of periods.slice(0, 14)) {
+    parts.push(nwsPeriodSpeech(period, unit));
   }
 
   return parts.join(" ");
