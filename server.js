@@ -38,6 +38,7 @@ const EC_CITYPAGE_CACHE_MS = 20 * 60 * 1000;
 const EXCHANGE_CACHE_MS = 10 * 60 * 1000;
 const BORDER_CACHE_MS = 30 * 1000;
 const LIVE_TRAFFIC_CACHE_MS = 30 * 1000;
+const CURRENT_WEATHER_CACHE_MS = 2 * 60 * 1000;
 
 const EC_API_TIMEOUT_MS = 5000;
 const EC_ALERT_TIMEOUT_MS = 5000;
@@ -1582,30 +1583,16 @@ function nwsSingleForecastSpeech(location, nwsData, index, unit = "C") {
 }
 
 function nwsAllForecastSpeech(location, nwsData, unit = "C") {
-  const groups = buildNwsDailyGroups(nwsData, location);
-  if (!groups.length) return `I could not find forecast days for ${placeLabel(location)}.`;
+  const periods = nwsForecastPeriods(nwsData);
+  if (!periods.length) return `I could not find forecast periods for ${placeLabel(location)}.`;
 
   const parts = [
     `Seven day forecast for ${placeLabel(location)}.`,
     nwsIssuedSpeechLine("Issued by the National Weather Service", nwsData?.forecast?.properties?.updated, location.timezone)
   ];
 
-  for (const group of groups.slice(0, 7)) {
-    const periodSummaries = group.periods.map((period) => {
-      const name = String(period?.name || "").trim();
-      const shortForecast = String(period?.shortForecast || "").trim();
-      const tempF = safeNumber(period?.temperature);
-      const tempC = tempF === null ? null : nwsFahrenheitToCelsius(tempF);
-      const isNight = period?.isDaytime === false;
-
-      const tempText = Number.isFinite(tempC)
-        ? `${isNight ? "low" : "high"} ${formatForecastTempValue(tempC, unit)}`
-        : "";
-
-      return [name, shortForecast, tempText].filter(Boolean).join(", ");
-    });
-
-    parts.push(`${group.label}. ${periodSummaries.join(". ")}.`);
+  for (const period of periods.slice(0, 14)) {
+    parts.push(nwsPeriodSpeech(period, unit));
   }
 
   return parts.join(" ");
@@ -2799,6 +2786,31 @@ function buildBorderSpeech(result) {
 
   return parts.join(" ");
 }
+
+async function fetchCurrentForecast(location) {
+  const key = cacheKeyForLocation(location);
+  const cached = forecastCache.get(key);
+
+  if (cached) {
+    const age = Date.now() - cached.timestamp;
+    if (age <= CURRENT_WEATHER_CACHE_MS) {
+      console.log(`Using current-weather short cache for ${key}`);
+      return cached.data;
+    }
+  }
+
+  if (location?.country === "CA") {
+    const ecCacheKey = `ec-citypage:${location.ecCityPageId || cacheKeyForLocation(location)}`;
+    ecCityPageCache.delete(ecCacheKey);
+
+    const data = await fetchEnvironmentCanadaData(location);
+    setCachedForecast(location, data);
+    return data;
+  }
+
+  return fetchForecast(location);
+}
+
 async function fetchForecast(location) {
   pruneForecastCache();
   const cached = getCachedForecast(location);
@@ -3001,7 +3013,11 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
       return twiml;
     }
 
-    const forecast = await fetchForecast(location);
+    const forecast =
+      playback.type === "current"
+        ? await fetchCurrentForecast(location)
+        : await fetchForecast(location);
+
     const speech = await buildPlaybackSpeech(location, forecast, playback, getUnitPreference(req));
 
     if (!speech) {
