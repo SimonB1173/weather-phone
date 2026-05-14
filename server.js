@@ -38,6 +38,7 @@ const EC_CITYPAGE_CACHE_MS = 20 * 60 * 1000;
 const EXCHANGE_CACHE_MS = 10 * 60 * 1000;
 const BORDER_CACHE_MS = 30 * 1000;
 const LIVE_TRAFFIC_CACHE_MS = 30 * 1000;
+const CURRENT_WEATHER_CACHE_MS = 2 * 60 * 1000;
 
 const EC_API_TIMEOUT_MS = 5000;
 const EC_ALERT_TIMEOUT_MS = 5000;
@@ -2799,6 +2800,31 @@ function buildBorderSpeech(result) {
 
   return parts.join(" ");
 }
+
+async function fetchCurrentForecast(location) {
+  const key = cacheKeyForLocation(location);
+  const cached = forecastCache.get(key);
+
+  if (cached) {
+    const age = Date.now() - cached.timestamp;
+    if (age <= CURRENT_WEATHER_CACHE_MS) {
+      console.log(`Using current-weather short cache for ${key}`);
+      return cached.data;
+    }
+  }
+
+  if (location?.country === "CA") {
+    const ecCacheKey = `ec-citypage:${location.ecCityPageId || cacheKeyForLocation(location)}`;
+    ecCityPageCache.delete(ecCacheKey);
+
+    const data = await fetchEnvironmentCanadaData(location);
+    setCachedForecast(location, data);
+    return data;
+  }
+
+  return fetchForecast(location);
+}
+
 async function fetchForecast(location) {
   pruneForecastCache();
   const cached = getCachedForecast(location);
@@ -3001,7 +3027,11 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
       return twiml;
     }
 
-    const forecast = await fetchForecast(location);
+    const forecast =
+      playback.type === "current"
+        ? await fetchCurrentForecast(location)
+        : await fetchForecast(location);
+
     const speech = await buildPlaybackSpeech(location, forecast, playback, getUnitPreference(req));
 
     if (!speech) {
