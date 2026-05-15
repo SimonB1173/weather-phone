@@ -2555,6 +2555,8 @@ function combineTomTomTrafficResults(results) {
   const extraMinutes = Math.max(0, Math.round(totalDelaySeconds / 60));
 
   const nearBorderPoint =
+    valid.find((x) => String(x.label || "").toLowerCase().includes("lineup area")) ||
+    valid.find((x) => String(x.label || "").toLowerCase().includes("approach")) ||
     valid.find((x) => String(x.label || "").toLowerCase().includes("inspection booths")) ||
     valid[valid.length - 1] ||
     worst;
@@ -2810,7 +2812,7 @@ function buildBorderSpeech(result) {
   ];
 
   if (Number.isFinite(Number(result.nearBorderSpeedKmh))) {
-    parts.push(`Speed near the crossing is about ${Math.round(Number(result.nearBorderSpeedKmh))} kilometres per hour.`);
+    parts.push(`Traffic speed approaching the crossing is about ${Math.round(Number(result.nearBorderSpeedKmh))} kilometres per hour.`);
   }
 
   if (result.trafficLevel === "unknown") {
