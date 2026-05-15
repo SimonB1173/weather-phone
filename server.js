@@ -44,6 +44,7 @@ const EC_API_TIMEOUT_MS = 5000;
 const EC_ALERT_TIMEOUT_MS = 5000;
 const OPEN_METEO_TIMEOUT_MS = 15000;
 const BORDER_API_TIMEOUT_MS = 15000;
+const TOMTOM_API_TIMEOUT_MS = 10000;
 
 const VOICEMAILS_FILE = path.join(__dirname, "voicemails.json");
 
@@ -2470,72 +2471,119 @@ function getTrafficLevel(extraMinutes) {
   return "heavy";
 }
 
-async function fetchLiveTrafficRoute(origin, destination) {
-  if (!process.env.GOOGLE_MAPS_API_KEY) {
-    throw new Error("GOOGLE_MAPS_API_KEY is missing");
+async function fetchTomTomTrafficPoint(point) {
+  if (!process.env.TOMTOM_API_KEY) {
+    throw new Error("TOMTOM_API_KEY is missing");
   }
 
-  try {
-    const response = await axios.post(
-      "https://routes.googleapis.com/directions/v2:computeRoutes",
-      {
-        origin: {
-          location: {
-            latLng: origin
-          }
-        },
-        destination: {
-          location: {
-            latLng: destination
-          }
-        },
-        travelMode: "DRIVE",
-        routingPreference: "TRAFFIC_AWARE_OPTIMAL",
-        extraComputations: ["TRAFFIC_ON_POLYLINE"]
-      },
-      {
-        timeout: BORDER_API_TIMEOUT_MS,
-        headers: {
-          "Content-Type": "application/json",
-          "X-Goog-Api-Key": process.env.GOOGLE_MAPS_API_KEY,
-          "X-Goog-FieldMask":
-            "routes.duration,routes.staticDuration,routes.polyline.encodedPolyline,routes.travelAdvisory.speedReadingIntervals"
-        }
+  const response = await axios.get(
+    "https://api.tomtom.com/traffic/services/4/flowSegmentData/absolute/10/json",
+    {
+      timeout: TOMTOM_API_TIMEOUT_MS,
+      params: {
+        key: process.env.TOMTOM_API_KEY,
+        point: `${point.latitude},${point.longitude}`,
+        unit: "KMPH"
       }
-    );
-
-    const route = Array.isArray(response.data?.routes) ? response.data.routes[0] : null;
-    if (!route) {
-      throw new Error("No live traffic route returned from Google Routes API");
     }
+  );
 
-    const durationText = String(route.duration || "0s");
-    const staticDurationText = String(route.staticDuration || durationText);
+  const flow = response.data?.flowSegmentData || {};
 
-    const durationSeconds = Number(durationText.replace("s", "")) || 0;
-    const staticDurationSeconds = Number(staticDurationText.replace("s", "")) || durationSeconds;
+  const currentSpeed = Number(flow.currentSpeed);
+  const freeFlowSpeed = Number(flow.freeFlowSpeed);
+  const currentTravelTime = Number(flow.currentTravelTime);
+  const freeFlowTravelTime = Number(flow.freeFlowTravelTime);
+  const confidence = Number(flow.confidence);
 
-    const extraMinutes = Math.max(0, Math.round((durationSeconds - staticDurationSeconds) / 60));
+  const speedRatio =
+    Number.isFinite(currentSpeed) && Number.isFinite(freeFlowSpeed) && freeFlowSpeed > 0
+      ? currentSpeed / freeFlowSpeed
+      : null;
 
-    console.log("Google live traffic result:", {
-      origin,
-      destination,
-      extraMinutes,
-      trafficLevel: getTrafficLevel(extraMinutes)
-    });
+  const delaySeconds =
+    Number.isFinite(currentTravelTime) && Number.isFinite(freeFlowTravelTime)
+      ? Math.max(0, currentTravelTime - freeFlowTravelTime)
+      : 0;
 
-    return {
-      extraMinutes,
-      trafficLevel: getTrafficLevel(extraMinutes)
-    };
-  } catch (error) {
-    console.error("Google live traffic failed:", error.message);
-    if (error.response) {
-      console.error("Google live traffic status:", error.response.status);
-      console.error("Google live traffic data:", JSON.stringify(error.response.data));
-    }
-    throw error;
+  let trafficLevel = "light";
+
+  if (speedRatio !== null) {
+    if (speedRatio <= 0.35) trafficLevel = "heavy";
+    else if (speedRatio <= 0.65) trafficLevel = "moderate";
   }
+
+  if (delaySeconds >= 8 * 60) trafficLevel = "heavy";
+  else if (delaySeconds >= 3 * 60 && trafficLevel === "light") trafficLevel = "moderate";
+
+  return {
+    label: point.label || "",
+    latitude: point.latitude,
+    longitude: point.longitude,
+    currentSpeed,
+    freeFlowSpeed,
+    currentTravelTime,
+    freeFlowTravelTime,
+    confidence,
+    speedRatio,
+    delaySeconds,
+    trafficLevel
+  };
+}
+
+function combineTomTomTrafficResults(results) {
+  const valid = results.filter((x) => x && Number.isFinite(x.currentSpeed));
+
+  if (!valid.length) {
+    return {
+      extraMinutes: 0,
+      trafficLevel: "unknown",
+      source: "tomtom"
+    };
+  }
+
+  const worst = valid
+    .slice()
+    .sort((a, b) => {
+      const levelScore = { heavy: 3, moderate: 2, light: 1, unknown: 0 };
+      const levelDiff = (levelScore[b.trafficLevel] || 0) - (levelScore[a.trafficLevel] || 0);
+      if (levelDiff !== 0) return levelDiff;
+      return Number(b.delaySeconds || 0) - Number(a.delaySeconds || 0);
+    })[0];
+
+  const totalDelaySeconds = valid.reduce((sum, x) => sum + Number(x.delaySeconds || 0), 0);
+  const extraMinutes = Math.max(0, Math.round(totalDelaySeconds / 60));
+
+  return {
+    extraMinutes,
+    trafficLevel: worst.trafficLevel,
+    worstPoint: worst.label,
+    points: valid,
+    source: "tomtom"
+  };
+}
+
+async function fetchLiveTrafficRoute(points) {
+  const results = [];
+
+  for (const point of points) {
+    try {
+      results.push(await fetchTomTomTrafficPoint(point));
+    } catch (error) {
+      console.error("TomTom traffic point failed:", point, error.message);
+    }
+  }
+
+  const combined = combineTomTomTrafficResults(results);
+
+  console.log("TomTom live traffic result:", {
+    extraMinutes: combined.extraMinutes,
+    trafficLevel: combined.trafficLevel,
+    worstPoint: combined.worstPoint,
+    points: combined.points
+  });
+
+  return combined;
 }
 
 async function fetchLiveTrafficIntoCanada() {
@@ -2543,15 +2591,12 @@ async function fetchLiveTrafficIntoCanada() {
   const cached = cacheGet(borderWaitCache, cacheKey, LIVE_TRAFFIC_CACHE_MS);
   if (cached) return cached;
 
-  const traffic = await fetchLiveTrafficRoute(
-    BORDER_TRAFFIC_POINTS.intoCanada.origin,
-    BORDER_TRAFFIC_POINTS.intoCanada.destination
-  );
-
+  const traffic = await fetchLiveTrafficRoute(BORDER_TRAFFIC_POINTS.intoCanada);
+    
   const payload = {
     direction: "live_into_canada",
     locationSpeech: CHAMPLAIN_LACOLLE.spokenNameCanada,
-    source: "google-routes",
+    source: "tomtom",
     ...traffic
   };
 
@@ -2563,15 +2608,12 @@ async function fetchLiveTrafficIntoUs() {
   const cached = cacheGet(borderWaitCache, cacheKey, LIVE_TRAFFIC_CACHE_MS);
   if (cached) return cached;
 
-  const traffic = await fetchLiveTrafficRoute(
-    BORDER_TRAFFIC_POINTS.intoUs.origin,
-    BORDER_TRAFFIC_POINTS.intoUs.destination
-  );
-
+  const traffic = await fetchLiveTrafficRoute(BORDER_TRAFFIC_POINTS.intoUs);
+   
   const payload = {
     direction: "live_into_us",
     locationSpeech: CHAMPLAIN_LACOLLE.spokenNameUs,
-    source: "google-routes",
+    source: "tomtom",
     ...traffic
   };
 
@@ -2734,14 +2776,16 @@ async function fetchBorderWait(direction) {
 }
 
 const BORDER_TRAFFIC_POINTS = {
-  intoCanada: {
-    origin: { latitude: 44.9625, longitude: -73.4466 },
-    destination: { latitude: 45.0060, longitude: -73.4544 }
-  },
-  intoUs: {
-    origin: { latitude: 45.0475, longitude: -73.4635 },
-    destination: { latitude: 44.9957, longitude: -73.4552 }
-  }
+  intoCanada: [
+    { latitude: 44.9625, longitude: -73.4466, label: "approach to Canada border" },
+    { latitude: 44.9785, longitude: -73.4500, label: "Canada-bound lineup area" },
+    { latitude: 44.9950, longitude: -73.4530, label: "near Canada inspection booths" }
+  ],
+  intoUs: [
+    { latitude: 45.0475, longitude: -73.4635, label: "approach to U.S. border" },
+    { latitude: 45.0250, longitude: -73.4590, label: "U.S.-bound lineup area" },
+    { latitude: 44.9957, longitude: -73.4552, label: "near U.S. inspection booths" }
+  ]
 };
 
 function buildBorderSpeech(result) {
@@ -2753,10 +2797,12 @@ function buildBorderSpeech(result) {
     `Traffic approaching the crossing is ${result.trafficLevel}.`
   ];
 
-  if (minutes === 0) {
-    parts.push("Current delay is 0 minutes.");
+  if (result.trafficLevel === "unknown") {
+    parts.push("Live traffic delay is currently unavailable.");
+  } else if (minutes === 0) {
+    parts.push("No extra delay is currently detected by live traffic data.");
   } else {
-    parts.push(`Current delay is about ${minutes} ${minutes === 1 ? "minute" : "minutes"}.`);
+    parts.push(`Live traffic shows about ${minutes} ${minutes === 1 ? "minute" : "minutes"} of extra delay.`);
   }
 
   return parts.join(" ");
