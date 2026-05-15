@@ -2802,6 +2802,56 @@ const BORDER_TRAFFIC_POINTS = {
   ]
 };
 
+function liveTrafficSpeedUnitForDirection(direction) {
+  return direction === "live_into_canada" ? "miles per hour" : "kilometres per hour";
+}
+
+function liveTrafficSpeedValueForDirection(speedKmh, direction) {
+  const n = Number(speedKmh);
+  if (!Number.isFinite(n)) return null;
+
+  // Entering Canada means the caller is approaching from the U.S. side,
+  // so speak miles per hour.
+  if (direction === "live_into_canada") {
+    return Math.round(n * 0.621371);
+  }
+
+  // Entering the U.S. means the caller is approaching from the Canada side,
+  // so speak kilometres per hour.
+  return Math.round(n);
+}
+
+function buildTomTomPointSpeedsSpeech(result) {
+  const points = Array.isArray(result.points) ? result.points : [];
+  if (!points.length) return "";
+
+  const unitLabel = liveTrafficSpeedUnitForDirection(result.direction);
+
+  const labelForPoint = (label) => {
+    const text = String(label || "").toLowerCase();
+
+    if (text.includes("approach")) return "approach";
+    if (text.includes("lineup")) return "lineup area";
+    if (text.includes("inspection booths")) return "near the booths";
+
+    return "";
+  };
+
+  const pieces = points
+    .map((point) => {
+      const label = labelForPoint(point.label);
+      const speed = liveTrafficSpeedValueForDirection(point.currentSpeed, result.direction);
+
+      if (!label || speed === null) return "";
+      return `${label} ${speed} ${unitLabel}`;
+    })
+    .filter(Boolean);
+
+  if (!pieces.length) return "";
+
+  return `Traffic speeds checked: ${pieces.join(", ")}.`;
+}
+
 function buildBorderSpeech(result) {
   if (result.direction === "live_into_canada" || result.direction === "live_into_us") {
   const minutes = Math.max(0, Math.round(Number(result.extraMinutes || 0)));
@@ -2811,8 +2861,9 @@ function buildBorderSpeech(result) {
     `Traffic approaching the crossing is ${result.trafficLevel}.`
   ];
 
-  if (Number.isFinite(Number(result.nearBorderSpeedKmh))) {
-    parts.push(`Traffic speed approaching the crossing is about ${Math.round(Number(result.nearBorderSpeedKmh))} kilometres per hour.`);
+  const pointSpeedsSpeech = buildTomTomPointSpeedsSpeech(result);
+  if (pointSpeedsSpeech) {
+    parts.push(pointSpeedsSpeech);
   }
 
   if (result.trafficLevel === "unknown") {
