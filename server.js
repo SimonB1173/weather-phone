@@ -2554,10 +2554,22 @@ function combineTomTomTrafficResults(results) {
   const totalDelaySeconds = valid.reduce((sum, x) => sum + Number(x.delaySeconds || 0), 0);
   const extraMinutes = Math.max(0, Math.round(totalDelaySeconds / 60));
 
+  const nearBorderPoint =
+    valid.find((x) => String(x.label || "").toLowerCase().includes("inspection booths")) ||
+    valid[valid.length - 1] ||
+    worst;
+
   return {
     extraMinutes,
     trafficLevel: worst.trafficLevel,
     worstPoint: worst.label,
+    nearBorderSpeedKmh: Number.isFinite(nearBorderPoint?.currentSpeed)
+      ? Math.round(nearBorderPoint.currentSpeed)
+      : null,
+    nearBorderFreeFlowSpeedKmh: Number.isFinite(nearBorderPoint?.freeFlowSpeed)
+      ? Math.round(nearBorderPoint.freeFlowSpeed)
+      : null,
+    nearBorderPoint: nearBorderPoint?.label || "",
     points: valid,
     source: "tomtom"
   };
@@ -2796,6 +2808,10 @@ function buildBorderSpeech(result) {
     `Current traffic conditions for ${result.locationSpeech}.`,
     `Traffic approaching the crossing is ${result.trafficLevel}.`
   ];
+
+  if (Number.isFinite(Number(result.nearBorderSpeedKmh))) {
+    parts.push(`Speed near the crossing is about ${Math.round(Number(result.nearBorderSpeedKmh))} kilometres per hour.`);
+  }
 
   if (result.trafficLevel === "unknown") {
     parts.push("Live traffic delay is currently unavailable.");
