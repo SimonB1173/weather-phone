@@ -412,7 +412,7 @@ function getCanadaAudioDecision(location, audioKey, text) {
   // Script changed, but an older Google audio file exists.
   // Play old Google audio now, and the next caller will get the updated file.
   const allowStaleAudio =
-  !String(audioKey || "").startsWith("playback-hourly") &&
+  !String(audioKey || "").startsWith("playback-hourly")
 
 if (allowStaleAudio && existing?.url) {
   return {
