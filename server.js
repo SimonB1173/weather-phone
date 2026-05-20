@@ -287,7 +287,7 @@ function canadaAudioObjectName(location, audioKey) {
 
   const safeKey = cleanForFilename(audioKey || "weather");
 
-  return `canada-weather/${locationId}/${safeKey}.mp3`;
+  return `canada-weather/${locationId}/${safeKey}.wav`;
 }
 
 function publicAudioUrlForObject(objectName) {
@@ -306,7 +306,8 @@ async function generateAndUploadSpeechAudio({ objectName, speech }) {
       name: GOOGLE_TTS_VOICE
     },
     audioConfig: {
-      audioEncoding: "MP3"
+      audioEncoding: "LINEAR16",
+      sampleRateHertz: 8000
     }
   };
 
@@ -321,7 +322,7 @@ async function generateAndUploadSpeechAudio({ objectName, speech }) {
     .file(objectName)
     .save(response.audioContent, {
       resumable: false,
-      contentType: "audio/mpeg",
+      contentType: "audio/wav",
       metadata: {
         cacheControl: "no-cache, max-age=0"
       }
@@ -3292,6 +3293,7 @@ if (location?.country === "CA") {
 return playbackWithStarTwiml(speech, {
   rate: playback.speechRate || "100%"
 });
+  }
 
   if (state === "after-prompt") return afterActionTwiml(req);
   if (state === "voicemail") return voicemailPromptTwiml();
