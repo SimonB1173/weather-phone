@@ -3,6 +3,9 @@ const axios = require("axios");
 const twilio = require("twilio");
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
+const textToSpeech = require("@google-cloud/text-to-speech");
+const { Storage } = require("@google-cloud/storage");
 
 const app = express();
 app.use(express.urlencoded({ extended: false }));
@@ -14,6 +17,23 @@ const SAY_OPTIONS = {
   voice: "Polly.Matthew",
   language: "en-US"
 };
+
+const ttsClient = new textToSpeech.TextToSpeechClient();
+const storageClient = new Storage();
+
+const GCS_BUCKET_NAME = process.env.GCS_BUCKET_NAME || "";
+const PUBLIC_AUDIO_BASE_URL =
+  process.env.PUBLIC_AUDIO_BASE_URL ||
+  (GCS_BUCKET_NAME ? `https://storage.googleapis.com/${GCS_BUCKET_NAME}` : "");
+
+const GOOGLE_TTS_VOICE = process.env.GOOGLE_TTS_VOICE || "en-US-Neural2-J";
+
+const CANADA_AUDIO_CACHE_FILE = path.join(
+  __dirname,
+  process.env.CANADA_AUDIO_CACHE_FILE || "canada-audio-cache.json"
+);
+
+const canadaAudioJobsInFlight = new Map();
 
 const forecastCache = new Map();
 const inFlightForecasts = new Map();
@@ -44,7 +64,6 @@ const EC_API_TIMEOUT_MS = 5000;
 const EC_ALERT_TIMEOUT_MS = 5000;
 const OPEN_METEO_TIMEOUT_MS = 15000;
 const BORDER_API_TIMEOUT_MS = 15000;
-const TOMTOM_API_TIMEOUT_MS = 10000;
 
 const VOICEMAILS_FILE = path.join(__dirname, "voicemails.json");
 
@@ -194,6 +213,20 @@ function playbackWithStarTwiml(text, options = {}) {
   return twiml;
 }
 
+function playbackAudioWithStarTwiml(audioUrl) {
+  const safeUrl = xmlEscape(audioUrl);
+
+  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Gather input="dtmf" action="/during-playback" method="POST" timeout="1" numDigits="1" finishOnKey="">
+    <Play>${safeUrl}</Play>
+  </Gather>
+  <Redirect method="POST">/after-prompt</Redirect>
+</Response>`;
+
+  return twiml;
+}
+
 function getCallKey(req) {
   return String(req.body.CallSid || "unknown").trim();
 }
@@ -223,6 +256,168 @@ function saveJsonFile(filePath, value) {
   } catch (error) {
     console.error(`Failed to write ${filePath}:`, error.message);
   }
+}
+
+function cleanForFilename(text) {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+}
+
+function sha256(text) {
+  return crypto
+    .createHash("sha256")
+    .update(String(text || ""), "utf8")
+    .digest("hex");
+}
+
+function normalizeSpeechForHash(text) {
+  return String(text || "")
+    .replace(/\s+/g, " ")
+    .replace(/\s+([,.!?;:])/g, "$1")
+    .trim();
+}
+
+function canadaAudioObjectName(location, audioKey) {
+  const locationId = cleanForFilename(
+    location?.id || location?.label || cacheKeyForLocation(location)
+  );
+
+  const safeKey = cleanForFilename(audioKey || "weather");
+
+  return `canada-weather/${locationId}/${safeKey}.mp3`;
+}
+
+function publicAudioUrlForObject(objectName) {
+  return `${PUBLIC_AUDIO_BASE_URL.replace(/\/+$/, "")}/${objectName}`;
+}
+
+async function generateAndUploadSpeechAudio({ objectName, speech }) {
+  if (!GCS_BUCKET_NAME || !PUBLIC_AUDIO_BASE_URL) {
+    throw new Error("Google Cloud audio storage is not configured");
+  }
+
+  const request = {
+    input: { text: speech },
+    voice: {
+      languageCode: "en-US",
+      name: GOOGLE_TTS_VOICE
+    },
+    audioConfig: {
+      audioEncoding: "MP3"
+    }
+  };
+
+  const [response] = await ttsClient.synthesizeSpeech(request);
+
+  if (!response.audioContent) {
+    throw new Error("Google TTS returned empty audio content");
+  }
+
+  await storageClient
+    .bucket(GCS_BUCKET_NAME)
+    .file(objectName)
+    .save(response.audioContent, {
+      resumable: false,
+      contentType: "audio/mpeg",
+      metadata: {
+        cacheControl: "no-cache, max-age=0"
+      }
+    });
+
+  return publicAudioUrlForObject(objectName);
+}
+
+function refreshCanadaAudioInBackground({ objectName, speech, speechHash, location, audioKey }) {
+  if (!GCS_BUCKET_NAME || !PUBLIC_AUDIO_BASE_URL) {
+    console.log("Canada audio cache skipped: Google Cloud storage is not configured");
+    return;
+  }
+
+  if (canadaAudioJobsInFlight.has(objectName)) {
+    console.log("Canada audio generation already in flight:", objectName);
+    return;
+  }
+
+  const job = generateAndUploadSpeechAudio({
+    objectName,
+    speech
+  })
+    .then((uploadedUrl) => {
+      const updatedCache = loadJsonFile(CANADA_AUDIO_CACHE_FILE, {});
+
+      updatedCache[objectName] = {
+        hash: speechHash,
+        url: uploadedUrl,
+        updatedAt: new Date().toISOString(),
+        location: location?.label || location?.name || "",
+        audioKey
+      };
+
+      saveJsonFile(CANADA_AUDIO_CACHE_FILE, updatedCache);
+
+      console.log("Canada audio updated:", objectName);
+    })
+    .catch((error) => {
+      console.error("Canada audio background update failed:", error.message);
+    })
+    .finally(() => {
+      canadaAudioJobsInFlight.delete(objectName);
+    });
+
+  canadaAudioJobsInFlight.set(objectName, job);
+}
+
+function getCanadaAudioDecision(location, audioKey, text) {
+  const cleanedSpeech = normalizeSpeechForHash(text);
+
+  if (!cleanedSpeech) {
+    return {
+      mode: "say",
+      speech: ""
+    };
+  }
+
+  const objectName = canadaAudioObjectName(location, audioKey);
+  const url = publicAudioUrlForObject(objectName);
+  const speechHash = sha256(cleanedSpeech);
+
+  const cache = loadJsonFile(CANADA_AUDIO_CACHE_FILE, {});
+  const existing = cache[objectName];
+
+  if (existing?.hash === speechHash && existing?.url) {
+    return {
+      mode: "play",
+      url: existing.url
+    };
+  }
+
+  refreshCanadaAudioInBackground({
+    objectName,
+    speech: cleanedSpeech,
+    speechHash,
+    location,
+    audioKey
+  });
+
+  return {
+    mode: "say",
+    speech: cleanedSpeech,
+    pendingAudioUrl: url
+  };
+}
+
+function sayOrPlayCanadaAudio(twimlNode, location, audioKey, text) {
+  const decision = getCanadaAudioDecision(location, audioKey, text);
+
+  if (decision.mode === "play" && decision.url) {
+    twimlNode.play(decision.url);
+    return;
+  }
+
+  say(twimlNode, decision.speech || text);
 }
 
 function getTemporaryLocation(req) {
@@ -701,9 +896,24 @@ function buildRootMenuInto(twiml) {
   twiml.redirect({ method: "POST" }, "/root-menu-prompt");
 }
 
+function buildMainMenuText(activeLocationName) {
+  return `${activeLocationName}. Press 1 for daily forecast. Press 2 for hourly forecast. Press 3 for current weather. Press star for the previous menu.`;
+}
+
 function buildMainMenuInto(twiml, activeLocationName) {
   const gather = twiml.gather(gatherOptions("/menu", 8, 1));
-  say(gather, `${activeLocationName}. Press 1 for daily forecast. Press 2 for hourly forecast. Press 3 for current weather. Press star for the previous menu.`);
+  say(gather, buildMainMenuText(activeLocationName));
+  twiml.redirect({ method: "POST" }, "/main-menu");
+}
+
+function buildCanadaMainMenuInto(twiml, location) {
+  const gather = twiml.gather(gatherOptions("/menu", 8, 1));
+  sayOrPlayCanadaAudio(
+    gather,
+    location,
+    "main-menu",
+    buildMainMenuText(placeLabel(location))
+  );
   twiml.redirect({ method: "POST" }, "/main-menu");
 }
 
@@ -2471,133 +2681,72 @@ function getTrafficLevel(extraMinutes) {
   return "heavy";
 }
 
-async function fetchTomTomTrafficPoint(point) {
-  if (!process.env.TOMTOM_API_KEY) {
-    throw new Error("TOMTOM_API_KEY is missing");
+async function fetchLiveTrafficRoute(origin, destination) {
+  if (!process.env.GOOGLE_MAPS_API_KEY) {
+    throw new Error("GOOGLE_MAPS_API_KEY is missing");
   }
 
-  const response = await axios.get(
-    "https://api.tomtom.com/traffic/services/4/flowSegmentData/absolute/10/json",
-    {
-      timeout: TOMTOM_API_TIMEOUT_MS,
-      params: {
-        key: process.env.TOMTOM_API_KEY,
-        point: `${point.latitude},${point.longitude}`,
-        unit: "KMPH"
+  try {
+    const response = await axios.post(
+      "https://routes.googleapis.com/directions/v2:computeRoutes",
+      {
+        origin: {
+          location: {
+            latLng: origin
+          }
+        },
+        destination: {
+          location: {
+            latLng: destination
+          }
+        },
+        travelMode: "DRIVE",
+        routingPreference: "TRAFFIC_AWARE_OPTIMAL",
+        extraComputations: ["TRAFFIC_ON_POLYLINE"]
+      },
+      {
+        timeout: BORDER_API_TIMEOUT_MS,
+        headers: {
+          "Content-Type": "application/json",
+          "X-Goog-Api-Key": process.env.GOOGLE_MAPS_API_KEY,
+          "X-Goog-FieldMask":
+            "routes.duration,routes.staticDuration,routes.polyline.encodedPolyline,routes.travelAdvisory.speedReadingIntervals"
+        }
       }
+    );
+
+    const route = Array.isArray(response.data?.routes) ? response.data.routes[0] : null;
+    if (!route) {
+      throw new Error("No live traffic route returned from Google Routes API");
     }
-  );
 
-  const flow = response.data?.flowSegmentData || {};
+    const durationText = String(route.duration || "0s");
+    const staticDurationText = String(route.staticDuration || durationText);
 
-  const currentSpeed = Number(flow.currentSpeed);
-  const freeFlowSpeed = Number(flow.freeFlowSpeed);
-  const currentTravelTime = Number(flow.currentTravelTime);
-  const freeFlowTravelTime = Number(flow.freeFlowTravelTime);
-  const confidence = Number(flow.confidence);
+    const durationSeconds = Number(durationText.replace("s", "")) || 0;
+    const staticDurationSeconds = Number(staticDurationText.replace("s", "")) || durationSeconds;
 
-  const speedRatio =
-    Number.isFinite(currentSpeed) && Number.isFinite(freeFlowSpeed) && freeFlowSpeed > 0
-      ? currentSpeed / freeFlowSpeed
-      : null;
+    const extraMinutes = Math.max(0, Math.round((durationSeconds - staticDurationSeconds) / 60));
 
-  const delaySeconds =
-    Number.isFinite(currentTravelTime) && Number.isFinite(freeFlowTravelTime)
-      ? Math.max(0, currentTravelTime - freeFlowTravelTime)
-      : 0;
+    console.log("Google live traffic result:", {
+      origin,
+      destination,
+      extraMinutes,
+      trafficLevel: getTrafficLevel(extraMinutes)
+    });
 
-  let trafficLevel = "light";
-
-  if (speedRatio !== null) {
-    if (speedRatio <= 0.35) trafficLevel = "heavy";
-    else if (speedRatio <= 0.65) trafficLevel = "moderate";
-  }
-
-  if (delaySeconds >= 8 * 60) trafficLevel = "heavy";
-  else if (delaySeconds >= 3 * 60 && trafficLevel === "light") trafficLevel = "moderate";
-
-  return {
-    label: point.label || "",
-    latitude: point.latitude,
-    longitude: point.longitude,
-    currentSpeed,
-    freeFlowSpeed,
-    currentTravelTime,
-    freeFlowTravelTime,
-    confidence,
-    speedRatio,
-    delaySeconds,
-    trafficLevel
-  };
-}
-
-function combineTomTomTrafficResults(results) {
-  const valid = results.filter((x) => x && Number.isFinite(x.currentSpeed));
-
-  if (!valid.length) {
     return {
-      extraMinutes: 0,
-      trafficLevel: "unknown",
-      source: "tomtom"
+      extraMinutes,
+      trafficLevel: getTrafficLevel(extraMinutes)
     };
-  }
-
-  const worst = valid
-    .slice()
-    .sort((a, b) => {
-      const levelScore = { heavy: 3, moderate: 2, light: 1, unknown: 0 };
-      const levelDiff = (levelScore[b.trafficLevel] || 0) - (levelScore[a.trafficLevel] || 0);
-      if (levelDiff !== 0) return levelDiff;
-      return Number(b.delaySeconds || 0) - Number(a.delaySeconds || 0);
-    })[0];
-
-  const totalDelaySeconds = valid.reduce((sum, x) => sum + Number(x.delaySeconds || 0), 0);
-  const extraMinutes = Math.max(0, Math.round(totalDelaySeconds / 60));
-
-  const nearBorderPoint =
-    valid.find((x) => String(x.label || "").toLowerCase().includes("lineup area")) ||
-    valid.find((x) => String(x.label || "").toLowerCase().includes("approach")) ||
-    valid.find((x) => String(x.label || "").toLowerCase().includes("inspection booths")) ||
-    valid[valid.length - 1] ||
-    worst;
-
-  return {
-    extraMinutes,
-    trafficLevel: worst.trafficLevel,
-    worstPoint: worst.label,
-    nearBorderSpeedKmh: Number.isFinite(nearBorderPoint?.currentSpeed)
-      ? Math.round(nearBorderPoint.currentSpeed)
-      : null,
-    nearBorderFreeFlowSpeedKmh: Number.isFinite(nearBorderPoint?.freeFlowSpeed)
-      ? Math.round(nearBorderPoint.freeFlowSpeed)
-      : null,
-    nearBorderPoint: nearBorderPoint?.label || "",
-    points: valid,
-    source: "tomtom"
-  };
-}
-
-async function fetchLiveTrafficRoute(points) {
-  const results = [];
-
-  for (const point of points) {
-    try {
-      results.push(await fetchTomTomTrafficPoint(point));
-    } catch (error) {
-      console.error("TomTom traffic point failed:", point, error.message);
+  } catch (error) {
+    console.error("Google live traffic failed:", error.message);
+    if (error.response) {
+      console.error("Google live traffic status:", error.response.status);
+      console.error("Google live traffic data:", JSON.stringify(error.response.data));
     }
+    throw error;
   }
-
-  const combined = combineTomTomTrafficResults(results);
-
-  console.log("TomTom live traffic result:", {
-    extraMinutes: combined.extraMinutes,
-    trafficLevel: combined.trafficLevel,
-    worstPoint: combined.worstPoint,
-    points: combined.points
-  });
-
-  return combined;
 }
 
 async function fetchLiveTrafficIntoCanada() {
@@ -2605,12 +2754,15 @@ async function fetchLiveTrafficIntoCanada() {
   const cached = cacheGet(borderWaitCache, cacheKey, LIVE_TRAFFIC_CACHE_MS);
   if (cached) return cached;
 
-  const traffic = await fetchLiveTrafficRoute(BORDER_TRAFFIC_POINTS.intoCanada);
-    
+  const traffic = await fetchLiveTrafficRoute(
+    BORDER_TRAFFIC_POINTS.intoCanada.origin,
+    BORDER_TRAFFIC_POINTS.intoCanada.destination
+  );
+
   const payload = {
     direction: "live_into_canada",
     locationSpeech: CHAMPLAIN_LACOLLE.spokenNameCanada,
-    source: "tomtom",
+    source: "google-routes",
     ...traffic
   };
 
@@ -2622,12 +2774,15 @@ async function fetchLiveTrafficIntoUs() {
   const cached = cacheGet(borderWaitCache, cacheKey, LIVE_TRAFFIC_CACHE_MS);
   if (cached) return cached;
 
-  const traffic = await fetchLiveTrafficRoute(BORDER_TRAFFIC_POINTS.intoUs);
-   
+  const traffic = await fetchLiveTrafficRoute(
+    BORDER_TRAFFIC_POINTS.intoUs.origin,
+    BORDER_TRAFFIC_POINTS.intoUs.destination
+  );
+
   const payload = {
     direction: "live_into_us",
     locationSpeech: CHAMPLAIN_LACOLLE.spokenNameUs,
-    source: "tomtom",
+    source: "google-routes",
     ...traffic
   };
 
@@ -2790,67 +2945,15 @@ async function fetchBorderWait(direction) {
 }
 
 const BORDER_TRAFFIC_POINTS = {
-  intoCanada: [
-    { latitude: 44.9625, longitude: -73.4466, label: "approach to Canada border" },
-    { latitude: 44.9785, longitude: -73.4500, label: "Canada-bound lineup area" },
-    { latitude: 44.9950, longitude: -73.4530, label: "near Canada inspection booths" }
-  ],
-  intoUs: [
-    { latitude: 45.0475, longitude: -73.4635, label: "approach to U.S. border" },
-    { latitude: 45.0250, longitude: -73.4590, label: "U.S.-bound lineup area" },
-    { latitude: 44.9957, longitude: -73.4552, label: "near U.S. inspection booths" }
-  ]
-};
-
-function liveTrafficSpeedUnitForDirection(direction) {
-  return direction === "live_into_canada" ? "miles per hour" : "kilometres per hour";
-}
-
-function liveTrafficSpeedValueForDirection(speedKmh, direction) {
-  const n = Number(speedKmh);
-  if (!Number.isFinite(n)) return null;
-
-  // Entering Canada means the caller is approaching from the U.S. side,
-  // so speak miles per hour.
-  if (direction === "live_into_canada") {
-    return Math.round(n * 0.621371);
+  intoCanada: {
+    origin: { latitude: 44.9625, longitude: -73.4466 },
+    destination: { latitude: 45.0060, longitude: -73.4544 }
+  },
+  intoUs: {
+    origin: { latitude: 45.0475, longitude: -73.4635 },
+    destination: { latitude: 44.9957, longitude: -73.4552 }
   }
-
-  // Entering the U.S. means the caller is approaching from the Canada side,
-  // so speak kilometres per hour.
-  return Math.round(n);
-}
-
-function buildTomTomPointSpeedsSpeech(result) {
-  const points = Array.isArray(result.points) ? result.points : [];
-  if (!points.length) return "";
-
-  const unitLabel = liveTrafficSpeedUnitForDirection(result.direction);
-
-  const labelForPoint = (label) => {
-    const text = String(label || "").toLowerCase();
-
-    if (text.includes("approach")) return "approach";
-    if (text.includes("lineup")) return "lineup area";
-    if (text.includes("inspection booths")) return "near the booths";
-
-    return "";
-  };
-
-  const pieces = points
-    .map((point) => {
-      const label = labelForPoint(point.label);
-      const speed = liveTrafficSpeedValueForDirection(point.currentSpeed, result.direction);
-
-      if (!label || speed === null) return "";
-      return `${label} ${speed} ${unitLabel}`;
-    })
-    .filter(Boolean);
-
-  if (!pieces.length) return "";
-
-  return `Traffic speeds checked: ${pieces.join(", ")}.`;
-}
+};
 
 function buildBorderSpeech(result) {
   if (result.direction === "live_into_canada" || result.direction === "live_into_us") {
@@ -2861,17 +2964,10 @@ function buildBorderSpeech(result) {
     `Traffic approaching the crossing is ${result.trafficLevel}.`
   ];
 
-  const pointSpeedsSpeech = buildTomTomPointSpeedsSpeech(result);
-  if (pointSpeedsSpeech) {
-    parts.push(pointSpeedsSpeech);
-  }
-
-  if (result.trafficLevel === "unknown") {
-    parts.push("Live traffic delay is currently unavailable.");
-  } else if (minutes === 0) {
-    parts.push("No extra delay is currently detected by live traffic data.");
+  if (minutes === 0) {
+    parts.push("Current delay is 0 minutes.");
   } else {
-    parts.push(`Live traffic shows about ${minutes} ${minutes === 1 ? "minute" : "minutes"} of extra delay.`);
+    parts.push(`Current delay is about ${minutes} ${minutes === 1 ? "minute" : "minutes"}.`);
   }
 
   return parts.join(" ");
@@ -2985,11 +3081,27 @@ function speakWeatherError(twiml, error, fallbackText) {
 
 async function buildMainMenuResponse(req, twiml) {
   const activeLocation = getActiveLocation(req);
+
   if (activeLocation) {
     const canadaAlert = await fetchCanadianAlert(activeLocation);
-    if (canadaAlert) say(twiml, buildCanadianAlertSpeech(activeLocation, canadaAlert));
+
+    if (canadaAlert) {
+      const alertSpeech = buildCanadianAlertSpeech(activeLocation, canadaAlert);
+
+      if (activeLocation?.country === "CA") {
+        sayOrPlayCanadaAudio(twiml, activeLocation, "weather-alert", alertSpeech);
+      } else {
+        say(twiml, alertSpeech);
+      }
+    }
+
     setMenuState(req, "main-menu");
-    buildMainMenuInto(twiml, placeLabel(activeLocation));
+
+    if (activeLocation?.country === "CA") {
+      buildCanadaMainMenuInto(twiml, activeLocation);
+    } else {
+      buildMainMenuInto(twiml, placeLabel(activeLocation));
+    }
   } else {
     twiml.redirect({ method: "POST" }, "/location-menu-prompt");
   }
@@ -3002,11 +3114,20 @@ async function forecastDayPromptTwiml(location, forecast) {
   if (location?.country === "CA") {
     const groups = buildEcDailyGroups(forecast, location);
     const parts = ["For the full 7 day forecast, press 0."];
+
     for (let i = 0; i < Math.min(9, groups.length); i++) {
       parts.push(`Press ${i + 1} for ${groups[i].label}.`);
     }
+
     parts.push("Press star to go back to the previous menu.");
-    say(gather, parts.join(" "));
+
+    sayOrPlayCanadaAudio(
+      gather,
+      location,
+      "forecast-day-menu",
+      parts.join(" ")
+    );
+
     twiml.redirect({ method: "POST" }, "/forecast-menu");
     return twiml;
   }
@@ -3128,23 +3249,49 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
       return twiml;
     }
 
-    const forecast =
-      playback.type === "current"
-        ? await fetchCurrentForecast(location)
-        : await fetchForecast(location);
+const forecast =
+  playback.type === "current"
+    ? await fetchCurrentForecast(location)
+    : await fetchForecast(location);
 
-    const speech = await buildPlaybackSpeech(location, forecast, playback, getUnitPreference(req));
+const unit = getUnitPreference(req);
+const speech = await buildPlaybackSpeech(location, forecast, playback, unit);
 
-    if (!speech) {
-      say(twiml, "There is nothing to repeat yet.");
-      twiml.redirect({ method: "POST" }, "/root-menu-prompt");
-      return twiml;
-    }
+if (!speech) {
+  say(twiml, "There is nothing to repeat yet.");
+  twiml.redirect({ method: "POST" }, "/root-menu-prompt");
+  return twiml;
+}
 
-    return playbackWithStarTwiml(speech, {
-      rate: playback.speechRate || "100%"
-    });
+if (location?.country === "CA") {
+  let audioKey = `playback-${playback.type}-${unit}`;
+
+  if (playback.type === "hourly") {
+    audioKey = `playback-hourly-${Number(playback.hours || 12)}h-${unit}`;
   }
+
+  if (playback.type === "daily") {
+    audioKey = `playback-daily-${Number(playback.index || 0)}-${unit}`;
+  }
+
+  if (playback.type === "all7") {
+    audioKey = `playback-all7-${unit}`;
+  }
+
+  const audioDecision = getCanadaAudioDecision(location, audioKey, speech);
+
+  if (audioDecision.mode === "play" && audioDecision.url) {
+    return playbackAudioWithStarTwiml(audioDecision.url);
+  }
+
+  return playbackWithStarTwiml(audioDecision.speech || speech, {
+    rate: playback.speechRate || "100%"
+  });
+}
+
+return playbackWithStarTwiml(speech, {
+  rate: playback.speechRate || "100%"
+});
 
   if (state === "after-prompt") return afterActionTwiml(req);
   if (state === "voicemail") return voicemailPromptTwiml();
@@ -3385,13 +3532,22 @@ app.post("/set-location-choice", async (req, res) => {
     const menuTwiml = await buildStateTwiml(req, "location-menu", { push: false });
     return res.type("text/xml").send(menuTwiml.toString());
   }
+  
+  const selectedLocation = PRESET_LOCATIONS[choice];
 
-  saveTemporaryLocationForCall(req, PRESET_LOCATIONS[choice]);
+  saveTemporaryLocationForCall(req, selectedLocation);
   clearPendingLocationChoice(req);
   pushMenuHistory(req, "main-menu");
   setMenuState(req, "main-menu");
-  buildMainMenuInto(twiml, PRESET_LOCATIONS[choice].label);
+
+  if (selectedLocation?.country === "CA") {
+    buildCanadaMainMenuInto(twiml, selectedLocation);
+  } else {
+    buildMainMenuInto(twiml, selectedLocation.label);
+  }
+
   return res.type("text/xml").send(twiml.toString());
+  saveTemporaryLocationForCall(req, PRESET_LOCATIONS[choice]);
 });
 
 app.post("/set-us-location-choice", async (req, res) => {
