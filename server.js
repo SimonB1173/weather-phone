@@ -382,19 +382,24 @@ function getCanadaAudioDecision(location, audioKey, text) {
   }
 
   const objectName = canadaAudioObjectName(location, audioKey);
-  const url = publicAudioUrlForObject(objectName);
+  const pendingAudioUrl = publicAudioUrlForObject(objectName);
   const speechHash = sha256(cleanedSpeech);
 
   const cache = loadJsonFile(CANADA_AUDIO_CACHE_FILE, {});
   const existing = cache[objectName];
 
+  // Case 1:
+  // Exact same script as the saved audio.
+  // Play the current Google audio.
   if (existing?.hash === speechHash && existing?.url) {
     return {
       mode: "play",
-      url: existing.url
+      url: existing.url,
+      reason: "exact-cache-hit"
     };
   }
 
+  // Script is new or changed, so start creating the updated Google audio.
   refreshCanadaAudioInBackground({
     objectName,
     speech: cleanedSpeech,
@@ -403,10 +408,27 @@ function getCanadaAudioDecision(location, audioKey, text) {
     audioKey
   });
 
+  // Case 2:
+  // Script changed, but an older Google audio file exists.
+  // Play old Google audio now, and the next caller will get the updated file.
+  if (existing?.url) {
+    return {
+      mode: "play",
+      url: existing.url,
+      pendingAudioUrl,
+      reason: "stale-cache-played-while-refreshing"
+    };
+  }
+
+  // Case 3:
+  // No Google audio exists yet.
+  // Use Twilio Say once so the caller hears something,
+  // while Google audio is generated in the background.
   return {
     mode: "say",
     speech: cleanedSpeech,
-    pendingAudioUrl: url
+    pendingAudioUrl,
+    reason: "no-audio-yet"
   };
 }
 
