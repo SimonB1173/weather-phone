@@ -411,14 +411,17 @@ function getCanadaAudioDecision(location, audioKey, text) {
   // Case 2:
   // Script changed, but an older Google audio file exists.
   // Play old Google audio now, and the next caller will get the updated file.
-  if (existing?.url) {
-    return {
-      mode: "play",
-      url: existing.url,
-      pendingAudioUrl,
-      reason: "stale-cache-played-while-refreshing"
-    };
-  }
+  const allowStaleAudio =
+  !String(audioKey || "").startsWith("playback-hourly") &&
+
+if (allowStaleAudio && existing?.url) {
+  return {
+    mode: "play",
+    url: existing.url,
+    pendingAudioUrl,
+    reason: "stale-cache-played-while-refreshing"
+  };
+}
 
   // Case 3:
   // No Google audio exists yet.
