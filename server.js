@@ -1030,7 +1030,7 @@ function buildLocationMenuText({ allowBack = false, allowVoicemail = false } = {
   return parts.join(" ");
 }
 
-async function sayOrPlayGlobalAudio(twimlNode, audioKey, text) {
+function sayOrPlayGlobalAudio(twimlNode, audioKey, text) {
   return sayOrPlayCanadaAudio(
     twimlNode,
     GLOBAL_AUDIO_LOCATION,
@@ -1039,13 +1039,13 @@ async function sayOrPlayGlobalAudio(twimlNode, audioKey, text) {
   );
 }
 
-async function buildRootMenuInto(twiml) {
+function buildRootMenuInto(twiml) {
   const gather = twiml.gather(gatherOptions("/root-menu", 8, 1));
 
-  await sayOrPlayGlobalAudio(
+  sayOrPlayGlobalAudio(
     gather,
     "root-menu",
-    await buildRootMenuText()
+    buildRootMenuText()
   );
 
   twiml.redirect({ method: "POST" }, "/root-menu-prompt");
@@ -1101,11 +1101,11 @@ function buildBorderSubmenuInto(twiml, direction) {
 
 function rootMenuTwiml() {
   const twiml = new VoiceResponse();
-  await buildRootMenuInto(twiml);
+  buildRootMenuInto(twiml);
   return twiml;
 }
 
-async function locationMenuTwiml({ allowBack = false, allowVoicemail = false } = {}) {
+function locationMenuTwiml({ allowBack = false, allowVoicemail = false } = {}) {
   const twiml = new VoiceResponse();
   const gather = twiml.gather(gatherOptions("/set-location-choice", 7, 1));
 
@@ -1119,7 +1119,7 @@ async function locationMenuTwiml({ allowBack = false, allowVoicemail = false } =
     audioKeyParts.push("voicemail");
   }
 
-  await sayOrPlayGlobalAudio(
+  sayOrPlayGlobalAudio(
     gather,
     audioKeyParts.join("-"),
     buildLocationMenuText({ allowBack, allowVoicemail })
@@ -3588,7 +3588,7 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
   if (state === "root-menu") return rootMenuTwiml();
 
   if (state === "location-menu") {
-    return await locationMenuTwiml({ allowBack: true, allowVoicemail: false });
+    return locationMenuTwiml({ allowBack: true, allowVoicemail: false });
   }
 
   if (state === "us-location-menu") return usLocationMenuTwiml();
@@ -3609,7 +3609,7 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
 
   if (state === "forecast-menu") {
     const location = getActiveLocation(req);
-    if (!location) return await locationMenuTwiml({ allowBack: true, allowVoicemail: false });
+    if (!location) return locationMenuTwiml({ allowBack: true, allowVoicemail: false });
     const forecast = await fetchForecast(location);
     return forecastDayPromptTwiml(location, forecast);
   }
@@ -3797,7 +3797,7 @@ app.post("/voice", async (req, res) => {
     clearCallState(req);
     setUnitPreference(req, "C");
     say(twiml, `${getGreetingForTime("America/Toronto")}.`);
-    await buildRootMenuInto(twiml);
+    buildRootMenuInto(twiml);
     return res.type("text/xml").send(twiml.toString());
   } catch (error) {
     console.error("VOICE route error:", error.message);
