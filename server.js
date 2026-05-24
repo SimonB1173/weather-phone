@@ -3616,13 +3616,41 @@ app.all("/warm-canada-audio", async (req, res) => {
 
   const type = normalizeWarmupType(req.query.type || body.type || "all");
   const locationFilter = String(req.query.location || body.location || "").trim();
+  const runInBackground =
+    String(req.query.background || body.background || "").trim() === "1";
 
   try {
     const startedAt = Date.now();
+
+    if (runInBackground) {
+      warmCanadaAudio(type, locationFilter)
+        .then((results) => {
+          console.log("Warm Canada audio background completed:", {
+            type,
+            location: locationFilter || "all",
+            tookMs: Date.now() - startedAt,
+            count: results?.length || 0
+          });
+        })
+        .catch((error) => {
+          console.error("Warm Canada audio background failed:", error.message);
+        });
+
+      return res.json({
+        ok: true,
+        started: true,
+        background: true,
+        type,
+        location: locationFilter || "all",
+        tookMs: Date.now() - startedAt
+      });
+    }
+
     const results = await warmCanadaAudio(type, locationFilter);
 
     return res.json({
       ok: true,
+      background: false,
       type,
       location: locationFilter || "all",
       tookMs: Date.now() - startedAt,
