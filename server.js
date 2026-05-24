@@ -884,10 +884,21 @@ function relativeMenuDayLabel(dateText, tz) {
   return weekdayMonthDayLabel(dateText, tz);
 }
 
-function getGreetingForTime(timezone) {
-  const hour = getNowHourInTz(timezone || "America/Toronto");
-  if (hour < 12) return "Good morning";
-  if (hour < 18) return "Good afternoon";
+function getGreetingForTime(timezone = "America/Toronto") {
+  const nowLocal = getCurrentLocalDateParts(timezone);
+  const hour = nowLocal.hour;
+
+  // 5:00 AM - 11:59 AM
+  if (hour >= 5 && hour < 12) {
+    return "Good morning";
+  }
+
+  // 12:00 PM - 4:59 PM
+  if (hour >= 12 && hour < 17) {
+    return "Good afternoon";
+  }
+
+  // 5:00 PM - 4:59 AM
   return "Good evening";
 }
 
@@ -1005,6 +1016,10 @@ function exchangeAsOfTime(timezone = "America/Toronto") {
     hour12: true,
     timeZone: timezone
   });
+}
+
+function greetingAudioKey(greeting) {
+  return `greeting-${cleanForFilename(greeting)}`;
 }
 
 function buildRootMenuText() {
@@ -3452,6 +3467,16 @@ async function warmGlobalStaticMenusAudio() {
       text: buildLocationMenuText({ allowBack: true, allowVoicemail: true })
     })
   );
+  
+  for (const greeting of ["Good morning", "Good afternoon", "Good evening"]) {
+  results.push(
+    await updateCanadaAudioNow({
+      location: GLOBAL_AUDIO_LOCATION,
+      audioKey: greetingAudioKey(greeting),
+      text: `${greeting}.`
+    })
+  );
+}
 
   return results;
 }
@@ -3796,7 +3821,14 @@ app.post("/voice", async (req, res) => {
   try {
     clearCallState(req);
     setUnitPreference(req, "C");
-    say(twiml, `${getGreetingForTime("America/Toronto")}.`);
+    const greeting = getGreetingForTime("America/Toronto");
+
+    sayOrPlayGlobalAudio(
+      twiml,
+      greetingAudioKey(greeting),
+      `${greeting}.`
+    );
+
     buildRootMenuInto(twiml);
     return res.type("text/xml").send(twiml.toString());
   } catch (error) {
