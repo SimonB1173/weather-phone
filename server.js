@@ -3596,7 +3596,9 @@ app.get("/", (req, res) => {
 });
 
 app.all("/warm-canada-audio", async (req, res) => {
-  const providedSecret = String(req.query.secret || req.body.secret || "").trim();
+  const body = req.body || {};
+
+  const providedSecret = String(req.query.secret || body.secret || "").trim();
 
   if (!WARMUP_SECRET) {
     return res.status(500).json({
@@ -3612,8 +3614,8 @@ app.all("/warm-canada-audio", async (req, res) => {
     });
   }
 
-  const type = normalizeWarmupType(req.query.type || req.body.type || "all");
-  const locationFilter = String(req.query.location || req.body.location || "").trim();
+  const type = normalizeWarmupType(req.query.type || body.type || "all");
+  const locationFilter = String(req.query.location || body.location || "").trim();
 
   try {
     const startedAt = Date.now();
