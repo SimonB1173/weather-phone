@@ -68,6 +68,16 @@ const BORDER_API_TIMEOUT_MS = 15000;
 
 const VOICEMAILS_FILE = path.join(__dirname, "voicemails.json");
 
+const GLOBAL_AUDIO_LOCATION = {
+  id: "global",
+  name: "Global menus",
+  label: "Global",
+  country: "CA",
+  timezone: "America/Toronto",
+  latitude: 45.5,
+  longitude: -73.6
+};
+
 const PRESET_LOCATIONS = {
   "1": {
     id: "montreal",
@@ -997,12 +1007,47 @@ function exchangeAsOfTime(timezone = "America/Toronto") {
   });
 }
 
-function buildRootMenuInto(twiml) {
-  const gather = twiml.gather(gatherOptions("/root-menu", 8, 1));
-  say(
-    gather,
-    "Welcome to Weather and Info Line. Press 1 for weather. Press 2 for exchange rate. Press 4 for border wait time. To advertise, or to leave comments and feedback, press 9."
+function buildRootMenuText() {
+  return "Welcome to Weather and Info Line. Press 1 for weather. Press 2 for exchange rate. Press 4 for border wait time. To advertise, or to leave comments and feedback, press 9.";
+}
+
+function buildLocationMenuText({ allowBack = false, allowVoicemail = false } = {}) {
+  const parts = [
+    "Press 1 for Montreal.",
+    "Press 2 for Tosh.",
+    "Press 3 for Laurentians.",
+    "Press 4 for United States."
+  ];
+
+  if (allowVoicemail) {
+    parts.push("Press 9 to leave a comment or suggestion.");
+  }
+
+  if (allowBack) {
+    parts.push("Press star for the previous menu.");
+  }
+
+  return parts.join(" ");
+}
+
+async function sayOrPlayGlobalAudio(twimlNode, audioKey, text) {
+  return sayOrPlayCanadaAudio(
+    twimlNode,
+    GLOBAL_AUDIO_LOCATION,
+    audioKey,
+    text
   );
+}
+
+async function buildRootMenuInto(twiml) {
+  const gather = twiml.gather(gatherOptions("/root-menu", 8, 1));
+
+  await sayOrPlayGlobalAudio(
+    gather,
+    "root-menu",
+    await buildRootMenuText()
+  );
+
   twiml.redirect({ method: "POST" }, "/root-menu-prompt");
 }
 
@@ -1056,17 +1101,30 @@ function buildBorderSubmenuInto(twiml, direction) {
 
 function rootMenuTwiml() {
   const twiml = new VoiceResponse();
-  buildRootMenuInto(twiml);
+  await buildRootMenuInto(twiml);
   return twiml;
 }
 
-function locationMenuTwiml({ allowBack = false, allowVoicemail = false } = {}) {
+async function locationMenuTwiml({ allowBack = false, allowVoicemail = false } = {}) {
   const twiml = new VoiceResponse();
   const gather = twiml.gather(gatherOptions("/set-location-choice", 7, 1));
-  const parts = ["Press 1 for Montreal.", "2 for Tosh.", "3 for Laurentians.", "4 for United States."];
-  if (allowVoicemail) parts.push("Press 9 to leave a comment or suggestion.");
-  if (allowBack) parts.push("Press star for the previous menu.");
-  say(gather, parts.join(" "));
+
+  const audioKeyParts = ["location-menu"];
+
+  if (allowBack) {
+    audioKeyParts.push("back");
+  }
+
+  if (allowVoicemail) {
+    audioKeyParts.push("voicemail");
+  }
+
+  await sayOrPlayGlobalAudio(
+    gather,
+    audioKeyParts.join("-"),
+    buildLocationMenuText({ allowBack, allowVoicemail })
+  );
+
   twiml.redirect({ method: "POST" }, "/location-menu-prompt");
   return twiml;
 }
@@ -3337,7 +3395,7 @@ function getCanadaWarmupLocations(locationFilter = "") {
 function normalizeWarmupType(type) {
   const value = String(type || "all").toLowerCase().trim();
 
-  if (["main", "current", "hourly", "daily", "all"].includes(value)) {
+  if (["main", "current", "hourly", "daily", "static", "all"].includes(value)) {
     return value;
   }
 
@@ -3350,6 +3408,52 @@ async function warmCanadaMainMenuAudio(location) {
     audioKey: "main-menu",
     text: buildMainMenuText(placeLabel(location))
   });
+}
+
+async function warmGlobalStaticMenusAudio() {
+  const results = [];
+
+  results.push(
+    await updateCanadaAudioNow({
+      location: GLOBAL_AUDIO_LOCATION,
+      audioKey: "root-menu",
+      text: buildRootMenuText()
+    })
+  );
+
+  results.push(
+    await updateCanadaAudioNow({
+      location: GLOBAL_AUDIO_LOCATION,
+      audioKey: "location-menu",
+      text: buildLocationMenuText()
+    })
+  );
+
+  results.push(
+    await updateCanadaAudioNow({
+      location: GLOBAL_AUDIO_LOCATION,
+      audioKey: "location-menu-back",
+      text: buildLocationMenuText({ allowBack: true })
+    })
+  );
+
+  results.push(
+    await updateCanadaAudioNow({
+      location: GLOBAL_AUDIO_LOCATION,
+      audioKey: "location-menu-voicemail",
+      text: buildLocationMenuText({ allowVoicemail: true })
+    })
+  );
+
+  results.push(
+    await updateCanadaAudioNow({
+      location: GLOBAL_AUDIO_LOCATION,
+      audioKey: "location-menu-back-voicemail",
+      text: buildLocationMenuText({ allowBack: true, allowVoicemail: true })
+    })
+  );
+
+  return results;
 }
 
 async function warmCanadaCurrentAudio(location) {
@@ -3429,6 +3533,19 @@ async function warmCanadaAudio(type = "all", locationFilter = "") {
   const warmupType = normalizeWarmupType(type);
   const locations = getCanadaWarmupLocations(locationFilter);
   const results = [];
+  
+  if (warmupType === "all" || warmupType === "static") {
+  results.push({
+    location: "Global",
+    type: "static",
+    locationFilter: "global",
+    items: await warmGlobalStaticMenusAudio()
+  });
+
+  if (warmupType === "static") {
+    return results;
+  }
+}
 
   if (!locations.length) {
     throw new Error(`No Canada warm-up location matched: ${locationFilter}`);
@@ -3471,7 +3588,7 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
   if (state === "root-menu") return rootMenuTwiml();
 
   if (state === "location-menu") {
-    return locationMenuTwiml({ allowBack: true, allowVoicemail: false });
+    return await locationMenuTwiml({ allowBack: true, allowVoicemail: false });
   }
 
   if (state === "us-location-menu") return usLocationMenuTwiml();
@@ -3492,7 +3609,7 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
 
   if (state === "forecast-menu") {
     const location = getActiveLocation(req);
-    if (!location) return locationMenuTwiml({ allowBack: true, allowVoicemail: false });
+    if (!location) return await locationMenuTwiml({ allowBack: true, allowVoicemail: false });
     const forecast = await fetchForecast(location);
     return forecastDayPromptTwiml(location, forecast);
   }
@@ -3680,7 +3797,7 @@ app.post("/voice", async (req, res) => {
     clearCallState(req);
     setUnitPreference(req, "C");
     say(twiml, `${getGreetingForTime("America/Toronto")}.`);
-    buildRootMenuInto(twiml);
+    await buildRootMenuInto(twiml);
     return res.type("text/xml").send(twiml.toString());
   } catch (error) {
     console.error("VOICE route error:", error.message);
