@@ -3309,8 +3309,29 @@ async function buildPlaybackSpeech(location, forecast, playback, unit = "C") {
   return "";
 }
 
-function getCanadaWarmupLocations() {
-  return Object.values(PRESET_LOCATIONS).filter((location) => location?.country === "CA");
+function getCanadaWarmupLocations(locationFilter = "") {
+  const canadaLocations = Object.values(PRESET_LOCATIONS).filter(
+    (location) => location?.country === "CA"
+  );
+
+  const requested = cleanForFilename(locationFilter || "");
+
+  if (!requested) {
+    return canadaLocations;
+  }
+
+  return canadaLocations.filter((location) => {
+    const possibleNames = [
+      location?.id,
+      location?.label,
+      location?.name,
+      cacheKeyForLocation(location)
+    ]
+      .filter(Boolean)
+      .map((value) => cleanForFilename(value));
+
+    return possibleNames.includes(requested);
+  });
 }
 
 function normalizeWarmupType(type) {
@@ -3404,15 +3425,20 @@ async function warmCanadaDailyAudio(location) {
   return results;
 }
 
-async function warmCanadaAudio(type = "all") {
+async function warmCanadaAudio(type = "all", locationFilter = "") {
   const warmupType = normalizeWarmupType(type);
-  const locations = getCanadaWarmupLocations();
+  const locations = getCanadaWarmupLocations(locationFilter);
   const results = [];
+
+  if (!locations.length) {
+    throw new Error(`No Canada warm-up location matched: ${locationFilter}`);
+  }
 
   for (const location of locations) {
     const locationResult = {
       location: location.label || location.name,
       type: warmupType,
+      locationFilter: locationFilter || "all",
       items: []
     };
 
@@ -3587,14 +3613,16 @@ app.all("/warm-canada-audio", async (req, res) => {
   }
 
   const type = normalizeWarmupType(req.query.type || req.body.type || "all");
+  const locationFilter = String(req.query.location || req.body.location || "").trim();
 
   try {
     const startedAt = Date.now();
-    const results = await warmCanadaAudio(type);
+    const results = await warmCanadaAudio(type, locationFilter);
 
     return res.json({
       ok: true,
       type,
+      location: locationFilter || "all",
       tookMs: Date.now() - startedAt,
       results
     });
@@ -3604,6 +3632,7 @@ app.all("/warm-canada-audio", async (req, res) => {
     return res.status(500).json({
       ok: false,
       type,
+      location: locationFilter || "all",
       error: error.message
     });
   }
