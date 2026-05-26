@@ -3162,14 +3162,41 @@ async function fetchChamplainLacolleIntoUs() {
   const portNumber = rawPortNumber.slice(-6);
   const url = `https://bwt.cbp.gov/api/bwtpublicmod/${portNumber}`;
 
-  const response = await axios.get(url, {
-    timeout: BORDER_API_TIMEOUT_MS,
-    headers: {
-      "User-Agent": "Mozilla/5.0",
-      "Accept": "application/json, text/plain, */*",
-      "Referer": "https://bwt.cbp.gov/details/04071201/POV"
-    }
+  console.log("CBP into US fetch start:", {
+    rawPortNumber,
+    portNumber,
+    url
   });
+
+  let response;
+
+  try {
+    response = await axios.get(url, {
+      timeout: BORDER_API_TIMEOUT_MS,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://bwt.cbp.gov/details/04071201/POV",
+        "Origin": "https://bwt.cbp.gov"
+      }
+    });
+
+    console.log("CBP into US fetch success:", {
+      status: response.status,
+      portNumber,
+      hasData: !!response.data,
+      dataKeys: response.data && typeof response.data === "object" ? Object.keys(response.data) : []
+    });
+  } catch (error) {
+    console.error("CBP into US fetch failed:", {
+      message: error.message,
+      code: error.code,
+      status: error.response?.status,
+      data: error.response?.data ? JSON.stringify(error.response.data).slice(0, 500) : ""
+    });
+
+    throw error;
+  }
 
   const port = response.data || {};
 
