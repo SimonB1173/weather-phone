@@ -1045,6 +1045,19 @@ function buildLocationMenuText({ allowBack = false, allowVoicemail = false } = {
   return parts.join(" ");
 }
 
+function buildCanadaAfterForecastInstructionsText(unit = "C") {
+  const unitText =
+    unit === "F"
+      ? "Press 7 to switch back to Celsius."
+      : "Press 7 to hear it in Fahrenheit.";
+
+  return `Press star to go back. Press pound to repeat. Press 5 for the main menu. ${unitText}`;
+}
+
+function canadaAfterForecastInstructionsAudioKey(unit = "C") {
+  return `canada-after-forecast-instructions-${unit === "F" ? "f" : "c"}`;
+}
+
 function sayOrPlayGlobalAudio(twimlNode, audioKey, text) {
   return sayOrPlayCanadaAudio(
     twimlNode,
@@ -1212,8 +1225,25 @@ function afterActionTwiml(req) {
     say(gather, "Press star to go back. Press pound to repeat. Press 5 for the main menu.");
   } else {
     const unit = getUnitPreference(req);
-    const unitText = unit === "F" ? "Press 7 to switch back to Celsius." : "Press 7 to hear it in Fahrenheit.";
-    say(gather, `Press star to go back. Press pound to repeat. Press 5 for the main menu. ${unitText}`);
+    const activeLocation = getActiveLocation(req);
+
+    if (activeLocation?.country === "CA" && playback?.type) {
+      sayOrPlayGlobalAudio(
+        gather,
+        canadaAfterForecastInstructionsAudioKey(unit),
+        buildCanadaAfterForecastInstructionsText(unit)
+      );
+    } else {
+      const unitText =
+        unit === "F"
+          ? "Press 7 to switch back to Celsius."
+          : "Press 7 to hear it in Fahrenheit.";
+
+      say(
+        gather,
+        `Press star to go back. Press pound to repeat. Press 5 for the main menu. ${unitText}`
+      );
+    }
   }
 
   twiml.hangup();
@@ -3474,6 +3504,16 @@ async function warmGlobalStaticMenusAudio() {
       location: GLOBAL_AUDIO_LOCATION,
       audioKey: greetingAudioKey(greeting),
       text: `${greeting}.`
+    })
+  );
+}
+
+for (const unit of ["C", "F"]) {
+  results.push(
+    await updateCanadaAudioNow({
+      location: GLOBAL_AUDIO_LOCATION,
+      audioKey: canadaAfterForecastInstructionsAudioKey(unit),
+      text: buildCanadaAfterForecastInstructionsText(unit)
     })
   );
 }
