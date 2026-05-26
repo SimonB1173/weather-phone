@@ -3693,10 +3693,21 @@ async function warmCanadaDailyAudio(location) {
   return results;
 }
 
-async function warmBorderOfficialAudio() {
+async function warmBorderOfficialAudio(directionFilter = "") {
   const results = [];
+  const requested = String(directionFilter || "").toLowerCase().trim();
 
-  for (const choice of ["official_into_canada", "official_into_us"]) {
+  let choices = ["official_into_canada", "official_into_us"];
+
+  if (requested === "canada" || requested === "into_canada" || requested === "official_into_canada") {
+    choices = ["official_into_canada"];
+  }
+
+  if (requested === "us" || requested === "usa" || requested === "into_us" || requested === "official_into_us") {
+    choices = ["official_into_us"];
+  }
+
+  for (const choice of choices) {
     const result = await fetchBorderWait(choice);
     const speech = buildBorderSpeech(result);
 
@@ -3712,7 +3723,7 @@ async function warmBorderOfficialAudio() {
   return results;
 }
 
-async function warmCanadaAudio(type = "all", locationFilter = "") {
+async function warmCanadaAudio(type = "all", locationFilter = "", directionFilter = "") {
   const warmupType = normalizeWarmupType(type);
   const locations = getCanadaWarmupLocations(locationFilter);
   const results = [];
@@ -3735,7 +3746,8 @@ async function warmCanadaAudio(type = "all", locationFilter = "") {
       location: "Global",
       type: "border",
       locationFilter: "global",
-      items: await warmBorderOfficialAudio()
+      directionFilter: directionFilter || "all",
+      items: await warmBorderOfficialAudio(directionFilter)
     });
 
     if (warmupType === "border") {
@@ -3929,6 +3941,7 @@ app.all("/warm-canada-audio", async (req, res) => {
 
   const type = normalizeWarmupType(req.query.type || body.type || "all");
   const locationFilter = String(req.query.location || body.location || "").trim();
+  const directionFilter = String(req.query.direction || body.direction || "").trim();
   const runInBackground =
     String(req.query.background || body.background || "").trim() === "1";
 
@@ -3936,7 +3949,7 @@ app.all("/warm-canada-audio", async (req, res) => {
     const startedAt = Date.now();
 
     if (runInBackground) {
-      warmCanadaAudio(type, locationFilter)
+      warmCanadaAudio(type, locationFilter, directionFilter)
         .then((results) => {
           console.log("Warm Canada audio background completed:", {
             type,
@@ -3959,7 +3972,7 @@ app.all("/warm-canada-audio", async (req, res) => {
       });
     }
 
-    const results = await warmCanadaAudio(type, locationFilter);
+    const results = await warmCanadaAudio(type, locationFilter, directionFilter);
 
     return res.json({
       ok: true,
