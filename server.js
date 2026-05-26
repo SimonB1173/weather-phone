@@ -1058,6 +1058,22 @@ function canadaAfterForecastInstructionsAudioKey(unit = "C") {
   return `canada-after-forecast-instructions-${unit === "F" ? "f" : "c"}`;
 }
 
+function buildVoicemailPromptText() {
+  return "To advertise, leave a comment, or send feedback, please leave your message after the beep. When you are finished, just hang up.";
+}
+
+function buildVoicemailNoRecordingText() {
+  return "I did not receive a recording.";
+}
+
+function buildVoicemailSavedText() {
+  return "Thank you. Your message has been saved.";
+}
+
+function buildVoicemailNoMessageText() {
+  return "I did not receive a message.";
+}
+
 function sayOrPlayGlobalAudio(twimlNode, audioKey, text) {
   return sayOrPlayCanadaAudio(
     twimlNode,
@@ -1252,7 +1268,13 @@ function afterActionTwiml(req) {
 
 function voicemailPromptTwiml() {
   const twiml = new VoiceResponse();
-  say(twiml, "To advertise, leave a comment, or send feedback, please leave your message after the beep. When you are finished, just hang up.");
+
+  sayOrPlayGlobalAudio(
+    twiml,
+    "voicemail-prompt",
+    buildVoicemailPromptText()
+  );
+
   twiml.record({
     action: "/handle-recording",
     method: "POST",
@@ -1264,7 +1286,13 @@ function voicemailPromptTwiml() {
     recordingStatusCallbackMethod: "POST",
     recordingStatusCallbackEvent: ["completed"]
   });
-  say(twiml, "I did not receive a recording.");
+
+  sayOrPlayGlobalAudio(
+    twiml,
+    "voicemail-no-recording",
+    buildVoicemailNoRecordingText()
+  );
+
   twiml.redirect({ method: "POST" }, "/after-prompt");
   return twiml;
 }
@@ -3518,6 +3546,38 @@ for (const unit of ["C", "F"]) {
   );
 }
 
+  results.push(
+    await updateCanadaAudioNow({
+      location: GLOBAL_AUDIO_LOCATION,
+      audioKey: "voicemail-prompt",
+      text: buildVoicemailPromptText()
+    })
+  );
+
+  results.push(
+    await updateCanadaAudioNow({
+      location: GLOBAL_AUDIO_LOCATION,
+      audioKey: "voicemail-no-recording",
+      text: buildVoicemailNoRecordingText()
+    })
+  );
+
+  results.push(
+    await updateCanadaAudioNow({
+      location: GLOBAL_AUDIO_LOCATION,
+      audioKey: "voicemail-saved",
+      text: buildVoicemailSavedText()
+    })
+  );
+
+  results.push(
+    await updateCanadaAudioNow({
+      location: GLOBAL_AUDIO_LOCATION,
+      audioKey: "voicemail-no-message",
+      text: buildVoicemailNoMessageText()
+    })
+  );
+
   return results;
 }
 
@@ -4433,9 +4493,18 @@ app.post("/handle-recording", (req, res) => {
       createdAt: new Date().toISOString(),
       source: "action"
     });
-    say(twiml, "Thank you. Your message has been saved.");
+
+    sayOrPlayGlobalAudio(
+      twiml,
+      "voicemail-saved",
+      buildVoicemailSavedText()
+    );
   } else {
-    say(twiml, "I did not receive a message.");
+    sayOrPlayGlobalAudio(
+      twiml,
+      "voicemail-no-message",
+      buildVoicemailNoMessageText()
+    );
   }
 
   twiml.redirect({ method: "POST" }, "/after-prompt");
