@@ -1045,6 +1045,24 @@ function buildLocationMenuText({ allowBack = false, allowVoicemail = false } = {
   return parts.join(" ");
 }
 
+function buildBorderMenuText() {
+  return "Champlain border wait time. Press 1 for entering Canada. Press 2 for entering the United States. Press star for the previous menu.";
+}
+
+function buildBorderSubmenuText(direction) {
+  if (direction === "canada") {
+    return "Entering Canada. Press 1 for official border wait time. Press 2 for live traffic. Press star for the previous menu.";
+  }
+
+  return "Entering the United States. Press 1 for official border wait time. Press 2 for live traffic. Press star for the previous menu.";
+}
+
+function borderOfficialAudioKey(choice) {
+  if (choice === "official_into_canada") return "border-official-into-canada";
+  if (choice === "official_into_us") return "border-official-into-us";
+  return "border-official";
+}
+
 function buildCanadaAfterForecastInstructionsText(unit = "C") {
   const unitText =
     unit === "F"
@@ -1118,27 +1136,24 @@ function buildCanadaMainMenuInto(twiml, location) {
 
 function buildBorderMenuInto(twiml) {
   const gather = twiml.gather(gatherOptions("/border-menu", 8, 1));
-  say(
+
+  sayOrPlayGlobalAudio(
     gather,
-    "Champlain border wait time. Press 1 for entering Canada. Press 2 for entering the United States. Press star for the previous menu."
+    "border-menu",
+    buildBorderMenuText()
   );
+
   twiml.redirect({ method: "POST" }, "/border-menu-prompt");
 }
 
 function buildBorderSubmenuInto(twiml, direction) {
   const gather = twiml.gather(gatherOptions("/border-submenu", 8, 1));
 
-  if (direction === "canada") {
-    say(
-      gather,
-      "Entering Canada. Press 1 for official border wait time. Press 2 for live traffic. Press star for the previous menu."
-    );
-  } else {
-    say(
-      gather,
-      "Entering the United States. Press 1 for official border wait time. Press 2 for live traffic. Press star for the previous menu."
-    );
-  }
+  sayOrPlayGlobalAudio(
+    gather,
+    direction === "canada" ? "border-submenu-canada" : "border-submenu-us",
+    buildBorderSubmenuText(direction)
+  );
 
   twiml.redirect({ method: "POST" }, "/border-submenu-prompt");
 }
@@ -3468,7 +3483,7 @@ function getCanadaWarmupLocations(locationFilter = "") {
 function normalizeWarmupType(type) {
   const value = String(type || "all").toLowerCase().trim();
 
-  if (["main", "current", "hourly", "daily", "static", "all"].includes(value)) {
+  if (["main", "current", "hourly", "daily", "static", "border", "all"].includes(value)) {
     return value;
   }
 
@@ -3578,6 +3593,30 @@ for (const unit of ["C", "F"]) {
     })
   );
 
+  results.push(
+    await updateCanadaAudioNow({
+      location: GLOBAL_AUDIO_LOCATION,
+      audioKey: "border-menu",
+      text: buildBorderMenuText()
+    })
+  );
+
+  results.push(
+    await updateCanadaAudioNow({
+      location: GLOBAL_AUDIO_LOCATION,
+      audioKey: "border-submenu-canada",
+      text: buildBorderSubmenuText("canada")
+    })
+  );
+
+  results.push(
+    await updateCanadaAudioNow({
+      location: GLOBAL_AUDIO_LOCATION,
+      audioKey: "border-submenu-us",
+      text: buildBorderSubmenuText("us")
+    })
+  );
+
   return results;
 }
 
@@ -3654,6 +3693,25 @@ async function warmCanadaDailyAudio(location) {
   return results;
 }
 
+async function warmBorderOfficialAudio() {
+  const results = [];
+
+  for (const choice of ["official_into_canada", "official_into_us"]) {
+    const result = await fetchBorderWait(choice);
+    const speech = buildBorderSpeech(result);
+
+    results.push(
+      await updateCanadaAudioNow({
+        location: GLOBAL_AUDIO_LOCATION,
+        audioKey: borderOfficialAudioKey(choice),
+        text: speech
+      })
+    );
+  }
+
+  return results;
+}
+
 async function warmCanadaAudio(type = "all", locationFilter = "") {
   const warmupType = normalizeWarmupType(type);
   const locations = getCanadaWarmupLocations(locationFilter);
@@ -3671,6 +3729,19 @@ async function warmCanadaAudio(type = "all", locationFilter = "") {
     return results;
   }
 }
+
+  if (warmupType === "all" || warmupType === "border") {
+    results.push({
+      location: "Global",
+      type: "border",
+      locationFilter: "global",
+      items: await warmBorderOfficialAudio()
+    });
+
+    if (warmupType === "border") {
+      return results;
+    }
+  }
 
   if (!locations.length) {
     throw new Error(`No Canada warm-up location matched: ${locationFilter}`);
@@ -4058,8 +4129,21 @@ app.post("/border-submenu", async (req, res) => {
     setLastPlayback(req, {
       type: "border",
       speech,
-      borderDirection: direction
+      borderDirection: direction,
+      borderChoice: choice
     });
+
+    if (choice === "official_into_canada" || choice === "official_into_us") {
+      const audioDecision = getCanadaAudioDecision(
+        GLOBAL_AUDIO_LOCATION,
+        borderOfficialAudioKey(choice),
+        speech
+      );
+
+      if (audioDecision.mode === "play" && audioDecision.url) {
+        return res.type("text/xml").send(playbackAudioWithStarTwiml(audioDecision.url));
+      }
+    }
 
     const playbackTwiml = playbackWithStarTwiml(speech);
     return res.type("text/xml").send(playbackTwiml);
