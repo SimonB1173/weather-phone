@@ -3,6 +3,9 @@ const axios = require("axios");
 const twilio = require("twilio");
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
+const textToSpeech = require("@google-cloud/text-to-speech");
+const { Storage } = require("@google-cloud/storage");
 
 const app = express();
 app.use(express.urlencoded({ extended: false }));
@@ -14,6 +17,24 @@ const SAY_OPTIONS = {
   voice: "Polly.Matthew",
   language: "en-US"
 };
+
+const ttsClient = new textToSpeech.TextToSpeechClient();
+const storageClient = new Storage();
+
+const GCS_BUCKET_NAME = process.env.GCS_BUCKET_NAME || "";
+const PUBLIC_AUDIO_BASE_URL =
+  process.env.PUBLIC_AUDIO_BASE_URL ||
+  (GCS_BUCKET_NAME ? `https://storage.googleapis.com/${GCS_BUCKET_NAME}` : "");
+
+const GOOGLE_TTS_VOICE = process.env.GOOGLE_TTS_VOICE || "en-US-Neural2-J";
+const WARMUP_SECRET = process.env.WARMUP_SECRET || "";
+
+const CANADA_AUDIO_CACHE_FILE = path.join(
+  __dirname,
+  process.env.CANADA_AUDIO_CACHE_FILE || "canada-audio-cache.json"
+);
+
+const canadaAudioJobsInFlight = new Map();
 
 const forecastCache = new Map();
 const inFlightForecasts = new Map();
@@ -46,6 +67,16 @@ const OPEN_METEO_TIMEOUT_MS = 15000;
 const BORDER_API_TIMEOUT_MS = 15000;
 
 const VOICEMAILS_FILE = path.join(__dirname, "voicemails.json");
+
+const GLOBAL_AUDIO_LOCATION = {
+  id: "global",
+  name: "Global menus",
+  label: "Global",
+  country: "CA",
+  timezone: "America/Toronto",
+  latitude: 45.5,
+  longitude: -73.6
+};
 
 const PRESET_LOCATIONS = {
   "1": {
@@ -193,6 +224,20 @@ function playbackWithStarTwiml(text, options = {}) {
   return twiml;
 }
 
+function playbackAudioWithStarTwiml(audioUrl) {
+  const safeUrl = xmlEscape(audioUrl);
+
+  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Gather input="dtmf" action="/during-playback" method="POST" timeout="1" numDigits="1" finishOnKey="">
+    <Play>${safeUrl}</Play>
+  </Gather>
+  <Redirect method="POST">/after-prompt</Redirect>
+</Response>`;
+
+  return twiml;
+}
+
 function getCallKey(req) {
   return String(req.body.CallSid || "unknown").trim();
 }
@@ -222,6 +267,266 @@ function saveJsonFile(filePath, value) {
   } catch (error) {
     console.error(`Failed to write ${filePath}:`, error.message);
   }
+}
+
+function cleanForFilename(text) {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+}
+
+function sha256(text) {
+  return crypto
+    .createHash("sha256")
+    .update(String(text || ""), "utf8")
+    .digest("hex");
+}
+
+function normalizeSpeechForHash(text) {
+  return String(text || "")
+    .replace(/\s+/g, " ")
+    .replace(/\s+([,.!?;:])/g, "$1")
+    .trim();
+}
+
+function canadaAudioObjectName(location, audioKey) {
+  const locationId = cleanForFilename(
+    location?.id || location?.label || cacheKeyForLocation(location)
+  );
+
+  const safeKey = cleanForFilename(audioKey || "weather");
+
+  return `canada-weather/${locationId}/${safeKey}.wav`;
+}
+
+function publicAudioUrlForObject(objectName) {
+  return `${PUBLIC_AUDIO_BASE_URL.replace(/\/+$/, "")}/${objectName}`;
+}
+
+async function generateAndUploadSpeechAudio({ objectName, speech }) {
+  if (!GCS_BUCKET_NAME || !PUBLIC_AUDIO_BASE_URL) {
+    throw new Error("Google Cloud audio storage is not configured");
+  }
+
+  const request = {
+    input: { text: speech },
+    voice: {
+      languageCode: "en-US",
+      name: GOOGLE_TTS_VOICE
+    },
+    audioConfig: {
+      audioEncoding: "LINEAR16",
+      sampleRateHertz: 8000
+    }
+  };
+
+  const [response] = await ttsClient.synthesizeSpeech(request);
+
+  if (!response.audioContent) {
+    throw new Error("Google TTS returned empty audio content");
+  }
+
+  await storageClient
+    .bucket(GCS_BUCKET_NAME)
+    .file(objectName)
+    .save(response.audioContent, {
+      resumable: false,
+      contentType: "audio/wav",
+      metadata: {
+        cacheControl: "no-cache, max-age=0"
+      }
+    });
+
+  return publicAudioUrlForObject(objectName);
+}
+
+function refreshCanadaAudioInBackground({ objectName, speech, speechHash, location, audioKey }) {
+  if (!GCS_BUCKET_NAME || !PUBLIC_AUDIO_BASE_URL) {
+    console.log("Canada audio cache skipped: Google Cloud storage is not configured");
+    return;
+  }
+
+  if (canadaAudioJobsInFlight.has(objectName)) {
+    console.log("Canada audio generation already in flight:", objectName);
+    return;
+  }
+
+  const job = generateAndUploadSpeechAudio({
+    objectName,
+    speech
+  })
+    .then((uploadedUrl) => {
+      const updatedCache = loadJsonFile(CANADA_AUDIO_CACHE_FILE, {});
+
+      updatedCache[objectName] = {
+        hash: speechHash,
+        url: uploadedUrl,
+        updatedAt: new Date().toISOString(),
+        location: location?.label || location?.name || "",
+        audioKey,
+        voice: GOOGLE_TTS_VOICE
+      };
+
+      saveJsonFile(CANADA_AUDIO_CACHE_FILE, updatedCache);
+
+      console.log("Canada audio updated:", objectName);
+    })
+    .catch((error) => {
+      console.error("Canada audio background update failed:", error.message);
+    })
+    .finally(() => {
+      canadaAudioJobsInFlight.delete(objectName);
+    });
+
+  canadaAudioJobsInFlight.set(objectName, job);
+}
+
+async function updateCanadaAudioNow({ location, audioKey, text }) {
+  const cleanedSpeech = normalizeSpeechForHash(text);
+
+  if (!cleanedSpeech) {
+    return {
+      status: "empty",
+      audioKey
+    };
+  }
+
+  if (!GCS_BUCKET_NAME || !PUBLIC_AUDIO_BASE_URL) {
+    throw new Error("Google Cloud audio storage is not configured");
+  }
+
+  const objectName = canadaAudioObjectName(location, audioKey);
+  const speechHash = sha256(`${GOOGLE_TTS_VOICE}||${cleanedSpeech}`);
+
+  const cache = loadJsonFile(CANADA_AUDIO_CACHE_FILE, {});
+  const existing = cache[objectName];
+
+  if (existing?.hash === speechHash && existing?.url) {
+    return {
+      status: "unchanged",
+      objectName,
+      url: existing.url,
+      audioKey
+    };
+  }
+
+  if (canadaAudioJobsInFlight.has(objectName)) {
+    console.log("Warm-up waiting for existing Canada audio job:", objectName);
+    await canadaAudioJobsInFlight.get(objectName).catch(() => null);
+
+    const refreshedCache = loadJsonFile(CANADA_AUDIO_CACHE_FILE, {});
+    const refreshed = refreshedCache[objectName];
+
+    if (refreshed?.hash === speechHash && refreshed?.url) {
+      return {
+        status: "already-updated-by-existing-job",
+        objectName,
+        url: refreshed.url,
+        audioKey
+      };
+    }
+  }
+
+  const uploadedUrl = await generateAndUploadSpeechAudio({
+    objectName,
+    speech: cleanedSpeech
+  });
+
+  const updatedCache = loadJsonFile(CANADA_AUDIO_CACHE_FILE, {});
+
+  updatedCache[objectName] = {
+    hash: speechHash,
+    url: uploadedUrl,
+    updatedAt: new Date().toISOString(),
+    location: location?.label || location?.name || "",
+    audioKey,
+    voice: GOOGLE_TTS_VOICE
+  };
+
+  saveJsonFile(CANADA_AUDIO_CACHE_FILE, updatedCache);
+
+  console.log("Canada audio warm-up updated:", objectName);
+
+  return {
+    status: "updated",
+    objectName,
+    url: uploadedUrl,
+    audioKey
+  };
+}
+
+function getCanadaAudioDecision(location, audioKey, text) {
+  const cleanedSpeech = normalizeSpeechForHash(text);
+
+  if (!cleanedSpeech) {
+    return {
+      mode: "say",
+      speech: ""
+    };
+  }
+
+  const objectName = canadaAudioObjectName(location, audioKey);
+  const pendingAudioUrl = publicAudioUrlForObject(objectName);
+  const speechHash = sha256(`${GOOGLE_TTS_VOICE}||${cleanedSpeech}`);
+
+  const cache = loadJsonFile(CANADA_AUDIO_CACHE_FILE, {});
+  const existing = cache[objectName];
+
+  // Case 1:
+  // Exact same script as the saved audio.
+  // Play the current Google audio.
+  if (existing?.hash === speechHash && existing?.url) {
+    return {
+      mode: "play",
+      url: existing.url,
+      reason: "exact-cache-hit"
+    };
+  }
+
+  // Script is new or changed, so start creating the updated Google audio.
+  refreshCanadaAudioInBackground({
+    objectName,
+    speech: cleanedSpeech,
+    speechHash,
+    location,
+    audioKey
+  });
+
+  // Case 2:
+  // Script changed, but an older Google audio file exists.
+  // Play old Google audio now, and the next caller will get the updated file.
+  if (existing?.url) {
+    return {
+      mode: "play",
+      url: existing.url,
+      pendingAudioUrl,
+      reason: "stale-cache-played-while-refreshing"
+    };
+  }
+
+  // Case 3:
+  // No Google audio exists yet.
+  // Use Twilio Say once so the caller hears something,
+  // while Google audio is generated in the background.
+  return {
+    mode: "say",
+    speech: cleanedSpeech,
+    pendingAudioUrl,
+    reason: "no-audio-yet"
+  };
+}
+
+function sayOrPlayCanadaAudio(twimlNode, location, audioKey, text) {
+  const decision = getCanadaAudioDecision(location, audioKey, text);
+
+  if (decision.mode === "play" && decision.url) {
+    twimlNode.play(decision.url);
+    return;
+  }
+
+  say(twimlNode, decision.speech || text);
 }
 
 function getTemporaryLocation(req) {
@@ -529,10 +834,21 @@ function getCurrentLocalDateParts(timezone) {
   };
 }
 
-function getNextTopOfHourLocalIso(timezone) {
+function getHourlyForecastStartLocalIso(timezone) {
   const nowLocal = getCurrentLocalDateParts(timezone || "UTC");
   let dateText = nowLocal.date;
-  let hour = nowLocal.hour + 1;
+  let hour = nowLocal.hour;
+
+  /*
+    Hourly forecast window rule:
+    - From :00 through :30, include the current hour.
+      Example: 3:00-3:30 starts from 3:00.
+    - From :31 through :59, start from the next hour.
+      Example: 3:31-3:59 starts from 4:00.
+  */
+  if (nowLocal.minute >= 31) {
+    hour += 1;
+  }
 
   if (hour >= 24) {
     hour = 0;
@@ -568,10 +884,21 @@ function relativeMenuDayLabel(dateText, tz) {
   return weekdayMonthDayLabel(dateText, tz);
 }
 
-function getGreetingForTime(timezone) {
-  const hour = getNowHourInTz(timezone || "America/Toronto");
-  if (hour < 12) return "Good morning";
-  if (hour < 18) return "Good afternoon";
+function getGreetingForTime(timezone = "America/Toronto") {
+  const nowLocal = getCurrentLocalDateParts(timezone);
+  const hour = nowLocal.hour;
+
+  // 5:00 AM - 11:59 AM
+  if (hour >= 5 && hour < 12) {
+    return "Good morning";
+  }
+
+  // 12:00 PM - 4:59 PM
+  if (hour >= 12 && hour < 17) {
+    return "Good afternoon";
+  }
+
+  // 5:00 PM - 4:59 AM
   return "Good evening";
 }
 
@@ -691,44 +1018,142 @@ function exchangeAsOfTime(timezone = "America/Toronto") {
   });
 }
 
+function greetingAudioKey(greeting) {
+  return `greeting-${cleanForFilename(greeting)}`;
+}
+
+function buildRootMenuText() {
+  return "Welcome to Weather and Info Line. Press 1 for weather. Press 2 for exchange rate. Press 4 for border wait time. To advertise, or to leave comments and feedback, press 9.";
+}
+
+function buildLocationMenuText({ allowBack = false, allowVoicemail = false } = {}) {
+  const parts = [
+    "Press 1 for Montreal.",
+    "Press 2 for Tosh.",
+    "Press 3 for Laurentians.",
+    "Press 4 for United States."
+  ];
+
+  if (allowVoicemail) {
+    parts.push("Press 9 to leave a comment or suggestion.");
+  }
+
+  if (allowBack) {
+    parts.push("Press star for the previous menu.");
+  }
+
+  return parts.join(" ");
+}
+
+function buildBorderMenuText() {
+  return "Champlain border wait time. Press 1 for entering Canada. Press 2 for entering the United States. Press star for the previous menu.";
+}
+
+function buildBorderSubmenuText(direction) {
+  if (direction === "canada") {
+    return "Entering Canada. Press 1 for official border wait time. Press 2 for live traffic. Press star for the previous menu.";
+  }
+
+  return "Entering the United States. Press 1 for official border wait time. Press 2 for live traffic. Press star for the previous menu.";
+}
+
+function borderOfficialAudioKey(choice) {
+  if (choice === "official_into_canada") return "border-official-into-canada";
+  if (choice === "official_into_us") return "border-official-into-us";
+  return "border-official";
+}
+
+function buildCanadaAfterForecastInstructionsText(unit = "C") {
+  const unitText =
+    unit === "F"
+      ? "Press 7 to switch back to Celsius."
+      : "Press 7 to hear it in Fahrenheit.";
+
+  return `Press star to go back. Press pound to repeat. Press 5 for the main menu. ${unitText}`;
+}
+
+function canadaAfterForecastInstructionsAudioKey(unit = "C") {
+  return `canada-after-forecast-instructions-${unit === "F" ? "f" : "c"}`;
+}
+
+function buildVoicemailPromptText() {
+  return "To advertise, leave a comment, or send feedback, please leave your message after the beep. When you are finished, just hang up.";
+}
+
+function buildVoicemailNoRecordingText() {
+  return "I did not receive a recording.";
+}
+
+function buildVoicemailSavedText() {
+  return "Thank you. Your message has been saved.";
+}
+
+function buildVoicemailNoMessageText() {
+  return "I did not receive a message.";
+}
+
+function sayOrPlayGlobalAudio(twimlNode, audioKey, text) {
+  return sayOrPlayCanadaAudio(
+    twimlNode,
+    GLOBAL_AUDIO_LOCATION,
+    audioKey,
+    text
+  );
+}
+
 function buildRootMenuInto(twiml) {
   const gather = twiml.gather(gatherOptions("/root-menu", 8, 1));
-  say(
+
+  sayOrPlayGlobalAudio(
     gather,
-    "Welcome to Weather and Info Line. Press 1 for weather. Press 2 for exchange rate. Press 4 for border wait time. To advertise, or to leave comments and feedback, press 9."
+    "root-menu",
+    buildRootMenuText()
   );
+
   twiml.redirect({ method: "POST" }, "/root-menu-prompt");
+}
+
+function buildMainMenuText(activeLocationName) {
+  return `${activeLocationName}. Press 1 for daily forecast. Press 2 for hourly forecast. Press 3 for current weather. Press star for the previous menu.`;
 }
 
 function buildMainMenuInto(twiml, activeLocationName) {
   const gather = twiml.gather(gatherOptions("/menu", 8, 1));
-  say(gather, `${activeLocationName}. Press 1 for daily forecast. Press 2 for hourly forecast. Press 3 for current weather. Press star for the previous menu.`);
+  say(gather, buildMainMenuText(activeLocationName));
+  twiml.redirect({ method: "POST" }, "/main-menu");
+}
+
+function buildCanadaMainMenuInto(twiml, location) {
+  const gather = twiml.gather(gatherOptions("/menu", 8, 1));
+  sayOrPlayCanadaAudio(
+    gather,
+    location,
+    "main-menu",
+    buildMainMenuText(placeLabel(location))
+  );
   twiml.redirect({ method: "POST" }, "/main-menu");
 }
 
 function buildBorderMenuInto(twiml) {
   const gather = twiml.gather(gatherOptions("/border-menu", 8, 1));
-  say(
+
+  sayOrPlayGlobalAudio(
     gather,
-    "Champlain border wait time. Press 1 for entering Canada. Press 2 for entering the United States. Press star for the previous menu."
+    "border-menu",
+    buildBorderMenuText()
   );
+
   twiml.redirect({ method: "POST" }, "/border-menu-prompt");
 }
 
 function buildBorderSubmenuInto(twiml, direction) {
   const gather = twiml.gather(gatherOptions("/border-submenu", 8, 1));
 
-  if (direction === "canada") {
-    say(
-      gather,
-      "Entering Canada. Press 1 for official border wait time. Press 2 for live traffic. Press star for the previous menu."
-    );
-  } else {
-    say(
-      gather,
-      "Entering the United States. Press 1 for official border wait time. Press 2 for live traffic. Press star for the previous menu."
-    );
-  }
+  sayOrPlayGlobalAudio(
+    gather,
+    direction === "canada" ? "border-submenu-canada" : "border-submenu-us",
+    buildBorderSubmenuText(direction)
+  );
 
   twiml.redirect({ method: "POST" }, "/border-submenu-prompt");
 }
@@ -742,10 +1167,23 @@ function rootMenuTwiml() {
 function locationMenuTwiml({ allowBack = false, allowVoicemail = false } = {}) {
   const twiml = new VoiceResponse();
   const gather = twiml.gather(gatherOptions("/set-location-choice", 7, 1));
-  const parts = ["Press 1 for Montreal.", "2 for Tosh.", "3 for Laurentians.", "4 for United States."];
-  if (allowVoicemail) parts.push("Press 9 to leave a comment or suggestion.");
-  if (allowBack) parts.push("Press star for the previous menu.");
-  say(gather, parts.join(" "));
+
+  const audioKeyParts = ["location-menu"];
+
+  if (allowBack) {
+    audioKeyParts.push("back");
+  }
+
+  if (allowVoicemail) {
+    audioKeyParts.push("voicemail");
+  }
+
+  sayOrPlayGlobalAudio(
+    gather,
+    audioKeyParts.join("-"),
+    buildLocationMenuText({ allowBack, allowVoicemail })
+  );
+
   twiml.redirect({ method: "POST" }, "/location-menu-prompt");
   return twiml;
 }
@@ -818,8 +1256,25 @@ function afterActionTwiml(req) {
     say(gather, "Press star to go back. Press pound to repeat. Press 5 for the main menu.");
   } else {
     const unit = getUnitPreference(req);
-    const unitText = unit === "F" ? "Press 7 to switch back to Celsius." : "Press 7 to hear it in Fahrenheit.";
-    say(gather, `Press star to go back. Press pound to repeat. Press 5 for the main menu. ${unitText}`);
+    const activeLocation = getActiveLocation(req);
+
+    if (activeLocation?.country === "CA" && playback?.type) {
+      sayOrPlayGlobalAudio(
+        gather,
+        canadaAfterForecastInstructionsAudioKey(unit),
+        buildCanadaAfterForecastInstructionsText(unit)
+      );
+    } else {
+      const unitText =
+        unit === "F"
+          ? "Press 7 to switch back to Celsius."
+          : "Press 7 to hear it in Fahrenheit.";
+
+      say(
+        gather,
+        `Press star to go back. Press pound to repeat. Press 5 for the main menu. ${unitText}`
+      );
+    }
   }
 
   twiml.hangup();
@@ -828,7 +1283,13 @@ function afterActionTwiml(req) {
 
 function voicemailPromptTwiml() {
   const twiml = new VoiceResponse();
-  say(twiml, "To advertise, leave a comment, or send feedback, please leave your message after the beep. When you are finished, just hang up.");
+
+  sayOrPlayGlobalAudio(
+    twiml,
+    "voicemail-prompt",
+    buildVoicemailPromptText()
+  );
+
   twiml.record({
     action: "/handle-recording",
     method: "POST",
@@ -840,7 +1301,13 @@ function voicemailPromptTwiml() {
     recordingStatusCallbackMethod: "POST",
     recordingStatusCallbackEvent: ["completed"]
   });
-  say(twiml, "I did not receive a recording.");
+
+  sayOrPlayGlobalAudio(
+    twiml,
+    "voicemail-no-recording",
+    buildVoicemailNoRecordingText()
+  );
+
   twiml.redirect({ method: "POST" }, "/after-prompt");
   return twiml;
 }
@@ -2043,7 +2510,15 @@ function buildEcDailyGroups(ecData, location) {
   const periods = ecData?.forecastPeriods?.periods || [];
   const tz = location?.timezone || "America/Toronto";
   const nowLocal = getCurrentLocalDateParts(tz);
-  const today = nowLocal.date;
+
+  /*
+    For Environment Canada daily menus, treat the forecast day as not rolling over
+    until 5 AM. This avoids changing "today/tomorrow" right after midnight while
+    the overnight forecast is still the active first period.
+  */
+  const today = nowLocal.hour < 5
+    ? addDaysToDateText(nowLocal.date, -1)
+    : nowLocal.date;
 
   if (!periods.length) return [];
 
@@ -2053,7 +2528,7 @@ function buildEcDailyGroups(ecData, location) {
 
   const firstLower = String(periods[0]?.periodName || "").trim().toLowerCase();
 
-  if (firstLower === "tonight" && nowLocal.hour < 6) {
+  if (firstLower === "tonight" && nowLocal.hour >= 5 && nowLocal.hour < 6) {
     startIndex = 1;
   }
 
@@ -2094,11 +2569,11 @@ function buildEcDailyGroups(ecData, location) {
 function ecHourlySpeech(location, ecData, hours = 12, unit = "C") {
   const rows = ecData.hourly || [];
   const tz = location.timezone || "America/Toronto";
-  const nextHourStart = getNextTopOfHourLocalIso(tz);
+  const hourlyStart = getHourlyForecastStartLocalIso(tz);
 
-  const nextHourDate = getDatePartFromLocalIso(nextHourStart);
-  const nextHourHour = getHourFromLocalIso(nextHourStart);
-  const nextHourMinute = getMinuteFromLocalIso(nextHourStart);
+  const hourlyStartDate = getDatePartFromLocalIso(hourlyStart);
+  const hourlyStartHour = getHourFromLocalIso(hourlyStart);
+  const hourlyStartMinute = getMinuteFromLocalIso(hourlyStart);
 
   const future = rows.filter((row) => {
     const rowTime = String(row.time || "").trim();
@@ -2109,9 +2584,9 @@ function ecHourlySpeech(location, ecData, hours = 12, unit = "C") {
     const rowMinute = getMinuteFromLocalIso(rowTime);
 
     return (
-      rowDate > nextHourDate ||
-      (rowDate === nextHourDate && rowHour > nextHourHour) ||
-      (rowDate === nextHourDate && rowHour === nextHourHour && rowMinute >= nextHourMinute)
+      rowDate > hourlyStartDate ||
+      (rowDate === hourlyStartDate && rowHour > hourlyStartHour) ||
+      (rowDate === hourlyStartDate && rowHour === hourlyStartHour && rowMinute >= hourlyStartMinute)
     );
   });
 
@@ -2687,14 +3162,41 @@ async function fetchChamplainLacolleIntoUs() {
   const portNumber = rawPortNumber.slice(-6);
   const url = `https://bwt.cbp.gov/api/bwtpublicmod/${portNumber}`;
 
-  const response = await axios.get(url, {
-    timeout: BORDER_API_TIMEOUT_MS,
-    headers: {
-      "User-Agent": "Mozilla/5.0",
-      "Accept": "application/json, text/plain, */*",
-      "Referer": "https://bwt.cbp.gov/details/04071201/POV"
-    }
+  console.log("CBP into US fetch start:", {
+    rawPortNumber,
+    portNumber,
+    url
   });
+
+  let response;
+
+  try {
+    response = await axios.get(url, {
+      timeout: BORDER_API_TIMEOUT_MS,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://bwt.cbp.gov/details/04071201/POV",
+        "Origin": "https://bwt.cbp.gov"
+      }
+    });
+
+    console.log("CBP into US fetch success:", {
+      status: response.status,
+      portNumber,
+      hasData: !!response.data,
+      dataKeys: response.data && typeof response.data === "object" ? Object.keys(response.data) : []
+    });
+  } catch (error) {
+    console.error("CBP into US fetch failed:", {
+      message: error.message,
+      code: error.code,
+      status: error.response?.status,
+      data: error.response?.data ? JSON.stringify(error.response.data).slice(0, 500) : ""
+    });
+
+    throw error;
+  }
 
   const port = response.data || {};
 
@@ -2870,14 +3372,42 @@ function speakWeatherError(twiml, error, fallbackText) {
 
 async function buildMainMenuResponse(req, twiml) {
   const activeLocation = getActiveLocation(req);
+
   if (activeLocation) {
     const canadaAlert = await fetchCanadianAlert(activeLocation);
-    if (canadaAlert) say(twiml, buildCanadianAlertSpeech(activeLocation, canadaAlert));
+
+    if (canadaAlert) {
+      const alertSpeech = buildCanadianAlertSpeech(activeLocation, canadaAlert);
+
+      if (activeLocation?.country === "CA") {
+        sayOrPlayCanadaAudio(twiml, activeLocation, "weather-alert", alertSpeech);
+      } else {
+        say(twiml, alertSpeech);
+      }
+    }
+
     setMenuState(req, "main-menu");
-    buildMainMenuInto(twiml, placeLabel(activeLocation));
+
+    if (activeLocation?.country === "CA") {
+      buildCanadaMainMenuInto(twiml, activeLocation);
+    } else {
+      buildMainMenuInto(twiml, placeLabel(activeLocation));
+    }
   } else {
     twiml.redirect({ method: "POST" }, "/location-menu-prompt");
   }
+}
+
+function buildCanadaForecastDayMenuText(location, forecast) {
+  const groups = buildEcDailyGroups(forecast, location);
+  const parts = ["For the full 7 day forecast, press 0."];
+
+  for (let i = 0; i < Math.min(9, groups.length); i++) {
+    parts.push(`Press ${i + 1} for ${groups[i].label}.`);
+  }
+
+  parts.push("Press star to go back to the previous menu.");
+  return parts.join(" ");
 }
 
 async function forecastDayPromptTwiml(location, forecast) {
@@ -2885,13 +3415,13 @@ async function forecastDayPromptTwiml(location, forecast) {
   const gather = twiml.gather(gatherOptions("/forecast-day", 8, 1));
 
   if (location?.country === "CA") {
-    const groups = buildEcDailyGroups(forecast, location);
-    const parts = ["For the full 7 day forecast, press 0."];
-    for (let i = 0; i < Math.min(9, groups.length); i++) {
-      parts.push(`Press ${i + 1} for ${groups[i].label}.`);
-    }
-    parts.push("Press star to go back to the previous menu.");
-    say(gather, parts.join(" "));
+    sayOrPlayCanadaAudio(
+      gather,
+      location,
+      "forecast-day-menu",
+      buildCanadaForecastDayMenuText(location, forecast)
+    );
+
     twiml.redirect({ method: "POST" }, "/forecast-menu");
     return twiml;
   }
@@ -2950,6 +3480,340 @@ async function buildPlaybackSpeech(location, forecast, playback, unit = "C") {
   if (playback.type === "all7") return sevenDayForecastSpeech(location, forecast, unit);
 
   return "";
+}
+
+function getCanadaWarmupLocations(locationFilter = "") {
+  const canadaLocations = Object.values(PRESET_LOCATIONS).filter(
+    (location) => location?.country === "CA"
+  );
+
+  const requested = cleanForFilename(locationFilter || "");
+
+  if (!requested) {
+    return canadaLocations;
+  }
+
+  return canadaLocations.filter((location) => {
+    const possibleNames = [
+      location?.id,
+      location?.label,
+      location?.name,
+      cacheKeyForLocation(location)
+    ]
+      .filter(Boolean)
+      .map((value) => cleanForFilename(value));
+
+    return possibleNames.includes(requested);
+  });
+}
+
+function normalizeWarmupType(type) {
+  const value = String(type || "all").toLowerCase().trim();
+
+  if (["main", "current", "hourly", "daily", "static", "border", "all"].includes(value)) {
+    return value;
+  }
+
+  return "all";
+}
+
+async function warmCanadaMainMenuAudio(location) {
+  return updateCanadaAudioNow({
+    location,
+    audioKey: "main-menu",
+    text: buildMainMenuText(placeLabel(location))
+  });
+}
+
+async function warmGlobalStaticMenusAudio() {
+  const results = [];
+
+  results.push(
+    await updateCanadaAudioNow({
+      location: GLOBAL_AUDIO_LOCATION,
+      audioKey: "root-menu",
+      text: buildRootMenuText()
+    })
+  );
+
+  results.push(
+    await updateCanadaAudioNow({
+      location: GLOBAL_AUDIO_LOCATION,
+      audioKey: "location-menu",
+      text: buildLocationMenuText()
+    })
+  );
+
+  results.push(
+    await updateCanadaAudioNow({
+      location: GLOBAL_AUDIO_LOCATION,
+      audioKey: "location-menu-back",
+      text: buildLocationMenuText({ allowBack: true })
+    })
+  );
+
+  results.push(
+    await updateCanadaAudioNow({
+      location: GLOBAL_AUDIO_LOCATION,
+      audioKey: "location-menu-voicemail",
+      text: buildLocationMenuText({ allowVoicemail: true })
+    })
+  );
+
+  results.push(
+    await updateCanadaAudioNow({
+      location: GLOBAL_AUDIO_LOCATION,
+      audioKey: "location-menu-back-voicemail",
+      text: buildLocationMenuText({ allowBack: true, allowVoicemail: true })
+    })
+  );
+  
+  for (const greeting of ["Good morning", "Good afternoon", "Good evening"]) {
+  results.push(
+    await updateCanadaAudioNow({
+      location: GLOBAL_AUDIO_LOCATION,
+      audioKey: greetingAudioKey(greeting),
+      text: `${greeting}.`
+    })
+  );
+}
+
+for (const unit of ["C", "F"]) {
+  results.push(
+    await updateCanadaAudioNow({
+      location: GLOBAL_AUDIO_LOCATION,
+      audioKey: canadaAfterForecastInstructionsAudioKey(unit),
+      text: buildCanadaAfterForecastInstructionsText(unit)
+    })
+  );
+}
+
+  results.push(
+    await updateCanadaAudioNow({
+      location: GLOBAL_AUDIO_LOCATION,
+      audioKey: "voicemail-prompt",
+      text: buildVoicemailPromptText()
+    })
+  );
+
+  results.push(
+    await updateCanadaAudioNow({
+      location: GLOBAL_AUDIO_LOCATION,
+      audioKey: "voicemail-no-recording",
+      text: buildVoicemailNoRecordingText()
+    })
+  );
+
+  results.push(
+    await updateCanadaAudioNow({
+      location: GLOBAL_AUDIO_LOCATION,
+      audioKey: "voicemail-saved",
+      text: buildVoicemailSavedText()
+    })
+  );
+
+  results.push(
+    await updateCanadaAudioNow({
+      location: GLOBAL_AUDIO_LOCATION,
+      audioKey: "voicemail-no-message",
+      text: buildVoicemailNoMessageText()
+    })
+  );
+
+  results.push(
+    await updateCanadaAudioNow({
+      location: GLOBAL_AUDIO_LOCATION,
+      audioKey: "border-menu",
+      text: buildBorderMenuText()
+    })
+  );
+
+  results.push(
+    await updateCanadaAudioNow({
+      location: GLOBAL_AUDIO_LOCATION,
+      audioKey: "border-submenu-canada",
+      text: buildBorderSubmenuText("canada")
+    })
+  );
+
+  results.push(
+    await updateCanadaAudioNow({
+      location: GLOBAL_AUDIO_LOCATION,
+      audioKey: "border-submenu-us",
+      text: buildBorderSubmenuText("us")
+    })
+  );
+
+  return results;
+}
+
+async function warmCanadaCurrentAudio(location) {
+  const forecast = await fetchCurrentForecast(location);
+  const results = [];
+
+  for (const unit of ["C", "F"]) {
+    results.push(
+      await updateCanadaAudioNow({
+        location,
+        audioKey: `playback-current-${unit}`,
+        text: ecCurrentWeatherSpeech(location, forecast, unit)
+      })
+    );
+  }
+
+  return results;
+}
+
+async function warmCanadaHourlyAudio(location) {
+  const forecast = await fetchForecast(location);
+  const results = [];
+
+  for (const unit of ["C", "F"]) {
+    results.push(
+      await updateCanadaAudioNow({
+        location,
+        audioKey: `playback-hourly-12h-${unit}`,
+        text: ecHourlySpeech(location, forecast, 12, unit)
+      })
+    );
+  }
+
+  return results;
+}
+
+async function warmCanadaDailyAudio(location) {
+  const forecast = await fetchForecast(location);
+  const results = [];
+
+  // Daily menu must warm together with the daily buttons.
+  results.push(
+    await updateCanadaAudioNow({
+      location,
+      audioKey: "forecast-day-menu",
+      text: buildCanadaForecastDayMenuText(location, forecast)
+    })
+  );
+
+  const groups = buildEcDailyGroups(forecast, location);
+  const maxDays = Math.min(9, groups.length);
+
+  for (const unit of ["C", "F"]) {
+    results.push(
+      await updateCanadaAudioNow({
+        location,
+        audioKey: `playback-all7-${unit}`,
+        text: ecAllForecastSpeech(location, forecast, unit)
+      })
+    );
+
+    for (let index = 0; index < maxDays; index++) {
+      results.push(
+        await updateCanadaAudioNow({
+          location,
+          audioKey: `playback-daily-${index}-${unit}`,
+          text: ecSingleForecastSpeech(location, forecast, index, unit)
+        })
+      );
+    }
+  }
+
+  return results;
+}
+
+async function warmBorderOfficialAudio(directionFilter = "") {
+  const results = [];
+  const requested = String(directionFilter || "").toLowerCase().trim();
+
+  let choices = ["official_into_canada", "official_into_us"];
+
+  if (requested === "canada" || requested === "into_canada" || requested === "official_into_canada") {
+    choices = ["official_into_canada"];
+  }
+
+  if (requested === "us" || requested === "usa" || requested === "into_us" || requested === "official_into_us") {
+    choices = ["official_into_us"];
+  }
+
+  for (const choice of choices) {
+    const result = await fetchBorderWait(choice);
+    const speech = buildBorderSpeech(result);
+
+    results.push(
+      await updateCanadaAudioNow({
+        location: GLOBAL_AUDIO_LOCATION,
+        audioKey: borderOfficialAudioKey(choice),
+        text: speech
+      })
+    );
+  }
+
+  return results;
+}
+
+async function warmCanadaAudio(type = "all", locationFilter = "", directionFilter = "") {
+  const warmupType = normalizeWarmupType(type);
+  const locations = getCanadaWarmupLocations(locationFilter);
+  const results = [];
+  
+  if (warmupType === "all" || warmupType === "static") {
+  results.push({
+    location: "Global",
+    type: "static",
+    locationFilter: "global",
+    items: await warmGlobalStaticMenusAudio()
+  });
+
+  if (warmupType === "static") {
+    return results;
+  }
+}
+
+  if (warmupType === "all" || warmupType === "border") {
+    results.push({
+      location: "Global",
+      type: "border",
+      locationFilter: "global",
+      directionFilter: directionFilter || "all",
+      items: await warmBorderOfficialAudio(directionFilter)
+    });
+
+    if (warmupType === "border") {
+      return results;
+    }
+  }
+
+  if (!locations.length) {
+    throw new Error(`No Canada warm-up location matched: ${locationFilter}`);
+  }
+
+  for (const location of locations) {
+    const locationResult = {
+      location: location.label || location.name,
+      type: warmupType,
+      locationFilter: locationFilter || "all",
+      items: []
+    };
+
+    if (warmupType === "all" || warmupType === "main") {
+      locationResult.items.push(await warmCanadaMainMenuAudio(location));
+    }
+
+    if (warmupType === "all" || warmupType === "current") {
+      locationResult.items.push(...await warmCanadaCurrentAudio(location));
+    }
+
+    if (warmupType === "all" || warmupType === "hourly") {
+      locationResult.items.push(...await warmCanadaHourlyAudio(location));
+    }
+
+    if (warmupType === "all" || warmupType === "daily") {
+      locationResult.items.push(...await warmCanadaDailyAudio(location));
+    }
+
+    results.push(locationResult);
+  }
+
+  return results;
 }
 
 async function buildStateTwiml(req, state, { push = true } = {}) {
@@ -3013,22 +3877,49 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
       return twiml;
     }
 
-    const forecast =
-      playback.type === "current"
-        ? await fetchCurrentForecast(location)
-        : await fetchForecast(location);
+const forecast =
+  playback.type === "current"
+    ? await fetchCurrentForecast(location)
+    : await fetchForecast(location);
 
-    const speech = await buildPlaybackSpeech(location, forecast, playback, getUnitPreference(req));
+const unit = getUnitPreference(req);
+const speech = await buildPlaybackSpeech(location, forecast, playback, unit);
 
-    if (!speech) {
-      say(twiml, "There is nothing to repeat yet.");
-      twiml.redirect({ method: "POST" }, "/root-menu-prompt");
-      return twiml;
-    }
+if (!speech) {
+  say(twiml, "There is nothing to repeat yet.");
+  twiml.redirect({ method: "POST" }, "/root-menu-prompt");
+  return twiml;
+}
 
-    return playbackWithStarTwiml(speech, {
-      rate: playback.speechRate || "100%"
-    });
+if (location?.country === "CA") {
+  let audioKey = `playback-${playback.type}-${unit}`;
+
+  if (playback.type === "hourly") {
+    audioKey = `playback-hourly-${Number(playback.hours || 12)}h-${unit}`;
+  }
+
+  if (playback.type === "daily") {
+    audioKey = `playback-daily-${Number(playback.index || 0)}-${unit}`;
+  }
+
+  if (playback.type === "all7") {
+    audioKey = `playback-all7-${unit}`;
+  }
+
+  const audioDecision = getCanadaAudioDecision(location, audioKey, speech);
+
+  if (audioDecision.mode === "play" && audioDecision.url) {
+    return playbackAudioWithStarTwiml(audioDecision.url);
+  }
+
+  return playbackWithStarTwiml(audioDecision.speech || speech, {
+    rate: playback.speechRate || "100%"
+  });
+}
+
+return playbackWithStarTwiml(speech, {
+  rate: playback.speechRate || "100%"
+});
   }
 
   if (state === "after-prompt") return afterActionTwiml(req);
@@ -3056,6 +3947,80 @@ app.get("/", (req, res) => {
   res.send("Weather and exchange phone server is running.");
 });
 
+app.all("/warm-canada-audio", async (req, res) => {
+  const body = req.body || {};
+
+  const providedSecret = String(req.query.secret || body.secret || "").trim();
+
+  if (!WARMUP_SECRET) {
+    return res.status(500).json({
+      ok: false,
+      error: "WARMUP_SECRET is not configured"
+    });
+  }
+
+  if (providedSecret !== WARMUP_SECRET) {
+    return res.status(403).json({
+      ok: false,
+      error: "Forbidden"
+    });
+  }
+
+  const type = normalizeWarmupType(req.query.type || body.type || "all");
+  const locationFilter = String(req.query.location || body.location || "").trim();
+  const directionFilter = String(req.query.direction || body.direction || "").trim();
+  const runInBackground =
+    String(req.query.background || body.background || "").trim() === "1";
+
+  try {
+    const startedAt = Date.now();
+
+    if (runInBackground) {
+      warmCanadaAudio(type, locationFilter, directionFilter)
+        .then((results) => {
+          console.log("Warm Canada audio background completed:", {
+            type,
+            location: locationFilter || "all",
+            tookMs: Date.now() - startedAt,
+            count: results?.length || 0
+          });
+        })
+        .catch((error) => {
+          console.error("Warm Canada audio background failed:", error.message);
+        });
+
+      return res.json({
+        ok: true,
+        started: true,
+        background: true,
+        type,
+        location: locationFilter || "all",
+        tookMs: Date.now() - startedAt
+      });
+    }
+
+    const results = await warmCanadaAudio(type, locationFilter, directionFilter);
+
+    return res.json({
+      ok: true,
+      background: false,
+      type,
+      location: locationFilter || "all",
+      tookMs: Date.now() - startedAt,
+      results
+    });
+  } catch (error) {
+    console.error("WARM-CANADA-AUDIO error:", error.message);
+
+    return res.status(500).json({
+      ok: false,
+      type,
+      location: locationFilter || "all",
+      error: error.message
+    });
+  }
+});
+
 app.get("/voice", (req, res) => {
   const twiml = new VoiceResponse();
   say(twiml, "Weather and Info Line is running. Please call the phone number to use the interactive menu.");
@@ -3067,7 +4032,14 @@ app.post("/voice", async (req, res) => {
   try {
     clearCallState(req);
     setUnitPreference(req, "C");
-    say(twiml, `${getGreetingForTime("America/Toronto")}.`);
+    const greeting = getGreetingForTime("America/Toronto");
+
+    sayOrPlayGlobalAudio(
+      twiml,
+      greetingAudioKey(greeting),
+      `${greeting}.`
+    );
+
     buildRootMenuInto(twiml);
     return res.type("text/xml").send(twiml.toString());
   } catch (error) {
@@ -3197,8 +4169,21 @@ app.post("/border-submenu", async (req, res) => {
     setLastPlayback(req, {
       type: "border",
       speech,
-      borderDirection: direction
+      borderDirection: direction,
+      borderChoice: choice
     });
+
+    if (choice === "official_into_canada" || choice === "official_into_us") {
+      const audioDecision = getCanadaAudioDecision(
+        GLOBAL_AUDIO_LOCATION,
+        borderOfficialAudioKey(choice),
+        speech
+      );
+
+      if (audioDecision.mode === "play" && audioDecision.url) {
+        return res.type("text/xml").send(playbackAudioWithStarTwiml(audioDecision.url));
+      }
+    }
 
     const playbackTwiml = playbackWithStarTwiml(speech);
     return res.type("text/xml").send(playbackTwiml);
@@ -3270,13 +4255,22 @@ app.post("/set-location-choice", async (req, res) => {
     const menuTwiml = await buildStateTwiml(req, "location-menu", { push: false });
     return res.type("text/xml").send(menuTwiml.toString());
   }
+  
+  const selectedLocation = PRESET_LOCATIONS[choice];
 
-  saveTemporaryLocationForCall(req, PRESET_LOCATIONS[choice]);
+  saveTemporaryLocationForCall(req, selectedLocation);
   clearPendingLocationChoice(req);
   pushMenuHistory(req, "main-menu");
   setMenuState(req, "main-menu");
-  buildMainMenuInto(twiml, PRESET_LOCATIONS[choice].label);
+
+  if (selectedLocation?.country === "CA") {
+    buildCanadaMainMenuInto(twiml, selectedLocation);
+  } else {
+    buildMainMenuInto(twiml, selectedLocation.label);
+  }
+
   return res.type("text/xml").send(twiml.toString());
+  saveTemporaryLocationForCall(req, PRESET_LOCATIONS[choice]);
 });
 
 app.post("/set-us-location-choice", async (req, res) => {
@@ -3623,9 +4617,18 @@ app.post("/handle-recording", (req, res) => {
       createdAt: new Date().toISOString(),
       source: "action"
     });
-    say(twiml, "Thank you. Your message has been saved.");
+
+    sayOrPlayGlobalAudio(
+      twiml,
+      "voicemail-saved",
+      buildVoicemailSavedText()
+    );
   } else {
-    say(twiml, "I did not receive a message.");
+    sayOrPlayGlobalAudio(
+      twiml,
+      "voicemail-no-message",
+      buildVoicemailNoMessageText()
+    );
   }
 
   twiml.redirect({ method: "POST" }, "/after-prompt");
