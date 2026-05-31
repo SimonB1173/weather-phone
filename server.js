@@ -131,7 +131,7 @@ const PRESET_LOCATIONS = {
     label: "Monsey",
     country: "US"
   },
-  "6": {
+    "6": {
     id: "monroe",
     name: "Monroe, New York, USA",
     latitude: 41.3326,
@@ -139,13 +139,35 @@ const PRESET_LOCATIONS = {
     timezone: "America/New_York",
     label: "Monroe",
     country: "US"
+  },
+  "7": {
+    id: "lakewood",
+    name: "Lakewood, New Jersey, USA",
+    latitude: 40.0821,
+    longitude: -74.2097,
+    timezone: "America/New_York",
+    label: "Lakewood",
+    country: "US",
+    postalCode: "08701"
+  },
+  "8": {
+    id: "toms-river",
+    name: "Toms River, New Jersey, USA",
+    latitude: 40.0145,
+    longitude: -74.2309,
+    timezone: "America/New_York",
+    label: "Toms River",
+    country: "US",
+    postalCode: "08755"
   }
 };
 
 const US_LOCATIONS = {
   "1": PRESET_LOCATIONS["4"],
   "2": PRESET_LOCATIONS["6"],
-  "3": PRESET_LOCATIONS["5"]
+  "3": PRESET_LOCATIONS["5"],
+  "4": PRESET_LOCATIONS["7"],
+  "5": PRESET_LOCATIONS["8"]
 };
 
 const CHAMPLAIN_LACOLLE = {
@@ -934,7 +956,7 @@ function parseLocationChoice(req) {
 
 function parseUSLocationChoice(req) {
   const digit = getDigits(req);
-  if (/^[1-3]$/.test(digit)) return digit;
+  if (/^[1-5]$/.test(digit)) return digit;
   return "";
 }
 
@@ -1191,7 +1213,7 @@ function locationMenuTwiml({ allowBack = false, allowVoicemail = false } = {}) {
 function usLocationMenuTwiml() {
   const twiml = new VoiceResponse();
   const gather = twiml.gather(gatherOptions("/set-us-location-choice", 7, 1));
-  say(gather, "For United States, press 1 for Brooklyn. 2 for Monroe. 3 for Monsey. Press star for the previous menu.");
+  say(gather, "For United States, press 1 for Brooklyn. Press 2 for Monroe. Press 3 for Monsey. Press 4 for Lakewood. Press 5 for Toms River. Press star for  the previous menu.");
   twiml.redirect({ method: "POST" }, "/us-location-menu-prompt");
   return twiml;
 }
