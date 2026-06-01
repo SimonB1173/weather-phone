@@ -131,7 +131,7 @@ const PRESET_LOCATIONS = {
     label: "Monsey",
     country: "US"
   },
-    "6": {
+  "6": {
     id: "monroe",
     name: "Monroe, New York, USA",
     latitude: 41.3326,
@@ -159,6 +159,46 @@ const PRESET_LOCATIONS = {
     label: "Toms River",
     country: "US",
     postalCode: "08755"
+  },
+  "9": {
+    id: "monticello",
+    name: "Monticello, New York, USA",
+    latitude: 41.6556,
+    longitude: -74.6893,
+    timezone: "America/New_York",
+    label: "Monticello",
+    country: "US",
+    postalCode: "12701"
+  },
+  "10": {
+    id: "fallsburg",
+    name: "South Fallsburg, New York, USA",
+    latitude: 41.7206,
+    longitude: -74.6343,
+    timezone: "America/New_York",
+    label: "Fallsburg",
+    country: "US",
+    postalCode: "12779"
+  },
+  "11": {
+    id: "white-lake",
+    name: "White Lake, New York, USA",
+    latitude: 41.6726,
+    longitude: -74.8285,
+    timezone: "America/New_York",
+    label: "White Lake",
+    country: "US",
+    postalCode: "12786"
+  },
+  "12": {
+    id: "woodbourne",
+    name: "Woodbourne, New York, USA",
+    latitude: 41.7604,
+    longitude: -74.5915,
+    timezone: "America/New_York",
+    label: "Woodbourne",
+    country: "US",
+    postalCode: "12788"
   }
 };
 
@@ -168,6 +208,13 @@ const US_LOCATIONS = {
   "3": PRESET_LOCATIONS["5"],
   "4": PRESET_LOCATIONS["7"],
   "5": PRESET_LOCATIONS["8"]
+};
+
+const CATSKILLS_LOCATIONS = {
+  "1": PRESET_LOCATIONS["9"],
+  "2": PRESET_LOCATIONS["10"],
+  "3": PRESET_LOCATIONS["11"],
+  "4": PRESET_LOCATIONS["12"]
 };
 
 const CHAMPLAIN_LACOLLE = {
@@ -600,6 +647,7 @@ function shouldTrackHistoryState(state) {
     "root-menu",
     "location-menu",
     "us-location-menu",
+    "catskills-menu",
     "main-menu",
     "forecast-menu",
     "exchange-menu"
@@ -956,7 +1004,13 @@ function parseLocationChoice(req) {
 
 function parseUSLocationChoice(req) {
   const digit = getDigits(req);
-  if (/^[1-5]$/.test(digit)) return digit;
+  if (/^[1-6]$/.test(digit)) return digit;
+  return "";
+}
+
+function parseCatskillsLocationChoice(req) {
+  const digit = getDigits(req);
+  if (/^[1-4]$/.test(digit)) return digit;
   return "";
 }
 
@@ -1213,8 +1267,26 @@ function locationMenuTwiml({ allowBack = false, allowVoicemail = false } = {}) {
 function usLocationMenuTwiml() {
   const twiml = new VoiceResponse();
   const gather = twiml.gather(gatherOptions("/set-us-location-choice", 7, 1));
-  say(gather, "For United States, press 1 for Brooklyn. Press 2 for Monroe. Press 3 for Monsey. Press 4 for Lakewood. Press 5 for Toms River. Press star for  the previous menu.");
+
+  say(
+    gather,
+    "For United States, press 1 for Brooklyn. Press 2 for Monroe. Press 3 for Monsey. Press 4 for Lakewood. Press 5 for Toms River. Press 6 for Catskills. Press star for the previous menu."
+  );
+
   twiml.redirect({ method: "POST" }, "/us-location-menu-prompt");
+  return twiml;
+}
+
+function catskillsMenuTwiml() {
+  const twiml = new VoiceResponse();
+  const gather = twiml.gather(gatherOptions("/set-catskills-location-choice", 7, 1));
+
+  say(
+    gather,
+    "For Catskills, press 1 for Monticello. Press 2 for Fallsburg. Press 3 for White Lake. Press 4 for Woodbourne. Press star for the previous menu."
+  );
+
+  twiml.redirect({ method: "POST" }, "/catskills-menu-prompt");
   return twiml;
 }
 
@@ -3850,6 +3922,8 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
 
   if (state === "us-location-menu") return usLocationMenuTwiml();
 
+  if (state === "catskills-menu") return catskillsMenuTwiml();
+
   if (state === "exchange-menu") return exchangeMenuTwiml();
 
   if (state === "exchange-amount") {
@@ -4241,6 +4315,11 @@ app.post("/us-location-menu-prompt", async (req, res) => {
   res.type("text/xml").send(twiml.toString());
 });
 
+app.post("/catskills-menu-prompt", async (req, res) => {
+  const twiml = await buildStateTwiml(req, "catskills-menu");
+  res.type("text/xml").send(twiml.toString());
+});
+
 app.post("/exchange-menu-prompt", async (req, res) => {
   const twiml = await buildStateTwiml(req, "exchange-menu");
   res.type("text/xml").send(twiml.toString());
@@ -4306,6 +4385,11 @@ app.post("/set-us-location-choice", async (req, res) => {
   const choice = parseUSLocationChoice(req);
   console.log("SET-US-LOCATION-CHOICE choice:", choice, "digits:", getDigits(req));
 
+  if (choice === "6") {
+    const catskillsTwiml = await buildStateTwiml(req, "catskills-menu");
+    return res.type("text/xml").send(catskillsTwiml.toString());
+  }
+
   if (!choice || !US_LOCATIONS[choice]) {
     say(twiml, "I did not understand that location choice.");
     const menuTwiml = await buildStateTwiml(req, "us-location-menu", { push: false });
@@ -4317,6 +4401,31 @@ app.post("/set-us-location-choice", async (req, res) => {
   pushMenuHistory(req, "main-menu");
   setMenuState(req, "main-menu");
   buildMainMenuInto(twiml, US_LOCATIONS[choice].label);
+  return res.type("text/xml").send(twiml.toString());
+});
+
+app.post("/set-catskills-location-choice", async (req, res) => {
+  const twiml = new VoiceResponse();
+
+  if (isBackKey(req)) {
+    const backTwiml = await goBackOneMenu(req);
+    return res.type("text/xml").send(backTwiml.toString());
+  }
+
+  const choice = parseCatskillsLocationChoice(req);
+  console.log("SET-CATSKILLS-LOCATION-CHOICE choice:", choice, "digits:", getDigits(req));
+
+  if (!choice || !CATSKILLS_LOCATIONS[choice]) {
+    say(twiml, "I did not understand that Catskills location choice.");
+    const menuTwiml = await buildStateTwiml(req, "catskills-menu", { push: false });
+    return res.type("text/xml").send(menuTwiml.toString());
+  }
+
+  saveTemporaryLocationForCall(req, CATSKILLS_LOCATIONS[choice]);
+  clearPendingLocationChoice(req);
+  pushMenuHistory(req, "main-menu");
+  setMenuState(req, "main-menu");
+  buildMainMenuInto(twiml, CATSKILLS_LOCATIONS[choice].label);
   return res.type("text/xml").send(twiml.toString());
 });
 
