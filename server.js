@@ -1121,6 +1121,18 @@ function buildLocationMenuText({ allowBack = false, allowVoicemail = false } = {
   return parts.join(" ");
 }
 
+function buildUSLocationMenuText() {
+  return "For United States, press 1 for Brooklyn. Press 2 for Monroe. Press 3 for Monsey. Press 4 for Lakewood. Press 5 for Toms River. Press 6 for Catskills. Press star for the previous menu.";
+}
+
+function buildCatskillsMenuText() {
+  return "For Catskills, press 1 for Monticello. Press 2 for Fallsburg. Press 3 for White Lake. Press 4 for Woodbourne. Press star for the previous menu.";
+}
+
+function isGoogleAudioLocation(location) {
+  return location?.country === "CA" || location?.country === "US";
+}
+
 function buildBorderMenuText() {
   return "Champlain border wait time. Press 1 for entering Canada. Press 2 for entering the United States. Press star for the previous menu.";
 }
@@ -1193,9 +1205,20 @@ function buildMainMenuText(activeLocationName) {
   return `${activeLocationName}. Press 1 for daily forecast. Press 2 for hourly forecast. Press 3 for current weather. Press star for the previous menu.`;
 }
 
-function buildMainMenuInto(twiml, activeLocationName) {
+function buildMainMenuInto(twiml, activeLocationName, location = null) {
   const gather = twiml.gather(gatherOptions("/menu", 8, 1));
-  say(gather, buildMainMenuText(activeLocationName));
+
+  if (isGoogleAudioLocation(location)) {
+    sayOrPlayCanadaAudio(
+      gather,
+      location,
+      "main-menu",
+      buildMainMenuText(activeLocationName)
+    );
+  } else {
+    say(gather, buildMainMenuText(activeLocationName));
+  }
+
   twiml.redirect({ method: "POST" }, "/main-menu");
 }
 
@@ -1268,9 +1291,10 @@ function usLocationMenuTwiml() {
   const twiml = new VoiceResponse();
   const gather = twiml.gather(gatherOptions("/set-us-location-choice", 7, 1));
 
-  say(
+  sayOrPlayGlobalAudio(
     gather,
-    "For United States, press 1 for Brooklyn. Press 2 for Monroe. Press 3 for Monsey. Press 4 for Lakewood. Press 5 for Toms River. Press 6 for Catskills. Press star for the previous menu."
+    "us-location-menu",
+    buildUSLocationMenuText()
   );
 
   twiml.redirect({ method: "POST" }, "/us-location-menu-prompt");
@@ -1281,9 +1305,10 @@ function catskillsMenuTwiml() {
   const twiml = new VoiceResponse();
   const gather = twiml.gather(gatherOptions("/set-catskills-location-choice", 7, 1));
 
-  say(
+  sayOrPlayGlobalAudio(
     gather,
-    "For Catskills, press 1 for Monticello. Press 2 for Fallsburg. Press 3 for White Lake. Press 4 for Woodbourne. Press star for the previous menu."
+    "catskills-menu",
+    buildCatskillsMenuText()
   );
 
   twiml.redirect({ method: "POST" }, "/catskills-menu-prompt");
@@ -1352,7 +1377,7 @@ function afterActionTwiml(req) {
     const unit = getUnitPreference(req);
     const activeLocation = getActiveLocation(req);
 
-    if (activeLocation?.country === "CA" && playback?.type) {
+    if (isGoogleAudioLocation(activeLocation) && playback?.type) {
       sayOrPlayGlobalAudio(
         gather,
         canadaAfterForecastInstructionsAudioKey(unit),
@@ -3485,7 +3510,7 @@ async function buildMainMenuResponse(req, twiml) {
     if (activeLocation?.country === "CA") {
       buildCanadaMainMenuInto(twiml, activeLocation);
     } else {
-      buildMainMenuInto(twiml, placeLabel(activeLocation));
+      buildMainMenuInto(twiml, placeLabel(activeLocation), activeLocation);
     }
   } else {
     twiml.redirect({ method: "POST" }, "/location-menu-prompt");
@@ -3523,11 +3548,20 @@ async function forecastDayPromptTwiml(location, forecast) {
   if (location?.country === "US" && forecast?.source === "nws") {
     const groups = buildNwsDailyGroups(forecast, location);
     const parts = ["For the full 7 day forecast, press 0."];
+
     for (let i = 0; i < Math.min(9, groups.length); i++) {
       parts.push(`Press ${i + 1} for ${groups[i].label}.`);
     }
+
     parts.push("Press star to go back to the previous menu.");
-    say(gather, parts.join(" "));
+
+    sayOrPlayCanadaAudio(
+      gather,
+      location,
+      "forecast-day-menu",
+      parts.join(" ")
+    );
+
     twiml.redirect({ method: "POST" }, "/forecast-menu");
     return twiml;
   }
@@ -3592,6 +3626,37 @@ function getCanadaWarmupLocations(locationFilter = "") {
       location?.id,
       location?.label,
       location?.name,
+      cacheKeyForLocation(location)
+    ]
+      .filter(Boolean)
+      .map((value) => cleanForFilename(value));
+
+    return possibleNames.includes(requested);
+  });
+}
+
+function getUsWarmupLocations(locationFilter = "") {
+  const allUsLocations = [
+    ...Object.values(US_LOCATIONS),
+    ...Object.values(CATSKILLS_LOCATIONS)
+  ].filter(Boolean);
+
+  const uniqueLocations = Array.from(
+    new Map(allUsLocations.map((location) => [location.id, location])).values()
+  );
+
+  const requested = cleanForFilename(locationFilter || "");
+
+  if (!requested) {
+    return uniqueLocations;
+  }
+
+  return uniqueLocations.filter((location) => {
+    const possibleNames = [
+      location?.id,
+      location?.label,
+      location?.name,
+      location?.postalCode,
       cacheKeyForLocation(location)
     ]
       .filter(Boolean)
@@ -3814,6 +3879,173 @@ async function warmCanadaDailyAudio(location) {
   return results;
 }
 
+async function warmUsMainMenuAudio(location) {
+  return updateCanadaAudioNow({
+    location,
+    audioKey: "main-menu",
+    text: buildMainMenuText(placeLabel(location))
+  });
+}
+
+async function warmUsCurrentAudio(location) {
+  const forecast = await fetchCurrentForecast(location);
+  const results = [];
+
+  for (const unit of ["C", "F"]) {
+    results.push(
+      await updateCanadaAudioNow({
+        location,
+        audioKey: `playback-current-${unit}`,
+        text: nwsCurrentWeatherSpeech(location, forecast, unit)
+      })
+    );
+  }
+
+  return results;
+}
+
+async function warmUsHourlyAudio(location) {
+  const forecast = await fetchForecast(location);
+  const results = [];
+
+  for (const unit of ["C", "F"]) {
+    results.push(
+      await updateCanadaAudioNow({
+        location,
+        audioKey: `playback-hourly-12h-${unit}`,
+        text: nwsHourlySpeech(location, forecast, 12, unit)
+      })
+    );
+  }
+
+  return results;
+}
+
+async function warmUsDailyAudio(location) {
+  const forecast = await fetchForecast(location);
+  const results = [];
+
+  const groups = buildNwsDailyGroups(forecast, location);
+  const menuParts = ["For the full 7 day forecast, press 0."];
+
+  for (let i = 0; i < Math.min(9, groups.length); i++) {
+    menuParts.push(`Press ${i + 1} for ${groups[i].label}.`);
+  }
+
+  menuParts.push("Press star to go back to the previous menu.");
+
+  results.push(
+    await updateCanadaAudioNow({
+      location,
+      audioKey: "forecast-day-menu",
+      text: menuParts.join(" ")
+    })
+  );
+
+  const maxDays = Math.min(9, groups.length);
+
+  for (const unit of ["C", "F"]) {
+    results.push(
+      await updateCanadaAudioNow({
+        location,
+        audioKey: `playback-all7-${unit}`,
+        text: nwsAllForecastSpeech(location, forecast, unit)
+      })
+    );
+
+    for (let index = 0; index < maxDays; index++) {
+      results.push(
+        await updateCanadaAudioNow({
+          location,
+          audioKey: `playback-daily-${index}-${unit}`,
+          text: nwsSingleForecastSpeech(location, forecast, index, unit)
+        })
+      );
+    }
+  }
+
+  return results;
+}
+
+async function warmUsStaticAudio(locationFilter = "") {
+  const results = [];
+  const locations = getUsWarmupLocations(locationFilter);
+
+  results.push(
+    await updateCanadaAudioNow({
+      location: GLOBAL_AUDIO_LOCATION,
+      audioKey: "us-location-menu",
+      text: buildUSLocationMenuText()
+    })
+  );
+
+  results.push(
+    await updateCanadaAudioNow({
+      location: GLOBAL_AUDIO_LOCATION,
+      audioKey: "catskills-menu",
+      text: buildCatskillsMenuText()
+    })
+  );
+
+  for (const location of locations) {
+    results.push(await warmUsMainMenuAudio(location));
+  }
+
+  return results;
+}
+
+async function warmUsAudio(type = "all", locationFilter = "") {
+  const warmupType = normalizeWarmupType(type);
+  const locations = getUsWarmupLocations(locationFilter);
+  const results = [];
+
+  if (warmupType === "all" || warmupType === "static") {
+    results.push({
+      location: "United States",
+      type: "static",
+      locationFilter: locationFilter || "all",
+      items: await warmUsStaticAudio(locationFilter)
+    });
+
+    if (warmupType === "static") {
+      return results;
+    }
+  }
+
+  if (!locations.length) {
+    throw new Error(`No U.S. warm-up location matched: ${locationFilter}`);
+  }
+
+  for (const location of locations) {
+    const locationResult = {
+      location: location.label || location.name,
+      type: warmupType,
+      locationFilter: locationFilter || "all",
+      items: []
+    };
+
+    if (warmupType === "all" || warmupType === "main") {
+      locationResult.items.push(await warmUsMainMenuAudio(location));
+    }
+
+    if (warmupType === "all" || warmupType === "current") {
+      locationResult.items.push(...await warmUsCurrentAudio(location));
+    }
+
+    if (warmupType === "all" || warmupType === "hourly") {
+      locationResult.items.push(...await warmUsHourlyAudio(location));
+    }
+
+    if (warmupType === "all" || warmupType === "daily") {
+      locationResult.items.push(...await warmUsDailyAudio(location));
+    }
+
+    results.push(locationResult);
+  }
+
+  return results;
+}
+
 async function warmBorderOfficialAudio(directionFilter = "") {
   const results = [];
   const requested = String(directionFilter || "").toLowerCase().trim();
@@ -3987,7 +4219,7 @@ if (!speech) {
   return twiml;
 }
 
-if (location?.country === "CA") {
+if (isGoogleAudioLocation(location)) {
   let audioKey = `playback-${playback.type}-${unit}`;
 
   if (playback.type === "hourly") {
@@ -4107,6 +4339,79 @@ app.all("/warm-canada-audio", async (req, res) => {
     });
   } catch (error) {
     console.error("WARM-CANADA-AUDIO error:", error.message);
+
+    return res.status(500).json({
+      ok: false,
+      type,
+      location: locationFilter || "all",
+      error: error.message
+    });
+  }
+});
+
+app.all("/warm-us-audio", async (req, res) => {
+  const body = req.body || {};
+
+  const providedSecret = String(req.query.secret || body.secret || "").trim();
+
+  if (!WARMUP_SECRET) {
+    return res.status(500).json({
+      ok: false,
+      error: "WARMUP_SECRET is not configured"
+    });
+  }
+
+  if (providedSecret !== WARMUP_SECRET) {
+    return res.status(403).json({
+      ok: false,
+      error: "Forbidden"
+    });
+  }
+
+  const type = normalizeWarmupType(req.query.type || body.type || "all");
+  const locationFilter = String(req.query.location || body.location || "").trim();
+  const runInBackground =
+    String(req.query.background || body.background || "").trim() === "1";
+
+  try {
+    const startedAt = Date.now();
+
+    if (runInBackground) {
+      warmUsAudio(type, locationFilter)
+        .then((results) => {
+          console.log("Warm U.S. audio background completed:", {
+            type,
+            location: locationFilter || "all",
+            tookMs: Date.now() - startedAt,
+            count: results?.length || 0
+          });
+        })
+        .catch((error) => {
+          console.error("Warm U.S. audio background failed:", error.message);
+        });
+
+      return res.json({
+        ok: true,
+        started: true,
+        background: true,
+        type,
+        location: locationFilter || "all",
+        tookMs: Date.now() - startedAt
+      });
+    }
+
+    const results = await warmUsAudio(type, locationFilter);
+
+    return res.json({
+      ok: true,
+      background: false,
+      type,
+      location: locationFilter || "all",
+      tookMs: Date.now() - startedAt,
+      results
+    });
+  } catch (error) {
+    console.error("WARM-US-AUDIO error:", error.message);
 
     return res.status(500).json({
       ok: false,
