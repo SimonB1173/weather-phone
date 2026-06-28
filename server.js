@@ -316,6 +316,37 @@ function getDigits(req) {
   return String(req.body.Digits || "").trim();
 }
 
+function resetNoInputCount(req) {
+  noInputCountByCall.delete(getCallKey(req));
+}
+
+function noInputHangupTwiml() {
+  const twiml = new VoiceResponse();
+  sayOrPlayGlobalAudio(
+    twiml,
+    "no-input-goodbye",
+    "No input received. Goodbye."
+  );
+  twiml.hangup();
+  return twiml;
+}
+
+function trackNoInputOrContinue(req, state, maxNoInputs = 3) {
+  const key = getCallKey(req);
+  const current = noInputCountByCall.get(key) || 0;
+  const next = current + 1;
+  noInputCountByCall.set(key, next);
+
+  console.log("NO-INPUT count:", next, "state:", state, "CallSid:", key);
+
+  if (next >= maxNoInputs) {
+    clearCallState(req);
+    return noInputHangupTwiml();
+  }
+
+  return null;
+}
+
 function placeLabel(location) {
   return location?.label || location?.name || "your area";
 }
@@ -704,6 +735,7 @@ function clearCallState(req) {
   exchangeSelectionByCall.delete(key);
   borderDirectionByCall.delete(key);
   introAdPlayedByCall.delete(key);
+  noInputCountByCall.delete(key);
 }
 
 function appendVoicemailRecord(record) {
@@ -4501,6 +4533,11 @@ app.post("/voice", async (req, res) => {
 });
 
 app.post("/root-menu-prompt", async (req, res) => {
+  const noInputTwiml = trackNoInputOrContinue(req, "root-menu");
+  if (noInputTwiml) {
+    return res.type("text/xml").send(noInputTwiml.toString());
+  }
+
   const twiml = await buildStateTwiml(req, "root-menu");
   res.type("text/xml").send(twiml.toString());
 });
@@ -4508,6 +4545,7 @@ app.post("/root-menu-prompt", async (req, res) => {
 app.post("/root-menu", async (req, res) => {
   const choice = parseRootMenuChoice(req);
   const twiml = new VoiceResponse();
+  resetNoInputCount(req);
 
   try {
     if (choice === "1") {
@@ -4553,6 +4591,7 @@ app.post("/border-menu-prompt", async (req, res) => {
 
 app.post("/border-menu", async (req, res) => {
   const twiml = new VoiceResponse();
+  resetNoInputCount(req);
 
   try {
     if (isBackKey(req)) {
@@ -4591,6 +4630,7 @@ app.post("/border-submenu-prompt", async (req, res) => {
 
 app.post("/border-submenu", async (req, res) => {
   const twiml = new VoiceResponse();
+  resetNoInputCount(req);
 
   try {
     if (isBackKey(req)) {
@@ -4687,6 +4727,7 @@ app.post("/exchange-amount-prompt", async (req, res) => {
 
 app.post("/set-location-choice", async (req, res) => {
   const twiml = new VoiceResponse();
+  resetNoInputCount(req);
 
   if (isBackKey(req)) {
     const backTwiml = await goBackOneMenu(req);
@@ -4731,6 +4772,7 @@ app.post("/set-location-choice", async (req, res) => {
 
 app.post("/set-us-location-choice", async (req, res) => {
   const twiml = new VoiceResponse();
+  resetNoInputCount(req);
 
   if (isBackKey(req)) {
     const backTwiml = await goBackOneMenu(req);
@@ -4761,6 +4803,7 @@ app.post("/set-us-location-choice", async (req, res) => {
 
 app.post("/set-catskills-location-choice", async (req, res) => {
   const twiml = new VoiceResponse();
+  resetNoInputCount(req);
 
   if (isBackKey(req)) {
     const backTwiml = await goBackOneMenu(req);
@@ -4786,6 +4829,7 @@ app.post("/set-catskills-location-choice", async (req, res) => {
 
 app.post("/set-exchange-choice", async (req, res) => {
   const twiml = new VoiceResponse();
+  resetNoInputCount(req);
 
   if (isBackKey(req)) {
     const backTwiml = await goBackOneMenu(req);
@@ -4841,6 +4885,7 @@ app.post("/menu", async (req, res) => {
   const choice = parseMainMenuChoice(req);
   const location = getActiveLocation(req);
   const twiml = new VoiceResponse();
+  resetNoInputCount(req);
 
   console.log("MENU CallSid:", req.body.CallSid, "From:", req.body.From);
   console.log("MENU choice:", choice, "digits:", getDigits(req));
@@ -4892,6 +4937,7 @@ app.post("/menu", async (req, res) => {
 app.post("/forecast-day", async (req, res) => {
   const location = getActiveLocation(req);
   const twiml = new VoiceResponse();
+  resetNoInputCount(req);
 
   console.log("FORECAST-DAY CallSid:", req.body.CallSid, "From:", req.body.From);
   console.log("FORECAST-DAY active location:", location, "digits:", getDigits(req));
@@ -4959,6 +5005,7 @@ app.post("/forecast-day", async (req, res) => {
 
 app.post("/exchange-amount", async (req, res) => {
   const twiml = new VoiceResponse();
+  resetNoInputCount(req);
 
   try {
     if (isBackKey(req)) {
@@ -5001,6 +5048,7 @@ app.post("/exchange-amount", async (req, res) => {
 
 app.post("/during-playback", async (req, res) => {
   const playback = getLastPlayback(req);
+  resetNoInputCount(req);
 
   if (isBackKey(req)) {
     if (playback?.type === "border") {
@@ -5031,6 +5079,7 @@ app.post("/after-prompt", async (req, res) => {
 
 app.post("/after", async (req, res) => {
   const twiml = new VoiceResponse();
+  resetNoInputCount(req);
   const playback = getLastPlayback(req);
 
   console.log("AFTER Digits:", getDigits(req));
