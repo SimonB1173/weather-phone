@@ -52,6 +52,8 @@ const unitPreferenceByCall = new Map();
 const exchangeSelectionByCall = new Map();
 const borderDirectionByCall = new Map();
 const introAdPlayedByCall = new Map();
+const noInputCountByCall = new Map();
+
 
 const FORECAST_CACHE_MS = 15 * 60 * 1000;
 const STALE_FORECAST_MS = 2 * 60 * 1000;
