@@ -51,6 +51,7 @@ const menuHistoryByCall = new Map();
 const unitPreferenceByCall = new Map();
 const exchangeSelectionByCall = new Map();
 const borderDirectionByCall = new Map();
+const introAdPlayedByCall = new Map();
 
 const FORECAST_CACHE_MS = 15 * 60 * 1000;
 const STALE_FORECAST_MS = 2 * 60 * 1000;
@@ -702,6 +703,7 @@ function clearCallState(req) {
   unitPreferenceByCall.delete(key);
   exchangeSelectionByCall.delete(key);
   borderDirectionByCall.delete(key);
+  introAdPlayedByCall.delete(key);
 }
 
 function appendVoicemailRecord(record) {
@@ -1098,8 +1100,16 @@ function greetingAudioKey(greeting) {
   return `greeting-${cleanForFilename(greeting)}`;
 }
 
+function buildRootMenuIntroText() {
+  return "Welcome to Weather and Info Line.";
+}
+
+function buildRootMenuChoicesText() {
+  return "Press 1 for weather. Press 2 for exchange rate. Press 4 for border wait time. To advertise, or to leave comments and feedback, press 9.";
+}
+
 function buildRootMenuText() {
-  return "Welcome to Weather and Info Line. Press 1 for weather. Press 2 for exchange rate. Press 4 for border wait time. To advertise, or to leave comments and feedback, press 9.";
+  return `${buildRootMenuIntroText()} ${buildRootMenuChoicesText()}`;
 }
 
 function buildLocationMenuText({ allowBack = false, allowVoicemail = false } = {}) {
@@ -1189,13 +1199,45 @@ function sayOrPlayGlobalAudio(twimlNode, audioKey, text) {
   );
 }
 
-function buildRootMenuInto(twiml) {
+function playIntroAdIfNeeded(twiml, req = null) {
+  const introAdEnabled = String(process.env.INTRO_AD_ENABLED || "0").trim() === "1";
+  const introAdUrl = String(process.env.INTRO_AD_AUDIO_URL || "").trim();
+  const oncePerCall = String(process.env.INTRO_AD_ONCE_PER_CALL || "1").trim() !== "0";
+
+  if (!introAdEnabled || !introAdUrl) {
+    return;
+  }
+
+  if (!req || !oncePerCall) {
+    twiml.play(introAdUrl);
+    return;
+  }
+
+  const key = getCallKey(req);
+
+  if (introAdPlayedByCall.get(key)) {
+    return;
+  }
+
+  twiml.play(introAdUrl);
+  introAdPlayedByCall.set(key, true);
+}
+
+function buildRootMenuInto(twiml, req = null) {
+  sayOrPlayGlobalAudio(
+    twiml,
+    "root-menu-intro",
+    buildRootMenuIntroText()
+  );
+
+  playIntroAdIfNeeded(twiml, req);
+
   const gather = twiml.gather(gatherOptions("/root-menu", 8, 1));
 
   sayOrPlayGlobalAudio(
     gather,
-    "root-menu",
-    buildRootMenuText()
+    "root-menu-choices",
+    buildRootMenuChoicesText()
   );
 
   twiml.redirect({ method: "POST" }, "/root-menu-prompt");
@@ -1257,9 +1299,9 @@ function buildBorderSubmenuInto(twiml, direction) {
   twiml.redirect({ method: "POST" }, "/border-submenu-prompt");
 }
 
-function rootMenuTwiml() {
+function rootMenuTwiml(req = null) {
   const twiml = new VoiceResponse();
-  buildRootMenuInto(twiml);
+  buildRootMenuInto(twiml, req);
   return twiml;
 }
 
@@ -3690,8 +3732,16 @@ async function warmGlobalStaticMenusAudio() {
   results.push(
     await updateCanadaAudioNow({
       location: GLOBAL_AUDIO_LOCATION,
-      audioKey: "root-menu",
-      text: buildRootMenuText()
+      audioKey: "root-menu-intro",
+      text: buildRootMenuIntroText()
+    })
+  );
+
+  results.push(
+    await updateCanadaAudioNow({
+      location: GLOBAL_AUDIO_LOCATION,
+      audioKey: "root-menu-choices",
+      text: buildRootMenuChoicesText()
     })
   );
 
@@ -4146,7 +4196,7 @@ async function buildStateTwiml(req, state, { push = true } = {}) {
   if (push && shouldTrackHistoryState(state)) pushMenuHistory(req, state);
   setMenuState(req, state);
 
-  if (state === "root-menu") return rootMenuTwiml();
+  if (state === "root-menu") return rootMenuTwiml(req);
 
   if (state === "location-menu") {
     return locationMenuTwiml({ allowBack: true, allowVoicemail: false });
@@ -4441,7 +4491,7 @@ app.post("/voice", async (req, res) => {
       `${greeting}.`
     );
 
-    buildRootMenuInto(twiml);
+    buildRootMenuInto(twiml, req);
     return res.type("text/xml").send(twiml.toString());
   } catch (error) {
     console.error("VOICE route error:", error.message);
