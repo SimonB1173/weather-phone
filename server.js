@@ -1101,7 +1101,7 @@ function greetingAudioKey(greeting) {
 }
 
 function buildRootMenuIntroText() {
-  return "Welcome to Weather and Info Line.";
+  return "Welcome to the Weather and Info Line. Country weather forecasts are coming this week.";
 }
 
 function buildRootMenuChoicesText() {
