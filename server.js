@@ -408,7 +408,13 @@ function publicAudioUrlForObject(objectName) {
   return `${PUBLIC_AUDIO_BASE_URL.replace(/\/+$/, "")}/${objectName}`;
 }
 
-async function generateAndUploadSpeechAudio({ objectName, speech }) {
+async function generateAndUploadSpeechAudio({
+  objectName,
+  speech,
+  speechHash,
+  audioKey,
+  location
+}) {
   if (!GCS_BUCKET_NAME || !PUBLIC_AUDIO_BASE_URL) {
     throw new Error("Google Cloud audio storage is not configured");
   }
@@ -438,11 +444,61 @@ async function generateAndUploadSpeechAudio({ objectName, speech }) {
       resumable: false,
       contentType: "audio/wav",
       metadata: {
-        cacheControl: "no-cache, max-age=0"
+        cacheControl: "public, max-age=86400",
+        metadata: {
+          speechHash,
+          voice: GOOGLE_TTS_VOICE,
+          audioKey: String(audioKey || ""),
+          location: location?.label || location?.name || "",
+          updatedAt: new Date().toISOString()
+        }
       }
     });
 
   return publicAudioUrlForObject(objectName);
+}
+
+async function getExistingGcsAudioIfHashMatches(objectName, speechHash) {
+  if (!GCS_BUCKET_NAME || !PUBLIC_AUDIO_BASE_URL) {
+    return null;
+  }
+
+  try {
+    const file = storageClient.bucket(GCS_BUCKET_NAME).file(objectName);
+    const [exists] = await file.exists();
+
+    if (!exists) {
+      return null;
+    }
+
+    const [metadata] = await file.getMetadata();
+    const existingHash = metadata?.metadata?.speechHash || "";
+    const existingVoice = metadata?.metadata?.voice || "";
+
+    if (existingHash === speechHash && existingVoice === GOOGLE_TTS_VOICE) {
+      return {
+        url: publicAudioUrlForObject(objectName),
+        hash: existingHash,
+        voice: existingVoice
+      };
+    }
+
+    console.log("GCS audio exists but hash does not match:", {
+      objectName,
+      existingHash,
+      newHash: speechHash,
+      existingVoice,
+      voice: GOOGLE_TTS_VOICE
+    });
+
+    return null;
+  } catch (error) {
+    console.error("GCS metadata check failed:", {
+      objectName,
+      message: error.message
+    });
+    return null;
+  }
 }
 
 function refreshCanadaAudioInBackground({ objectName, speech, speechHash, location, audioKey }) {
@@ -456,26 +512,61 @@ function refreshCanadaAudioInBackground({ objectName, speech, speechHash, locati
     return;
   }
 
-  const job = generateAndUploadSpeechAudio({
-    objectName,
-    speech
-  })
-    .then((uploadedUrl) => {
+  const job = (async () => {
+    const gcsHit = await getExistingGcsAudioIfHashMatches(objectName, speechHash);
+
+    if (gcsHit?.url) {
       const updatedCache = loadJsonFile(CANADA_AUDIO_CACHE_FILE, {});
 
       updatedCache[objectName] = {
         hash: speechHash,
-        url: uploadedUrl,
+        url: gcsHit.url,
         updatedAt: new Date().toISOString(),
         location: location?.label || location?.name || "",
         audioKey,
-        voice: GOOGLE_TTS_VOICE
+        voice: GOOGLE_TTS_VOICE,
+        source: "gcs-metadata"
       };
 
       saveJsonFile(CANADA_AUDIO_CACHE_FILE, updatedCache);
 
-      console.log("Canada audio updated:", objectName);
-    })
+      console.log("TTS SKIPPED, GCS audio already matches:", objectName);
+      return;
+    }
+
+    console.log("TTS WILL RUN:", {
+      objectName,
+      audioKey,
+      voice: GOOGLE_TTS_VOICE,
+      newHash: speechHash,
+      source: "background-refresh",
+      speechPreview: speech.slice(0, 160)
+    });
+
+    const uploadedUrl = await generateAndUploadSpeechAudio({
+      objectName,
+      speech,
+      speechHash,
+      audioKey,
+      location
+    });
+
+    const updatedCache = loadJsonFile(CANADA_AUDIO_CACHE_FILE, {});
+
+    updatedCache[objectName] = {
+      hash: speechHash,
+      url: uploadedUrl,
+      updatedAt: new Date().toISOString(),
+      location: location?.label || location?.name || "",
+      audioKey,
+      voice: GOOGLE_TTS_VOICE,
+      source: "generated"
+    };
+
+    saveJsonFile(CANADA_AUDIO_CACHE_FILE, updatedCache);
+
+    console.log("Canada audio updated:", objectName);
+  })()
     .catch((error) => {
       console.error("Canada audio background update failed:", error.message);
     })
@@ -515,6 +606,33 @@ async function updateCanadaAudioNow({ location, audioKey, text }) {
     };
   }
 
+  const gcsHit = await getExistingGcsAudioIfHashMatches(objectName, speechHash);
+
+  if (gcsHit?.url) {
+    const updatedCache = loadJsonFile(CANADA_AUDIO_CACHE_FILE, {});
+
+    updatedCache[objectName] = {
+      hash: speechHash,
+      url: gcsHit.url,
+      updatedAt: new Date().toISOString(),
+      location: location?.label || location?.name || "",
+      audioKey,
+      voice: GOOGLE_TTS_VOICE,
+      source: "gcs-metadata"
+    };
+
+    saveJsonFile(CANADA_AUDIO_CACHE_FILE, updatedCache);
+
+    console.log("TTS SKIPPED, GCS audio already matches:", objectName);
+
+    return {
+      status: "unchanged-gcs",
+      objectName,
+      url: gcsHit.url,
+      audioKey
+    };
+  }
+
   if (canadaAudioJobsInFlight.has(objectName)) {
     console.log("Warm-up waiting for existing Canada audio job:", objectName);
     await canadaAudioJobsInFlight.get(objectName).catch(() => null);
@@ -543,9 +661,24 @@ console.log("TTS WILL RUN:", {
   speechPreview: cleanedSpeech.slice(0, 160)
 });
 
+    console.log("TTS WILL RUN:", {
+    objectName,
+    audioKey,
+    voice: GOOGLE_TTS_VOICE,
+    newHash: speechHash,
+    existingHash: existing?.hash || "",
+    existingUrl: existing?.url || "",
+    sameHash: existing?.hash === speechHash,
+    source: "warmup-now",
+    speechPreview: cleanedSpeech.slice(0, 160)
+  });
+
   const uploadedUrl = await generateAndUploadSpeechAudio({
     objectName,
-    speech: cleanedSpeech
+    speech: cleanedSpeech,
+    speechHash,
+    audioKey,
+    location
   });
 
   const updatedCache = loadJsonFile(CANADA_AUDIO_CACHE_FILE, {});
