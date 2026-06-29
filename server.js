@@ -532,6 +532,17 @@ async function updateCanadaAudioNow({ location, audioKey, text }) {
     }
   }
 
+console.log("TTS WILL RUN:", {
+  objectName,
+  audioKey,
+  voice: GOOGLE_TTS_VOICE,
+  newHash: speechHash,
+  existingHash: existing?.hash || "",
+  existingUrl: existing?.url || "",
+  sameHash: existing?.hash === speechHash,
+  speechPreview: cleanedSpeech.slice(0, 160)
+});
+
   const uploadedUrl = await generateAndUploadSpeechAudio({
     objectName,
     speech: cleanedSpeech
