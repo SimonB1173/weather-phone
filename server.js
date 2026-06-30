@@ -1402,15 +1402,15 @@ function playIntroAdIfNeeded(twiml, req = null) {
 }
 
 function buildRootMenuInto(twiml, req = null) {
+  const gather = twiml.gather(gatherOptions("/root-menu", 8, 1));
+
   sayOrPlayGlobalAudio(
-    twiml,
+    gather,
     "root-menu-intro",
     buildRootMenuIntroText()
   );
 
-  playIntroAdIfNeeded(twiml, req);
-
-  const gather = twiml.gather(gatherOptions("/root-menu", 8, 1));
+  playIntroAdIfNeeded(gather, req);
 
   sayOrPlayGlobalAudio(
     gather,
