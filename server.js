@@ -4447,7 +4447,7 @@ if (!speech) {
   return twiml;
 }
 
-if (isGoogleAudioLocation(location)) {
+if (location?.country === "CA") {
   let audioKey = `playback-${playback.type}-${unit}`;
 
   if (playback.type === "hourly") {
